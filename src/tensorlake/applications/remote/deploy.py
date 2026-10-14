@@ -60,6 +60,7 @@ def deploy_applications(
     load_source_dir_modules: bool = False,
     api_client=None,
     function_images: dict[tuple[str, str], str] | None = None,
+    docker_config_json: str | None = None,
 ) -> None:
     """Deploys all applications in the supplied .py file so they are runnable in remote mode (i.e. on Tensorlake Cloud).
 
@@ -92,6 +93,7 @@ def deploy_applications(
         function_images = prepare_application_images(
             functions,
             context_dir=applications_dir_path,
+            docker_config_json=docker_config_json,
         )
     app_code: bytes = zip_code(
         code_dir_path=applications_dir_path,

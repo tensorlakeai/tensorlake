@@ -106,6 +106,16 @@ def _build_context_from_env() -> Context:
 # --- Rust delegation -------------------------------------------------------
 
 
+def _load_docker_config_json() -> str:
+    """Capture Docker config contents before a CLI starts other work."""
+    try:
+        from tensorlake._cloud_sdk import load_docker_config_json
+    except ImportError:
+        from _cloud_sdk import load_docker_config_json
+
+    return load_docker_config_json()
+
+
 def _rust_build_sandbox_image(*args, **kwargs) -> str:
     try:
         from tensorlake._cloud_sdk import (
@@ -225,6 +235,7 @@ def _run_rust_image_create(
     cas: bool,
     allow_pat: bool = False,
     emit: EmitFn,
+    docker_config_json: str | None = None,
 ) -> dict:
     ctx, token = _resolve_build_credentials(allow_pat=allow_pat)
     use_explicit_scope = allow_pat and ctx.api_key is None
@@ -251,6 +262,7 @@ def _run_rust_image_create(
         context_dir,
         cas=cas,
         emit=_forwarder(emit),
+        docker_config_json=docker_config_json,
     )
     return _finish_image_registration(result_json, registered_name, emit)
 
@@ -267,6 +279,7 @@ def _run_rust_image_import(
     docker_compat: bool,
     allow_pat: bool = False,
     emit: EmitFn,
+    docker_config_json: str | None = None,
 ) -> dict:
     ctx, token = _resolve_build_credentials(allow_pat=allow_pat)
     use_explicit_scope = allow_pat and ctx.api_key is None
@@ -298,6 +311,7 @@ def _run_rust_image_import(
         docker_compat,
         cas=False,
         emit=_forwarder(emit),
+        docker_config_json=docker_config_json,
     )
     return _finish_image_registration(result_json, registered_name, emit)
 
@@ -564,6 +578,7 @@ def build_sandbox_image(
     verbose: bool = False,
     emit: EmitFn | None = None,
     _allow_pat: bool = False,
+    docker_config_json: str | None = None,
 ) -> dict:
     """Build a sandbox image from an :class:`Image` or a Dockerfile path.
 
@@ -591,6 +606,8 @@ def build_sandbox_image(
             and an empty context (just the generated Dockerfile) is uploaded so
             cwd is not archived. Ignored when ``source`` is a Dockerfile path
             (the Dockerfile's parent directory is used instead).
+        docker_config_json: Docker config JSON contents for this call. Omit to
+            discover local config at entry; pass "{}" to disable discovery.
         verbose: Print progress to stderr. Ignored if ``emit`` is provided.
         emit: Callback invoked for each build event. Takes precedence over
             ``verbose``. Use this to integrate the builder into custom UIs.
@@ -672,6 +689,7 @@ def build_sandbox_image(
                 is_public=is_public,
                 docker_compat=docker_compat,
                 cas=False,
+                docker_config_json=docker_config_json,
                 allow_pat=_allow_pat,
                 emit=emit,
             )
@@ -694,6 +712,7 @@ def import_sandbox_image(
     verbose: bool = False,
     emit: EmitFn | None = None,
     _allow_pat: bool = False,
+    docker_config_json: str | None = None,
 ) -> dict:
     """Import a registry image directly into a sandbox image — no Docker.
 
@@ -719,6 +738,8 @@ def import_sandbox_image(
         is_public: Make the registered image publicly accessible.
         docker_compat: Use Docker/BuildKit max compatibility mode (import is
             slower and uses more memory and disk space on builder sandbox).
+        docker_config_json: Docker config JSON contents for this call. Omit to
+            discover local config at entry; pass "{}" to disable discovery.
         verbose: Print progress to stderr. Ignored if ``emit`` is provided.
         emit: Callback invoked for each build event. Takes precedence over
             ``verbose``.
@@ -758,6 +779,7 @@ def import_sandbox_image(
             builder_disk_mb=builder_disk_mb,
             is_public=is_public,
             docker_compat=docker_compat,
+            docker_config_json=docker_config_json,
             allow_pat=_allow_pat,
             emit=emit,
         )
@@ -781,6 +803,7 @@ def build_sandbox_application_image(
     verbose: bool = False,
     emit: EmitFn | None = None,
     _allow_pat: bool = False,
+    docker_config_json: str | None = None,
 ) -> dict:
     """Build an Applications runtime image as a registered sandbox template.
 
@@ -822,6 +845,7 @@ def build_sandbox_application_image(
             is_public=is_public,
             docker_compat=False,
             cas=False,
+            docker_config_json=docker_config_json,
             allow_pat=_allow_pat,
             emit=emit,
         )

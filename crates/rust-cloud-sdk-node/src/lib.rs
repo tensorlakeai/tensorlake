@@ -26,6 +26,13 @@ use tensorlake::sandbox_images::{
     import_sandbox_image as rust_import_sandbox_image,
 };
 
+/// Capture Docker config contents at CLI startup, before asynchronous work.
+#[napi]
+pub fn load_docker_config_json() -> Result<String> {
+    tensorlake::docker_config::load_docker_config_json()
+        .map_err(|error| Error::from_reason(error.to_string()))
+}
+
 #[napi(object)]
 pub struct SandboxImageBuildOptionsJs {
     pub api_url: String,
@@ -45,6 +52,8 @@ pub struct SandboxImageBuildOptionsJs {
     pub use_scope_headers: Option<bool>,
     pub user_agent: Option<String>,
     pub docker_compat: Option<bool>,
+    /// Docker config JSON contents. Omission discovers local configuration.
+    pub docker_config_json: Option<String>,
     pub dockerfile_text: Option<String>,
     pub context_dir: Option<String>,
     /// Opt into the non-default CAS (content-addressed streaming) image
@@ -77,6 +86,8 @@ pub struct SandboxImageImportOptionsJs {
     pub use_scope_headers: Option<bool>,
     pub user_agent: Option<String>,
     pub docker_compat: Option<bool>,
+    /// Docker config JSON contents. Omission discovers local configuration.
+    pub docker_config_json: Option<String>,
     /// Opt into the non-default CAS (content-addressed streaming) image
     /// format.
     pub cas: Option<bool>,
@@ -155,13 +166,14 @@ pub async fn build_sandbox_image(
             .unwrap_or_default(),
     };
 
-    let result = rust_build_sandbox_image(build_options, move |event| {
-        if let Some(tsfn) = emit.as_ref() {
-            tsfn.call(event_to_js(event), ThreadsafeFunctionCallMode::Blocking);
-        }
-    })
-    .await
-    .map_err(|error| Error::from_reason(error.to_string()))?;
+    let result =
+        rust_build_sandbox_image(build_options, options.docker_config_json, move |event| {
+            if let Some(tsfn) = emit.as_ref() {
+                tsfn.call(event_to_js(event), ThreadsafeFunctionCallMode::Blocking);
+            }
+        })
+        .await
+        .map_err(|error| Error::from_reason(error.to_string()))?;
 
     serde_json::to_string(&result).map_err(|error| Error::from_reason(error.to_string()))
 }
@@ -199,13 +211,14 @@ pub async fn import_sandbox_image(
         image_reference: options.image_reference,
     };
 
-    let result = rust_import_sandbox_image(import_options, move |event| {
-        if let Some(tsfn) = emit.as_ref() {
-            tsfn.call(event_to_js(event), ThreadsafeFunctionCallMode::Blocking);
-        }
-    })
-    .await
-    .map_err(|error| Error::from_reason(error.to_string()))?;
+    let result =
+        rust_import_sandbox_image(import_options, options.docker_config_json, move |event| {
+            if let Some(tsfn) = emit.as_ref() {
+                tsfn.call(event_to_js(event), ThreadsafeFunctionCallMode::Blocking);
+            }
+        })
+        .await
+        .map_err(|error| Error::from_reason(error.to_string()))?;
 
     serde_json::to_string(&result).map_err(|error| Error::from_reason(error.to_string()))
 }

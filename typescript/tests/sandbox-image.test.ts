@@ -52,6 +52,7 @@ function makeFakeBinding(opts: {
     return opts.resultJson ?? '{"id":"tpl-1","snapshot_id":"snap-1"}';
   };
   const binding = {
+    loadDockerConfigJson: vi.fn(() => "{}"),
     buildSandboxImage: vi.fn(handler),
     importSandboxImage: vi.fn(handler),
   };

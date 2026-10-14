@@ -1,4 +1,4 @@
-use std::{path::PathBuf, process::Stdio};
+use std::{io::Write, path::PathBuf, process::Stdio};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::auth::context::CliContext;
@@ -105,6 +105,22 @@ async fn run_python_deployer(ctx: &CliContext, remaining_args: &[String]) -> Res
     let executable = PathBuf::from("tensorlake-deploy");
     let mut cmd = tokio::process::Command::new(&executable);
     cmd.args(remaining_args);
+
+    // Transfer the startup snapshot to the Python CLI without exposing credentials
+    // in arguments or environment values. NamedTempFile is private and remains
+    // alive until the child exits and is then removed.
+    let mut docker_config_snapshot = tempfile::NamedTempFile::new().map_err(CliError::Io)?;
+    docker_config_snapshot
+        .write_all(
+            ctx.docker_config_json()
+                .unwrap_or_else(|| "{}".into())
+                .as_bytes(),
+        )
+        .map_err(CliError::Io)?;
+    cmd.env(
+        "TENSORLAKE_DOCKER_CONFIG_SNAPSHOT",
+        docker_config_snapshot.path(),
+    );
 
     // Pass auth context via environment
     cmd.env("TENSORLAKE_API_URL", &ctx.api_url);
@@ -310,6 +326,10 @@ fn supports_python_deploy_protocol(event: &serde_json::Value) -> bool {
     event.get("type").and_then(|value| value.as_str()) == Some("protocol")
         && event.get("version").and_then(|value| value.as_u64())
             == Some(PYTHON_DEPLOY_PROTOCOL_VERSION)
+        && event
+            .get("docker_config_snapshot")
+            .and_then(|value| value.as_bool())
+            == Some(true)
 }
 
 async fn terminate_child(child: &mut tokio::process::Child) -> Result<()> {
@@ -331,10 +351,13 @@ mod tests {
     #[test]
     fn python_deployer_protocol_fails_closed() {
         assert!(supports_python_deploy_protocol(
-            &json!({"type": "protocol", "version": 1})
+            &json!({"type": "protocol", "version": 1, "docker_config_snapshot": true})
         ));
         assert!(!supports_python_deploy_protocol(
             &json!({"type": "protocol", "version": 2})
+        ));
+        assert!(!supports_python_deploy_protocol(
+            &json!({"type": "protocol", "version": 1})
         ));
         assert!(!supports_python_deploy_protocol(
             &json!({"type": "status", "version": 1})

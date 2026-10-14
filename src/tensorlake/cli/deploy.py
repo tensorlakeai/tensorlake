@@ -32,6 +32,7 @@ from tensorlake.applications.validation import (
 from tensorlake.cli._common import Context
 from tensorlake.image.sandbox_builder import (
     SandboxImageBuildError,
+    _load_docker_config_json,
     build_sandbox_application_image,
 )
 from tensorlake.image.utils import _SDK_VERSION
@@ -142,6 +143,7 @@ def deploy(
     application_file_path: str,
     upgrade_running_requests: bool,
     build_envs: list[tuple[str, str]] | None = None,
+    docker_config_json: str | None = None,
 ):
     """Deploys applications to Tensorlake Cloud, emitting NDJSON events to stdout."""
     _emit(
@@ -149,8 +151,16 @@ def deploy(
             "type": "protocol",
             "version": _DEPLOY_PROTOCOL_VERSION,
             "sdk_version": _SDK_VERSION,
+            "docker_config_snapshot": True,
         }
     )
+    if docker_config_json is None:
+        snapshot_path = os.environ.pop("TENSORLAKE_DOCKER_CONFIG_SNAPSHOT", None)
+        docker_config_json = (
+            Path(snapshot_path).read_text(encoding="utf-8")
+            if snapshot_path is not None
+            else _load_docker_config_json()
+        )
     if upgrade_running_requests:
         _emit(
             {
@@ -222,6 +232,7 @@ def deploy(
                 functions,
                 context_dir=str(Path(application_file_path).parent),
                 build_envs=build_envs,
+                docker_config_json=docker_config_json,
             )
         )
     except KeyboardInterrupt:
@@ -245,6 +256,7 @@ async def _prepare_images(
     functions: list[Function],
     context_dir: str,
     build_envs: list[tuple[str, str]] | None = None,
+    docker_config_json: str | None = None,
 ) -> dict[tuple[str, str], str]:
     image_builds = _application_images(functions)
     function_images: dict[tuple[str, str], str] = {}
@@ -258,6 +270,7 @@ async def _prepare_images(
                 image,
                 registered_name=image_name,
                 build_env_vars=build_envs,
+                docker_config_json=docker_config_json,
                 context_dir=context_dir,
                 emit=_emit,
                 _allow_pat=True,

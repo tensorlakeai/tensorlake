@@ -171,6 +171,7 @@ async fn test_create_then_delete_sandbox_image() {
                 context_files: Vec::new(),
                 build_args: Vec::new(),
             },
+            None,
             |_| {},
         )
         .await

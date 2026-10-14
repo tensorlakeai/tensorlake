@@ -138,6 +138,13 @@ class TestDeployHelpers(unittest.TestCase):
 
 
 class TestDeployEntrypoints(unittest.TestCase):
+    def setUp(self):
+        loader = patch.object(
+            deploy_module, "_load_docker_config_json", return_value="{}"
+        )
+        self.config_loader = loader.start()
+        self.addCleanup(loader.stop)
+
     def _make_auth_context(self):
         return SimpleNamespace(
             api_url="https://api.tensorlake.ai",
@@ -257,6 +264,13 @@ class TestDeployEntrypoints(unittest.TestCase):
         self.assertEqual(event_types[-1], "validation_failed")
 
     def test_deploy_runs_build_and_deploy_flow(self):
+        captured = '{"auths":{"registry":{"identitytoken":"initial-token"}}}'
+        self.config_loader.return_value = captured
+
+        def load_application(*_):
+            self.config_loader.assert_called_once_with()
+            self.config_loader.return_value = "{}"
+
         prepare_images = AsyncMock()
         prepare_images.return_value = {}
         auth = self._make_auth_context()
@@ -267,7 +281,7 @@ class TestDeployEntrypoints(unittest.TestCase):
                 "_build_context_from_env",
                 return_value=auth,
             ),
-            patch.object(deploy_module, "load_code"),
+            patch.object(deploy_module, "load_code", side_effect=load_application),
             patch.object(
                 deploy_module, "validate_loaded_applications", return_value=[]
             ),
@@ -299,6 +313,7 @@ class TestDeployEntrypoints(unittest.TestCase):
             ["fn"],
             context_dir=os.path.dirname(os.path.abspath("my_app.py")),
             build_envs=None,
+            docker_config_json=captured,
         )
         deploy_apps.assert_called_once_with(
             applications_file_path=os.path.abspath("my_app.py"),

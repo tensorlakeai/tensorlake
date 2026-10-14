@@ -180,6 +180,55 @@ support live resize. Resource arguments match create, and updates wait for
 confirmed completion by default.
 See [sandbox resource resize](docs/sandbox-resize.md).
 
+### Registry credentials for image builds and imports
+
+Supply Docker `config.json` contents per operation when importing private images
+or building Dockerfiles with private base images. Each call keeps its own
+configuration, so concurrent calls can use different credentials without changing
+`DOCKER_CONFIG`.
+
+```ts
+import { readFile } from "node:fs/promises";
+import { createSandboxImage, importSandboxImage } from "@tensorlakeai/tensorlake";
+
+const dockerConfigJson = await readFile("/credentials/config.json", "utf8");
+await importSandboxImage("registry.example.com/team/image:latest", { dockerConfigJson });
+await createSandboxImage("./Dockerfile", { dockerConfigJson });
+// Image.build({ dockerConfigJson }) accepts the same option.
+```
+
+```python
+from pathlib import Path
+from tensorlake import import_sandbox_image
+from tensorlake.image.sandbox_builder import build_sandbox_image
+
+config_json = Path("/credentials/config.json").read_text(encoding="utf-8")
+import_sandbox_image("registry.example.com/team/image:latest", docker_config_json=config_json)
+build_sandbox_image("./Dockerfile", docker_config_json=config_json)
+# image.build(docker_config_json=config_json) accepts the same option.
+```
+
+Omitting the option preserves local Docker-config discovery. Configuration is
+captured and credentials are resolved at the start of the build/import, before
+provisioning. Supplied contents replace discovery entirely; pass `"{}"` to use no
+registry credentials. Empty strings and malformed configurations are errors.
+Credential helpers (`credHelpers` and `credsStore`) run locally using the captured
+configuration; only resolved registry credentials are forwarded to the builder.
+Both CAS and non-CAS image builds use this behavior.
+
+The CLI captures Docker configuration immediately after parsing a build/import or
+deploy command, before authentication and application loading. It looks for
+`$DOCKER_CONFIG/config.json`, then `~/.docker/config.json`, and passes the captured
+contents to every image operation in that invocation. A missing config supplies
+an explicit empty document. Credential changes during a running invocation do not
+cause the CLI to reread the config file.
+
+Rust callers must now supply the additional `Option<String>` argument:
+`build_sandbox_image(options, docker_config_json, emit)` and
+`import_sandbox_image(options, docker_config_json, emit)`. Use `None` for discovery
+or `Some(contents)` for explicit configuration. Python and TypeScript callers that
+omit the option continue to work unchanged.
+
 ### Snapshots
 
 Save the state of a sandbox and restore it later:

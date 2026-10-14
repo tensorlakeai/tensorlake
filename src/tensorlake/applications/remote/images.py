@@ -130,6 +130,7 @@ def prepare_application_images(
     *,
     context_dir: str,
     build_envs: list[tuple[str, str]] | None = None,
+    docker_config_json: str | None = None,
 ) -> dict[tuple[str, str], str]:
     function_images: dict[tuple[str, str], str] = {}
     for image_build in application_image_builds(functions):
@@ -137,6 +138,7 @@ def prepare_application_images(
             image_build.image,
             registered_name=image_build.registered_name,
             build_env_vars=build_envs,
+            docker_config_json=docker_config_json,
             context_dir=context_dir,
         )
         for function_key in image_build.function_keys:

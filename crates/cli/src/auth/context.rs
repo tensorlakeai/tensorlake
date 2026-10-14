@@ -23,6 +23,16 @@ pub struct CliContext {
     pub context_name: Option<String>,
     pub context_source: Option<ContextSource>,
     introspect_cache: Option<IntrospectResult>,
+    docker_config: Option<DockerConfigSnapshot>,
+}
+
+#[derive(Clone)]
+struct DockerConfigSnapshot(String);
+
+impl std::fmt::Debug for DockerConfigSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DockerConfigSnapshot([redacted])")
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -47,7 +57,18 @@ impl CliContext {
             context_name: config.context_name,
             context_source: config.context_source,
             introspect_cache: None,
+            docker_config: None,
         }
+    }
+
+    pub fn set_docker_config_json(&mut self, contents: String) {
+        self.docker_config = Some(DockerConfigSnapshot(contents));
+    }
+
+    pub fn docker_config_json(&self) -> Option<String> {
+        self.docker_config
+            .as_ref()
+            .map(|snapshot| snapshot.0.clone())
     }
 
     /// Build an authenticated reqwest client with proper headers.

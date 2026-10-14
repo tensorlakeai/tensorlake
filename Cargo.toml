@@ -12,7 +12,7 @@ exclude = ["crates/gsvc-mount", "crates/gsvc-codec", "crates/gsvc-fs-client"]
 resolver = "3"
 
 [workspace.package]
-version = "0.5.150"
+version = "0.5.151"
 authors = ["Tensorlake Inc. <support@tensorlake.ai>"]
 edition = "2024"
 license = "Apache-2.0"
@@ -85,6 +85,7 @@ crc32fast = "1"
 # Docker
 bollard = "0.20"
 docker-credentials-config = "0.1.0"
+docker_credential = "1.3.3"
 http = "1"
 http-body-util = "0.1"
 

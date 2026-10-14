@@ -1028,9 +1028,11 @@ async fn build_application_images(
                 build_args: Vec::new(),
             };
             let mut renderer = ImageBuildEventRenderer::new();
-            build_sandbox_image(options, |event| renderer.render(event))
-                .await
-                .map_err(|error| CliError::Other(error.into()))?;
+            build_sandbox_image(options, ctx.docker_config_json(), |event| {
+                renderer.render(event)
+            })
+            .await
+            .map_err(|error| CliError::Other(error.into()))?;
             built.insert(registered_name.clone(), fingerprint);
             function_images.insert(
                 (application_name.to_string(), function_name.to_string()),

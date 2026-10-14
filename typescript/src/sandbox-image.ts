@@ -20,6 +20,13 @@ import { loadNative } from "./native-binding.js";
  */
 
 export interface CreateSandboxImageOptions {
+  /**
+   * Docker config JSON contents for this call, including credential helpers.
+   * Omit to discover local Docker config at the start of the operation.
+   * Pass "{}" to disable discovery and use no registry credentials.
+   */
+  dockerConfigJson?: string;
+
   registeredName?: string;
   cpus?: number;
   memoryMb?: number;
@@ -50,6 +57,13 @@ export interface CreateSandboxImageOptions {
 }
 
 export interface ImportSandboxImageOptions {
+  /**
+   * Docker config JSON contents for this call, including credential helpers.
+   * Omit to discover local Docker config at the start of the operation.
+   * Pass "{}" to disable discovery and use no registry credentials.
+   */
+  dockerConfigJson?: string;
+
   /**
    * Name to register the image under. Defaults to the image reference's last
    * path segment with any tag/digest stripped (e.g. `pytorch/pytorch:2.4.1`
@@ -99,6 +113,7 @@ interface NativeBindingCommonOptions {
   useScopeHeaders?: boolean | undefined | null;
   userAgent?: string | undefined | null;
   dockerCompat?: boolean | undefined | null;
+  dockerConfigJson?: string | undefined | null;
 }
 
 interface NativeBindingOptions extends NativeBindingCommonOptions {
@@ -118,6 +133,7 @@ interface NativeBindingEvent {
 }
 
 interface NativeBinding {
+  loadDockerConfigJson(): string;
   buildSandboxImage(
     options: NativeBindingOptions,
     emit?: ((event: NativeBindingEvent) => void) | null | undefined,
@@ -412,6 +428,7 @@ export async function createSandboxImage(
         useScopeHeaders: usePat,
         userAgent: undefined,
         dockerCompat: options.dockerCompat ?? false,
+        dockerConfigJson: options.dockerConfigJson,
         dockerfileText,
         contextDir: nativeContextDir,
       },
@@ -523,6 +540,7 @@ export async function importSandboxImage(
       useScopeHeaders: usePat,
       userAgent: undefined,
       dockerCompat: options.dockerCompat ?? false,
+      dockerConfigJson: options.dockerConfigJson,
     },
     (event) => {
       try {
@@ -696,10 +714,12 @@ export async function runCreateSandboxImageCli(argv = process.argv.slice(2)) {
     );
   }
 
+  const dockerConfigJson = loadNativeBinding().loadDockerConfigJson();
   await createSandboxImage(
     dockerfilePath,
     {
       registeredName: parsed.values.name,
+      dockerConfigJson,
       cpus,
       memoryMb,
       diskMb,
@@ -758,10 +778,12 @@ export async function runImportSandboxImageCli(argv = process.argv.slice(2)) {
     );
   }
 
+  const dockerConfigJson = loadNativeBinding().loadDockerConfigJson();
   await importSandboxImage(
     imageReference,
     {
       registeredName: parsed.values.name,
+      dockerConfigJson,
       cpus,
       memoryMb,
       diskMb,
