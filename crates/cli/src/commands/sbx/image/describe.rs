@@ -29,9 +29,26 @@ pub async fn run(ctx: &CliContext, name_or_id: &str) -> Result<()> {
                 "DEBUG image describe: direct lookup returned 404, falling back to paginated list"
             );
         }
-        super::find_image_item_in_paginated_list(ctx, &client, &base_url, name_or_id)
-            .await?
-            .ok_or_else(|| CliError::Other(anyhow::anyhow!("image '{}' not found", name_or_id)))?
+        match super::find_image_item_in_paginated_list(ctx, &client, &base_url, name_or_id).await? {
+            Some(item) => item,
+            None => {
+                // Not a platform snapshot template: CAS images (Cloud
+                // Hypervisor) live in the Image Service, reached through the
+                // same authenticated ingress as `ls`.
+                if ctx.debug {
+                    eprintln!(
+                        "DEBUG image describe: not a snapshot template, trying Image Service"
+                    );
+                }
+                let item = super::resolve_cas_image(ctx, &client, name_or_id)
+                    .await?
+                    .ok_or_else(|| {
+                        CliError::Other(anyhow::anyhow!("image '{}' not found", name_or_id))
+                    })?;
+                print_cas_image_details(&item);
+                return Ok(());
+            }
+        }
     } else {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
@@ -81,6 +98,27 @@ fn print_image_details(item: &serde_json::Value) {
             }
         }
     }
+}
+
+fn print_cas_image_details(item: &serde_json::Value) {
+    let field = |key: &str| {
+        item.get(key)
+            .map(|value| match value {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            })
+            .unwrap_or_else(|| "-".to_string())
+    };
+    println!("Name:        {}", field("name"));
+    println!("Type:        CAS");
+    println!("Image ID:    {}", field("image_id"));
+    println!("Reference:   {}", field("image"));
+    println!("Scope:       {}", field("image_scope"));
+    println!("Project:     {}", field("project"));
+    println!("Size bytes:  {}", field("size_bytes"));
+    println!("Disk bytes:  {}", field("virtual_size_bytes"));
+    println!("Build ID:    {}", field("build_id"));
+    println!("Created ms:  {}", field("created_at_ms"));
 }
 
 fn print_dockerfile(dockerfile: &str) {
