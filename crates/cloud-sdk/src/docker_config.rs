@@ -112,7 +112,8 @@ pub(crate) fn resolve_docker_config_json(contents: Option<String>) -> Result<Opt
 mod tests {
     use super::*;
 
-    fn config(password: &str) -> String {
+    fn config() -> String {
+        let password = uuid::Uuid::new_v4();
         json!({"auths": {"registry.example.com": {
             "auth": STANDARD.encode(format!("user:{password}"))
         }}})
@@ -122,9 +123,9 @@ mod tests {
     #[test]
     fn concurrent_calls_keep_their_own_credentials() {
         let threads: Vec<_> = (0..16)
-            .map(|i| {
+            .map(|_| {
                 std::thread::spawn(move || {
-                    let contents = config(&format!("password-{i}"));
+                    let contents = config();
                     let resolved = resolve_docker_config_json(Some(contents.clone()))
                         .unwrap()
                         .unwrap();
@@ -144,10 +145,10 @@ mod tests {
     fn snapshot_survives_file_replacement_and_removal() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
-        let original = config("original");
+        let original = config();
         std::fs::write(&path, &original).unwrap();
         let captured = load_from_paths([path.clone()]).unwrap();
-        std::fs::write(&path, config("replacement")).unwrap();
+        std::fs::write(&path, config()).unwrap();
         std::fs::remove_file(path).unwrap();
         assert_eq!(
             resolve_docker_config_json(Some(captured)).unwrap(),
@@ -160,10 +161,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("missing.json");
         let fallback = dir.path().join("fallback.json");
-        std::fs::write(&fallback, config("fallback")).unwrap();
+        let fallback_config = config();
+        std::fs::write(&fallback, &fallback_config).unwrap();
         assert_eq!(
             load_from_paths([missing.clone(), fallback]).unwrap(),
-            config("fallback")
+            fallback_config
         );
         assert_eq!(load_from_paths([missing]).unwrap(), "{}");
         assert_eq!(resolve_docker_config_json(Some("{}".into())).unwrap(), None);
@@ -288,7 +290,7 @@ printf '%s' '{"Username":"helper-user","Secret":"helper-password"}'
                 None
             );
         }
-        let explicit = config("explicit");
+        let explicit = config();
         assert_eq!(
             resolve_docker_config_json(Some(explicit.clone())).unwrap(),
             Some(explicit)
@@ -319,7 +321,7 @@ printf '%s' '{"Username":"helper-user","Secret":"helper-password"}'
             }
         }
         let path = PathBuf::from(std::env::var_os("DOCKER_CONFIG").unwrap()).join("config.json");
-        let default_config = config("discovered");
+        let default_config = config();
         std::fs::write(path, &default_config).unwrap();
         assert_eq!(
             resolve_docker_config_json(None).unwrap(),
