@@ -250,6 +250,104 @@ pub async fn list_all_cas_images(
     }
 }
 
+/// How `tl sbx image describe|rm <ref>` looks a reference up in the Image
+/// Service once the platform template catalog has no match: a 64-hex image
+/// id or `cas-v1:<id>` reference goes straight to `GET /images/{id}`, anything
+/// else is a registered name resolved through `GET /names/{name}`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CasImageLookup {
+    ById(String),
+    ByName(String),
+}
+
+pub fn cas_image_lookup(image_ref: &str) -> CasImageLookup {
+    let candidate = image_ref.strip_prefix("cas-v1:").unwrap_or(image_ref);
+    let is_image_id = candidate.len() == 64
+        && candidate
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'));
+    if is_image_id {
+        CasImageLookup::ById(candidate.to_string())
+    } else {
+        CasImageLookup::ByName(image_ref.to_string())
+    }
+}
+
+/// Resolve `image_ref` in the Image Service through the authenticated ingress.
+/// Returns the image record with its registered `name` attached when the
+/// reference was a name, or `None` when neither the name nor the id exists.
+pub async fn resolve_cas_image(
+    ctx: &CliContext,
+    client: &reqwest::Client,
+    image_ref: &str,
+) -> Result<Option<serde_json::Value>> {
+    let service_url = cas_image_service_url(&ctx.api_url);
+    let (image_id, name) = match cas_image_lookup(image_ref) {
+        CasImageLookup::ById(image_id) => (image_id, None),
+        CasImageLookup::ByName(name) => {
+            let url = format!("{}/names/{}", service_url, name);
+            let response = client.get(&url).send().await.map_err(CliError::Http)?;
+            match response.status() {
+                reqwest::StatusCode::NOT_FOUND => return Ok(None),
+                status if status.is_success() => {}
+                status => {
+                    let body = response.text().await.unwrap_or_default();
+                    return Err(CliError::Other(anyhow::anyhow!(
+                        "failed to resolve image name '{}' in Image Service (HTTP {}): {}",
+                        name,
+                        status,
+                        body
+                    )));
+                }
+            }
+            let resolved: serde_json::Value = response.json().await.map_err(CliError::Http)?;
+            let image = resolved
+                .get("image")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let CasImageLookup::ById(image_id) = cas_image_lookup(image) else {
+                return Err(CliError::Other(anyhow::anyhow!(
+                    "Image Service resolved name '{}' to an unexpected reference {:?}",
+                    name,
+                    image
+                )));
+            };
+            (image_id, Some(name))
+        }
+    };
+
+    let url = format!("{}/images/{}", service_url, image_id);
+    let response = client.get(&url).send().await.map_err(CliError::Http)?;
+    match response.status() {
+        reqwest::StatusCode::NOT_FOUND => return Ok(None),
+        status if status.is_success() => {}
+        status => {
+            let body = response.text().await.unwrap_or_default();
+            return Err(CliError::Other(anyhow::anyhow!(
+                "failed to fetch CAS image '{}' from Image Service (HTTP {}): {}",
+                image_ref,
+                status,
+                body
+            )));
+        }
+    }
+    let mut item: serde_json::Value = response.json().await.map_err(CliError::Http)?;
+    // The record carries every name the project points at the image
+    // (`names`); an id or `cas-v1:` lookup shows the first one the way `ls`
+    // does. A global image the project never named has none.
+    let name = name.or_else(|| {
+        item.get("names")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|names| names.first())
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    });
+    if let (Some(name), Some(object)) = (name, item.as_object_mut()) {
+        object.insert("name".to_string(), serde_json::Value::String(name));
+    }
+    Ok(Some(item))
+}
+
 fn find_image_item_in_page(
     result: &serde_json::Value,
     image_ref: &str,
@@ -279,7 +377,10 @@ pub fn absolute_api_url(api_url: &str, next: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{absolute_api_url, item_matches_image_ref, templates_base_url};
+    use super::{
+        CasImageLookup, absolute_api_url, cas_image_lookup, item_matches_image_ref,
+        templates_base_url,
+    };
     use crate::auth::context::CliContext;
     use crate::config::resolver::ResolvedConfig;
     use serde_json::json;
@@ -314,6 +415,30 @@ mod tests {
         assert_eq!(
             templates_base_url(&ctx).unwrap(),
             "https://api.tensorlake.ai/platform/v1/organizations/org-1/projects/proj-1/sandbox-templates"
+        );
+    }
+
+    #[test]
+    fn cas_image_lookup_classifies_ids_references_and_names() {
+        let id = "a".repeat(64);
+        assert_eq!(cas_image_lookup(&id), CasImageLookup::ById(id.clone()));
+        assert_eq!(
+            cas_image_lookup(&format!("cas-v1:{id}")),
+            CasImageLookup::ById(id.clone())
+        );
+        assert_eq!(
+            cas_image_lookup("my-image"),
+            CasImageLookup::ByName("my-image".to_string())
+        );
+        // Upper-case hex and short hashes are names, not ids: the Image
+        // Service rejects them as ids and a name may legitimately look like one.
+        assert_eq!(
+            cas_image_lookup(&"A".repeat(64)),
+            CasImageLookup::ByName("A".repeat(64))
+        );
+        assert_eq!(
+            cas_image_lookup("abc123"),
+            CasImageLookup::ByName("abc123".to_string())
         );
     }
 

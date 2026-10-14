@@ -22,9 +22,26 @@ pub async fn run(ctx: &CliContext, name_or_id: &str) -> Result<()> {
 async fn delete_resolved_image(ctx: &CliContext, name_or_id: &str) -> Result<()> {
     let base_url = super::templates_base_url(ctx)?;
     let client = ctx.client()?;
-    let item = super::find_image_item_in_paginated_list(ctx, &client, &base_url, name_or_id)
-        .await?
-        .ok_or_else(|| CliError::Other(anyhow::anyhow!("image '{}' not found", name_or_id)))?;
+    let Some(item) =
+        super::find_image_item_in_paginated_list(ctx, &client, &base_url, name_or_id).await?
+    else {
+        // The Image Service owns CAS images and has no delete route yet; say
+        // so instead of reporting an image the user can see in `ls` as missing.
+        if super::resolve_cas_image(ctx, &client, name_or_id)
+            .await?
+            .is_some()
+        {
+            return Err(CliError::Other(anyhow::anyhow!(
+                "image '{}' is a CAS image managed by the Image Service, which does not support \
+                 deleting images yet",
+                name_or_id
+            )));
+        }
+        return Err(CliError::Other(anyhow::anyhow!(
+            "image '{}' not found",
+            name_or_id
+        )));
+    };
 
     let name = item
         .get("name")
