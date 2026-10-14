@@ -92,17 +92,11 @@ pub(crate) fn resolve_docker_config_json(contents: Option<String>) -> Result<Opt
                 | CredentialRetrievalError::MalformedHelperResponse
                 | CredentialRetrievalError::HelperFailure { .. },
             ) => continue,
-            Err(CredentialRetrievalError::CredentialDecodingError) => {
+            // Dependency releases can add retrieval errors. Fail closed without
+            // exposing their payloads, while retaining the explicit exceptions above.
+            Err(_) => {
                 return Err(SandboxImageBuildError::usage(
-                    "Invalid Docker config JSON: failed to decode registry credentials",
-                ));
-            }
-            Err(
-                CredentialRetrievalError::ConfigNotFound
-                | CredentialRetrievalError::ConfigReadError,
-            ) => {
-                return Err(SandboxImageBuildError::usage(
-                    "Invalid Docker config JSON: failed to read registry credentials",
+                    "Invalid Docker config JSON: failed to resolve registry credentials",
                 ));
             }
         };
