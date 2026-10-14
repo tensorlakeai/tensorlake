@@ -5,9 +5,21 @@ use crate::commands::sbx::{created_at_sort_key, format_created_at, sandbox_endpo
 use crate::error::{CliError, Result};
 use crate::output::table::new_table;
 
-pub async fn run(ctx: &CliContext) -> Result<()> {
-    let client = ctx.client()?;
+/// The server hides suspend checkpoints unless the listing asks for them:
+/// they belong to a suspended sandbox's resume path, not to the user's
+/// snapshot catalog.
+fn snapshots_url(ctx: &CliContext, include_suspend_checkpoints: bool) -> String {
     let url = sandbox_endpoint(ctx, "snapshots");
+    if include_suspend_checkpoints {
+        format!("{url}?include_suspend_checkpoints=true")
+    } else {
+        url
+    }
+}
+
+pub async fn run(ctx: &CliContext, include_suspend_checkpoints: bool) -> Result<()> {
+    let client = ctx.client()?;
+    let url = snapshots_url(ctx, include_suspend_checkpoints);
 
     let resp = client.get(&url).send().await.map_err(CliError::Http)?;
 
@@ -43,6 +55,7 @@ pub async fn run(ctx: &CliContext) -> Result<()> {
     let mut table = new_table(&[
         "ID",
         "Status",
+        "Kind",
         "Checkpoint Type",
         "Format",
         "Sandbox ID",
@@ -61,6 +74,7 @@ pub async fn run(ctx: &CliContext) -> Result<()> {
             .get("status")
             .and_then(|v| v.as_str())
             .unwrap_or("-");
+        let kind = format_snapshot_kind(snapshot);
         let snapshot_type = format_snapshot_type(snapshot);
         let snapshot_format = format_snapshot_format(snapshot);
         let sandbox_id = snapshot
@@ -77,6 +91,7 @@ pub async fn run(ctx: &CliContext) -> Result<()> {
         table.add_row(vec![
             Cell::new(snapshot_id),
             Cell::new(status),
+            Cell::new(kind),
             Cell::new(snapshot_type),
             Cell::new(snapshot_format),
             Cell::new(sandbox_id),
@@ -107,6 +122,24 @@ fn format_size(size_bytes: Option<&serde_json::Value>) -> String {
     }
 }
 
+/// `kind` says what the snapshot captures: `sandbox` (a user sandbox
+/// snapshot), `rootfs_image`, `volume`, or `suspend_checkpoint`. Servers that
+/// predate snapshot kinds omit the field.
+fn format_snapshot_kind(snapshot: &serde_json::Value) -> String {
+    snapshot
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .map(|kind| match kind {
+            "sandbox" => "sandbox",
+            "rootfs_image" => "image",
+            "volume" => "volume",
+            "suspend_checkpoint" => "suspend checkpoint",
+            other => other,
+        })
+        .unwrap_or("-")
+        .to_string()
+}
+
 fn format_snapshot_type(snapshot: &serde_json::Value) -> String {
     snapshot
         .get("snapshot_type")
@@ -131,7 +164,28 @@ fn format_snapshot_format(snapshot: &serde_json::Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_snapshot_format, format_snapshot_type};
+    use super::{format_snapshot_format, format_snapshot_kind, format_snapshot_type};
+
+    #[test]
+    fn format_snapshot_kind_uses_short_labels_for_known_kinds() {
+        let cases = [
+            ("sandbox", "sandbox"),
+            ("rootfs_image", "image"),
+            ("volume", "volume"),
+            ("suspend_checkpoint", "suspend checkpoint"),
+        ];
+        for (kind, expected) in cases {
+            let snapshot = serde_json::json!({"kind": kind});
+            assert_eq!(format_snapshot_kind(&snapshot), expected);
+        }
+    }
+
+    #[test]
+    fn format_snapshot_kind_preserves_unknown_kinds_and_handles_missing_field() {
+        let snapshot = serde_json::json!({"kind": "future_kind"});
+        assert_eq!(format_snapshot_kind(&snapshot), "future_kind");
+        assert_eq!(format_snapshot_kind(&serde_json::json!({})), "-");
+    }
 
     #[test]
     fn format_snapshot_type_uses_snapshot_type_field() {
