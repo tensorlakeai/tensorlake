@@ -40,11 +40,15 @@ class FinishEventHelper:
 
     def from_replay_mismatch(
         self,
+        allocation_event_clock: int | None = None,
     ) -> AllocationExecutionEventFinishAllocation:
-        return AllocationExecutionEventFinishAllocation(
+        event = AllocationExecutionEventFinishAllocation(
             outcome_code=AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_FAILURE,
             failure_reason=ALLOCATION_FAILURE_REASON_REPLAY_EVENT_HISTORY_MISMATCH,
         )
+        if allocation_event_clock is not None:
+            event.allocation_event_clock = allocation_event_clock
+        return event
 
     def from_user_exception(
         self,
