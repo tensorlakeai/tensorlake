@@ -1148,6 +1148,78 @@ fn accepted_build_message(created: &ImageBuildInfo) -> String {
     format!("Build {} accepted", created.build_id)
 }
 
+/// Upper bound on a storage error body kept in an upload failure message.
+const MAX_UPLOAD_ERROR_BODY: usize = 2048;
+
+/// Remove every trace of the context-upload capability from `text`: the
+/// URL itself, its query string, every `X-Amz-*` parameter (name and value,
+/// wherever a storage error echoes them) and the signing material an S3
+/// `SignatureDoesNotMatch` body carries. Bounded so a huge body cannot
+/// become the message.
+fn redact_capability(text: &str, capability_url: &str) -> String {
+    let mut text = text.to_string();
+    if !capability_url.is_empty() {
+        text = text.replace(capability_url, "<capability-url>");
+        if let Some((_, query)) = capability_url.split_once('?')
+            && !query.is_empty()
+        {
+            text = text.replace(query, "<capability-query>");
+        }
+    }
+    for element in [
+        "StringToSign",
+        "CanonicalRequest",
+        "AWSAccessKeyId",
+        "SignatureProvided",
+    ] {
+        text = redact_xml_element(&text, element);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text.as_str();
+    while let Some(index) = rest.find("X-Amz-") {
+        out.push_str(&rest[..index]);
+        let after = &rest[index..];
+        let end = after
+            .find(|c: char| {
+                c == '&' || c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | ',' | '}')
+            })
+            .unwrap_or(after.len());
+        out.push_str("<redacted>");
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    if out.len() > MAX_UPLOAD_ERROR_BODY {
+        let mut cut = MAX_UPLOAD_ERROR_BODY;
+        while !out.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        out.truncate(cut);
+        out.push_str("...");
+    }
+    out
+}
+
+/// Replace the content of every `<element>...</element>` with a marker.
+fn redact_xml_element(text: &str, element: &str) -> String {
+    let open = format!("<{element}>");
+    let close = format!("</{element}>");
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(&open) {
+        let content_start = start + open.len();
+        match rest[content_start..].find(&close) {
+            Some(length) => {
+                out.push_str(&rest[..content_start]);
+                out.push_str("<redacted>");
+                rest = &rest[content_start + length..];
+            }
+            None => break,
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 // ---------------------------------------------------------------------------
 // Lookup and cancellation
 // ---------------------------------------------------------------------------
@@ -1355,6 +1427,10 @@ async fn upload_and_seal_context(
     )));
     let file = tokio::fs::File::open(tar_file.path()).await?;
     let stream = tokio_util::io::ReaderStream::new(file);
+    // The capability URL is a signed credential (presigned `X-Amz-*` query
+    // parameters): no error leaving this function may carry it. A transport
+    // error drops its URL and a storage error body is redacted before either
+    // becomes a message a CLI, a binding or a log can print.
     let response = crate::http_transport::https_builder()
         .build()
         .map_err(SdkError::Http)?
@@ -1363,12 +1439,18 @@ async fn upload_and_seal_context(
         .body(reqwest::Body::wrap_stream(stream))
         .send()
         .await
-        .map_err(SdkError::Http)?;
+        .map_err(|error| {
+            ImageBuildError::other(format!(
+                "context upload failed: {}",
+                redact_capability(&error.without_url().to_string(), &upload.url)
+            ))
+        })?;
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
         return Err(ImageBuildError::other(format!(
-            "context upload failed (HTTP {status}): {body}"
+            "context upload failed (HTTP {status}): {}",
+            redact_capability(&body, &upload.url)
         )));
     }
 
@@ -3247,11 +3329,14 @@ mod tests {
     /// A POST still in flight when the registration deadline passes is
     /// abandoned at the deadline rather than running its own reconnect
     /// budget to the end; no answer ever named a build, so the timeout
-    /// names the request id.
+    /// names the request id. The server holds the connection for far longer
+    /// than the deadline and never answers, so returning at all before the
+    /// hold ends proves the abandonment; the recording server counts only
+    /// complete requests, so the dropped attempt leaves exactly one.
     #[tokio::test]
     async fn registration_abandons_an_in_flight_request_at_the_deadline() {
-        let (base_url, server) =
-            recording_image_service(vec![Reply::Hang(Duration::from_secs(3))]).await;
+        const HOLD: Duration = Duration::from_secs(60);
+        let (base_url, server) = recording_image_service(vec![Reply::Hang(HOLD)]).await;
         let client = ClientBuilder::new(&base_url).build().unwrap();
         let catalog = ImageServiceCatalog::new(&client, &base_url);
         let started = Instant::now();
@@ -3268,16 +3353,49 @@ mod tests {
             .unwrap_err();
         let elapsed = started.elapsed();
         assert!(
-            elapsed >= Duration::from_millis(250) && elapsed < Duration::from_secs(2),
+            elapsed >= Duration::from_millis(300) && elapsed < HOLD / 2,
             "{elapsed:?}"
         );
         let ImageBuildError::Timeout { build_id, waited } = error else {
             panic!("expected a timeout, got {error}");
         };
         assert!(build_id.starts_with("(request "), "{build_id}");
-        assert!(waited >= Duration::from_millis(250));
+        assert!(waited >= Duration::from_millis(300));
         let requests = server.finish().await;
-        assert_eq!(requests.len(), 1, "no second POST and no cancel");
+        assert_eq!(
+            requests.len(),
+            1,
+            "one complete POST, no second attempt and no cancel: {:?}",
+            requests.iter().map(|r| &r.line).collect::<Vec<_>>()
+        );
+        assert!(requests[0].line.ends_with("/images/from-snapshot HTTP/1.1"));
+    }
+
+    #[test]
+    fn upload_failures_carry_no_capability_material() {
+        let url = "https://bucket.s3.amazonaws.com/contexts/p/b.tar?X-Amz-Algorithm=AWS4-HMAC-SHA256\
+                   &X-Amz-Credential=AKIATESTKEY%2F20261015%2Fus-east-1%2Fs3%2Faws4_request\
+                   &X-Amz-Signature=deadbeefcafef00d";
+        let body = format!(
+            "<Error><Code>SignatureDoesNotMatch</Code><AWSAccessKeyId>AKIATESTKEY</AWSAccessKeyId>\
+             <StringToSign>AWS4-HMAC-SHA256 {url}</StringToSign><Resource>/contexts/p/b.tar</Resource>\
+             </Error> also url={url} json={{\"q\": \"X-Amz-Signature=deadbeefcafef00d\"}}"
+        );
+        let redacted = redact_capability(&body, url);
+        for secret in [
+            "deadbeefcafef00d",
+            "AKIATESTKEY",
+            "X-Amz-",
+            "aws4_request",
+            "bucket.s3.amazonaws.com",
+        ] {
+            assert!(!redacted.contains(secret), "{secret} leaked: {redacted}");
+        }
+        assert!(redacted.contains("SignatureDoesNotMatch"), "{redacted}");
+        assert!(redacted.contains("<capability-url>"), "{redacted}");
+        // A transport error loses its URL before it is formatted.
+        let big = "x".repeat(10_000);
+        assert!(redact_capability(&big, url).len() <= MAX_UPLOAD_ERROR_BODY + 3);
     }
 
     /// Interrupted before the admission answered: the admission is not
@@ -3619,31 +3737,48 @@ mod tests {
         let record = recorded.clone();
         let task = tokio::spawn(async move {
             for reply in replies {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let mut raw = Vec::new();
-                let mut byte = [0_u8];
-                while !raw.ends_with(b"\r\n\r\n") {
-                    if stream.read_exact(&mut byte).await.is_err() {
-                        break;
+                // Accept until one complete request (head and body) arrives.
+                // A connection the client opened and dropped before or while
+                // sending -- an attempt abandoned at a deadline, a pooled
+                // connection never used -- is not a request: it is neither
+                // recorded nor answered with this reply.
+                let (mut stream, line, headers, body) = loop {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut raw = Vec::new();
+                    let mut byte = [0_u8];
+                    while !raw.ends_with(b"\r\n\r\n") {
+                        if stream.read_exact(&mut byte).await.is_err() {
+                            break;
+                        }
+                        raw.push(byte[0]);
                     }
-                    raw.push(byte[0]);
-                }
-                let head = String::from_utf8_lossy(&raw).to_string();
-                let mut lines = head.lines();
-                let line = lines.next().unwrap_or_default().to_string();
-                let headers: Vec<(String, String)> = lines
-                    .filter_map(|header| header.split_once(':'))
-                    .map(|(key, value)| (key.trim().to_string(), value.trim().to_string()))
-                    .collect();
-                let length = headers
-                    .iter()
-                    .find(|(key, _)| key.eq_ignore_ascii_case("content-length"))
-                    .and_then(|(_, value)| value.parse::<usize>().ok())
-                    .unwrap_or(0);
-                let mut body = vec![0_u8; length];
-                if length > 0 {
-                    stream.read_exact(&mut body).await.unwrap();
-                }
+                    if !raw.ends_with(b"\r\n\r\n") {
+                        drop(stream);
+                        continue;
+                    }
+                    let head = String::from_utf8_lossy(&raw).to_string();
+                    let mut lines = head.lines();
+                    let line = lines.next().unwrap_or_default().to_string();
+                    if line.is_empty() {
+                        drop(stream);
+                        continue;
+                    }
+                    let headers: Vec<(String, String)> = lines
+                        .filter_map(|header| header.split_once(':'))
+                        .map(|(key, value)| (key.trim().to_string(), value.trim().to_string()))
+                        .collect();
+                    let length = headers
+                        .iter()
+                        .find(|(key, _)| key.eq_ignore_ascii_case("content-length"))
+                        .and_then(|(_, value)| value.parse::<usize>().ok())
+                        .unwrap_or(0);
+                    let mut body = vec![0_u8; length];
+                    if length > 0 && stream.read_exact(&mut body).await.is_err() {
+                        drop(stream);
+                        continue;
+                    }
+                    break (stream, line, headers, body);
+                };
                 record.lock().unwrap().push(RecordedRequest {
                     line,
                     headers,
