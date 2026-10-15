@@ -1,5 +1,6 @@
 import { CloudClient } from "./cloud-client.js";
 import { FilesystemClient } from "./filesystem.js";
+import { deleteSandboxImageWithCredentials } from "./sandbox-image.js";
 import {
   RequestExecutionError,
   RequestFailedError,
@@ -54,7 +55,7 @@ export class APIClient {
   }
 
   async deleteSandboxImage(imageName: string): Promise<void> {
-    await this.cloudClient.deleteSandboxImage(imageName);
+    await deleteSandboxImageWithCredentials(this.filesystemOptions, imageName);
   }
 
   async createFileSystem(

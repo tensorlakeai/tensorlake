@@ -20,10 +20,14 @@ use napi::{
     threadsafe_function::{ErrorStrategy, ThreadsafeFunction, ThreadsafeFunctionCallMode},
 };
 use napi_derive::napi;
-use tensorlake::sandbox_images::{
-    CommonBuildOptions, SandboxImageBuildEvent, SandboxImageBuildOptions,
-    SandboxImageImportOptions, build_sandbox_image as rust_build_sandbox_image,
-    import_sandbox_image as rust_import_sandbox_image,
+use tensorlake::{
+    retry::{RetryPolicy, retry},
+    sandbox_image_catalog::SandboxImageCatalog,
+    sandbox_images::{
+        CommonBuildOptions, SandboxImageBuildEvent, SandboxImageBuildOptions,
+        SandboxImageImportOptions, build_sandbox_image as rust_build_sandbox_image,
+        import_sandbox_image as rust_import_sandbox_image,
+    },
 };
 
 /// Capture Docker config contents at CLI startup, before asynchronous work.
@@ -221,4 +225,75 @@ pub async fn import_sandbox_image(
         .map_err(|error| Error::from_reason(error.to_string()))?;
 
     serde_json::to_string(&result).map_err(|error| Error::from_reason(error.to_string()))
+}
+
+/// Credentials and scope for the merged image catalog (ADR 0107): the
+/// platform template registry plus the Image Service behind one lookup,
+/// delete and list.
+#[napi(object)]
+pub struct SandboxImageCatalogOptionsJs {
+    pub api_url: String,
+    pub bearer_token: String,
+    pub organization_id: Option<String>,
+    pub project_id: Option<String>,
+    pub use_scope_headers: Option<bool>,
+    pub user_agent: Option<String>,
+}
+
+fn sandbox_image_catalog(options: SandboxImageCatalogOptionsJs) -> Result<SandboxImageCatalog> {
+    SandboxImageCatalog::from_credentials(
+        &options.api_url,
+        &options.bearer_token,
+        options.use_scope_headers.unwrap_or(false),
+        options.organization_id.as_deref(),
+        options.project_id.as_deref(),
+        options.user_agent.as_deref(),
+    )
+    .map_err(sandbox::into_napi_error)
+}
+
+/// List every registered sandbox image of both families, newest first, as a
+/// JSON array in the platform template shape.
+#[napi]
+pub async fn list_sandbox_images(options: SandboxImageCatalogOptionsJs) -> Result<String> {
+    let catalog = sandbox_image_catalog(options)?;
+    let images =
+        sandbox::with_retry(catalog, 5, |catalog| async move { catalog.list().await }).await?;
+    serde_json::to_string(&images).map_err(|error| Error::from_reason(error.to_string()))
+}
+
+/// Look up one sandbox image by name or id. Returns the record JSON in the
+/// platform template shape, or `null` when neither catalog knows it.
+#[napi]
+pub async fn find_sandbox_image(
+    options: SandboxImageCatalogOptionsJs,
+    reference: String,
+) -> Result<Option<String>> {
+    let catalog = sandbox_image_catalog(options)?;
+    let image = sandbox::with_retry(catalog, 5, |catalog| {
+        let reference = reference.clone();
+        async move { catalog.find(&reference).await }
+    })
+    .await?;
+    image
+        .map(|image| serde_json::to_string(&image))
+        .transpose()
+        .map_err(|error| Error::from_reason(error.to_string()))
+}
+
+/// Delete one sandbox image by name or id. Not found in either catalog is a
+/// 404 `remote_api` error. Replayed only when the request provably never
+/// reached a server.
+#[napi]
+pub async fn delete_sandbox_image(
+    options: SandboxImageCatalogOptionsJs,
+    reference: String,
+) -> Result<()> {
+    let catalog = sandbox_image_catalog(options)?;
+    retry(catalog, RetryPolicy::non_idempotent(), |catalog| {
+        let reference = reference.clone();
+        async move { catalog.delete(&reference).await }
+    })
+    .await
+    .map_err(sandbox::into_napi_error)
 }

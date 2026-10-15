@@ -17,7 +17,6 @@ import type {
   RequestInput,
   RequestMetadata,
   RequestOutput,
-  SandboxTemplate,
   Secret,
   SecretsList,
   StartImageBuildRequest,
@@ -100,71 +99,6 @@ export class CloudClient {
       "DELETE",
       this.namespacePath(`applications/${encodeURIComponent(applicationName)}`),
     );
-  }
-
-  async deleteSandboxImage(imageName: string): Promise<void> {
-    await this.transport.requestResponse(
-      "DELETE",
-      this.namespacePath(`sandbox-images/${encodeURIComponent(imageName)}`),
-    );
-  }
-
-  /**
-   * Look up a registered sandbox image (template) by its registered name.
-   *
-   * Returns the template, or `null` when no image with that name exists.
-   * API-key clients may omit organization/project IDs and use the
-   * token-scoped Platform API route directly. Explicit scope remains
-   * available for PAT callers.
-   */
-  async findSandboxImageByName(
-    imageName: string,
-    options?: { organizationId?: string; projectId?: string },
-  ): Promise<SandboxTemplate | null> {
-    const base = this.platformProjectPath(
-      "sandbox-templates",
-      options?.organizationId,
-      options?.projectId,
-    );
-    const response = await this.transport.requestResponse(
-      "GET",
-      `${base}/by-name/${encodeURIComponent(imageName)}`,
-      { statusOnlyCodes: new Set([404]) },
-    );
-    if (response.status === 404) {
-      return null;
-    }
-    const raw = await parseJsonResponse<Record<string, unknown>>(response);
-    return fromSnakeKeys(raw) as SandboxTemplate;
-  }
-
-  /**
-   * List all registered sandbox images (templates), following pagination to
-   * the end. API-key clients may omit organization/project IDs and use the
-   * token-scoped Platform API route directly.
-   */
-  async listSandboxImages(
-    options?: { organizationId?: string; projectId?: string },
-  ): Promise<SandboxTemplate[]> {
-    const base = this.platformProjectPath(
-      "sandbox-templates",
-      options?.organizationId,
-      options?.projectId,
-    );
-    let path: string | null = `${base}?pageSize=100`;
-    const templates: SandboxTemplate[] = [];
-    while (path !== null) {
-      const page: SandboxTemplatesPage = await this.transport.requestJson<SandboxTemplatesPage>(
-        "GET",
-        path,
-      );
-      for (const item of page.items ?? []) {
-        templates.push(fromSnakeKeys(item) as SandboxTemplate);
-      }
-      const next = page.pagination?.next;
-      path = next ? nextRequestPath(next) : null;
-    }
-    return templates;
   }
 
   async applications(): Promise<ApplicationSummary[]> {
@@ -497,24 +431,6 @@ export class CloudClient {
     return publicEndpointIdFromManifest(application);
   }
 
-  private platformProjectPath(
-    resource: "sandbox-templates",
-    organizationId?: string,
-    projectId?: string,
-  ): string {
-    const resolvedOrganizationId = organizationId ?? this.organizationId;
-    const resolvedProjectId = projectId ?? this.projectId;
-    if (!resolvedOrganizationId && !resolvedProjectId) {
-      return `/platform/v1/${resource}`;
-    }
-    if (!resolvedOrganizationId || !resolvedProjectId) {
-      throw new Error(
-        "organizationId and projectId must be provided together",
-      );
-    }
-    return `/platform/v1/organizations/${encodeURIComponent(resolvedOrganizationId)}/projects/${encodeURIComponent(resolvedProjectId)}/${resource}`;
-  }
-
   private secretCollectionPath(
     organizationId?: string,
     projectId?: string,
@@ -620,28 +536,6 @@ function createApplicationBuildForm(
 
 function trimTrailingSlashes(value: string): string {
   return value.endsWith("/") ? value.slice(0, -1) : value;
-}
-
-/** One page of the paginated sandbox-templates list response. */
-interface SandboxTemplatesPage {
-  items?: Record<string, unknown>[];
-  pagination?: { next?: string };
-}
-
-/**
- * Reduce a `pagination.next` link to a base-URL-relative request path. The
- * server may return either an absolute URL or an absolute path; the HTTP
- * client always prepends its base URL, so absolute URLs must be reduced to
- * their path+query first.
- */
-function nextRequestPath(next: string): string {
-  const schemeIndex = next.indexOf("://");
-  if (schemeIndex !== -1) {
-    const afterScheme = next.slice(schemeIndex + 3);
-    const slashIndex = afterScheme.indexOf("/");
-    return slashIndex === -1 ? "/" : afterScheme.slice(slashIndex);
-  }
-  return next.startsWith("/") ? next : `/${next}`;
 }
 
 function toBlobPart(data: BinaryPayload): string | Blob | ArrayBuffer {

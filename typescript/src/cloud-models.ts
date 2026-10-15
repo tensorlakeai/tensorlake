@@ -157,7 +157,13 @@ export interface ApplicationBuildResponse {
   imageBuilds: ApplicationBuildImageResult[];
 }
 
-/** A registered sandbox image (template) as returned by the platform API. */
+/**
+ * A registered sandbox image in the platform template shape. Both image
+ * families answer it: legacy templates verbatim from the platform API, and
+ * CAS images (`snapshotFormatVersion === "content_addressed_streaming_v1"`)
+ * mapped from the Image Service record, which adds the `imageId` content
+ * digest and `buildId` provenance fields.
+ */
 export interface SandboxTemplate {
   id?: string;
   name?: string;
@@ -169,6 +175,14 @@ export interface SandboxTemplate {
   rootfsDiskBytes?: number;
   rootfsNodeKind?: string;
   public?: boolean;
+  dockerfile?: string;
+  createdByUserId?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  /** Content digest of a CAS image (provenance only). */
+  imageId?: string;
+  /** The build that published a CAS image's current content (provenance only). */
+  buildId?: string;
 }
 
 /** A registered file system as returned by the platform API. */

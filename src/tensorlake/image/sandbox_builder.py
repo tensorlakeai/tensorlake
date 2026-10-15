@@ -3,8 +3,11 @@
 Takes an :class:`Image` or a Dockerfile path and delegates the build to the
 Rust core (``tensorlake._cloud_sdk.build_sandbox_image``), which materializes
 the image inside a builder sandbox, snapshots the filesystem, and registers
-the snapshot as a named sandbox template
-(``POST /platform/v1/.../sandbox-templates``).
+the snapshot as a named sandbox image: a legacy template by default
+(``POST /platform/v1/.../sandbox-templates``), or a CAS (content-addressed
+streaming) image through the Image Service with ``cas=True``. Lookups,
+listings and deletes go through the Rust core's merged catalog, so both
+families answer the same template-shaped record.
 
 This is the programmatic backend for :meth:`Image.build` and the
 ``tl sbx image create`` CLI command. The Rust core owns parsing and the
@@ -233,6 +236,7 @@ def _run_rust_image_create(
     is_public: bool,
     docker_compat: bool,
     cas: bool,
+    build_args: dict[str, str] | None = None,
     allow_pat: bool = False,
     emit: EmitFn,
     docker_config_json: str | None = None,
@@ -261,6 +265,7 @@ def _run_rust_image_create(
         dockerfile_text,
         context_dir,
         cas=cas,
+        build_args=build_args,
         emit=_forwarder(emit),
         docker_config_json=docker_config_json,
     )
@@ -277,6 +282,7 @@ def _run_rust_image_import(
     builder_disk_mb: int | None,
     is_public: bool,
     docker_compat: bool,
+    cas: bool = False,
     allow_pat: bool = False,
     emit: EmitFn,
     docker_config_json: str | None = None,
@@ -309,7 +315,7 @@ def _run_rust_image_import(
         use_explicit_scope,
         USER_AGENT,
         docker_compat,
-        cas=False,
+        cas=cas,
         emit=_forwarder(emit),
         docker_config_json=docker_config_json,
     )
@@ -345,12 +351,14 @@ def _finish_image_registration(
         raise SandboxImageBuildError(
             f"Rust image builder returned invalid JSON: {result_json.strip()}"
         ) from exc
+    # Both build paths answer the platform template shape (camelCase keys);
+    # the snake_case fallbacks keep older cores readable.
     emit(
         {
             "type": "image_registered",
-            "image_id": result.get("image_id") or result.get("id", ""),
+            "image_id": result.get("id") or result.get("image_id", ""),
             "name": registered_name,
-            "snapshot_id": result.get("snapshot_id") or result.get("image_id", ""),
+            "snapshot_id": result.get("snapshotId") or result.get("snapshot_id", ""),
         }
     )
     return result
@@ -360,10 +368,18 @@ def _finish_image_registration(
 
 
 def delete_sandbox_image(image_name: str) -> None:
-    """Delete a registered sandbox image by name.
+    """Delete a registered sandbox image by name or id.
 
-    Uses the same environment-based Tensorlake auth and namespace context as
+    Both families are covered: an ``image_`` id or a name registered in the
+    Image Service deletes a CAS image, a ``sandbox_template_`` id or a name
+    registered only in the platform registry deletes a legacy image. Uses the
+    same environment-based Tensorlake auth and namespace context as
     :func:`build_sandbox_image`.
+
+    Raises:
+        TypeError: ``image_name`` is not a non-empty string.
+        SandboxImageDeleteError: Credentials are missing, the image is not
+            found in either catalog, or the delete request failed.
     """
     if not isinstance(image_name, str) or not image_name:
         raise TypeError("image_name must be a non-empty string")
@@ -419,11 +435,14 @@ def _snake_case_keys(value: Any) -> Any:
 
 
 def find_sandbox_image_by_name(image_name: str) -> dict | None:
-    """Look up a registered sandbox image by its registered name.
+    """Look up a registered sandbox image by its registered name or id.
 
-    Returns the registered sandbox template as a dict, or ``None`` if no image
-    with that name exists. Uses the same environment-based Tensorlake auth as
-    :func:`build_sandbox_image`. Ingress derives project scope from the API key.
+    Returns the image as a dict in the sandbox-template shape (CAS images
+    carry ``snapshot_format_version == "content_addressed_streaming_v1"``
+    plus ``image_id`` and ``build_id``), or ``None`` if neither the Image
+    Service nor the platform registry knows the reference. Uses the same
+    environment-based Tensorlake auth as :func:`build_sandbox_image`. Ingress
+    derives project scope from the API key.
 
     Raises:
         TypeError: ``image_name`` is not a non-empty string.
@@ -470,10 +489,11 @@ def find_sandbox_image_by_name(image_name: str) -> dict | None:
 def list_sandbox_images() -> list[dict]:
     """List all registered sandbox images for the current project.
 
-    Returns the registered sandbox templates as a list of dicts (each with
-    ``id``, ``name``, ``snapshot_id``, ``public``, etc.). Uses the same
-    environment-based Tensorlake API-key auth as :func:`build_sandbox_image`.
-    Ingress derives project scope from the API key.
+    Returns every CAS and legacy image as a list of dicts in the
+    sandbox-template shape (each with ``id``, ``name``, ``snapshot_id``,
+    ``snapshot_format_version``, ``public``, ``created_at``, etc.), newest
+    first. Uses the same environment-based Tensorlake API-key auth as
+    :func:`build_sandbox_image`. Ingress derives project scope from the API key.
 
     Raises:
         SandboxImageLookupError: Credentials or project context are missing, or
@@ -575,6 +595,8 @@ def build_sandbox_image(
     is_public: bool = False,
     docker_compat: bool = False,
     context_dir: str | None = None,
+    cas: bool = False,
+    build_args: dict[str, str] | None = None,
     verbose: bool = False,
     emit: EmitFn | None = None,
     _allow_pat: bool = False,
@@ -606,6 +628,11 @@ def build_sandbox_image(
             and an empty context (just the generated Dockerfile) is uploaded so
             cwd is not archived. Ignored when ``source`` is a Dockerfile path
             (the Dockerfile's parent directory is used instead).
+        cas: Build a CAS (content-addressed streaming) image through the
+            Image Service instead of a legacy template. Off by default.
+        build_args: Dockerfile build args (``--build-arg KEY=VALUE``),
+            forwarded to BuildKit and expanded in ``FROM`` references. CAS
+            builds only; a legacy build with build args is rejected.
         docker_config_json: Docker config JSON contents for this call. Omit to
             discover local config at entry; pass "{}" to disable discovery.
         verbose: Print progress to stderr. Ignored if ``emit`` is provided.
@@ -613,7 +640,8 @@ def build_sandbox_image(
             ``verbose``. Use this to integrate the builder into custom UIs.
 
     Returns:
-        The registered sandbox template JSON response.
+        The registered image in the sandbox-template shape (camelCase keys),
+        for both families.
 
     Raises:
         SandboxImageLoadError: The source Dockerfile or Image could not be
@@ -688,7 +716,8 @@ def build_sandbox_image(
                 builder_disk_mb=builder_disk_mb,
                 is_public=is_public,
                 docker_compat=docker_compat,
-                cas=False,
+                cas=cas,
+                build_args=dict(build_args) if build_args else None,
                 docker_config_json=docker_config_json,
                 allow_pat=_allow_pat,
                 emit=emit,
@@ -709,6 +738,7 @@ def import_sandbox_image(
     builder_disk_mb: int | None = None,
     is_public: bool = False,
     docker_compat: bool = False,
+    cas: bool = False,
     verbose: bool = False,
     emit: EmitFn | None = None,
     _allow_pat: bool = False,
@@ -738,6 +768,8 @@ def import_sandbox_image(
         is_public: Make the registered image publicly accessible.
         docker_compat: Use Docker/BuildKit max compatibility mode (import is
             slower and uses more memory and disk space on builder sandbox).
+        cas: Import as a CAS (content-addressed streaming) image through the
+            Image Service instead of a legacy template. Off by default.
         docker_config_json: Docker config JSON contents for this call. Omit to
             discover local config at entry; pass "{}" to disable discovery.
         verbose: Print progress to stderr. Ignored if ``emit`` is provided.
@@ -745,7 +777,8 @@ def import_sandbox_image(
             ``verbose``.
 
     Returns:
-        The registered sandbox template JSON response.
+        The registered image in the sandbox-template shape (camelCase keys),
+        for both families.
 
     Raises:
         SandboxImageBuildError: The image reference is empty, or the import
@@ -779,6 +812,7 @@ def import_sandbox_image(
             builder_disk_mb=builder_disk_mb,
             is_public=is_public,
             docker_compat=docker_compat,
+            cas=cas,
             docker_config_json=docker_config_json,
             allow_pat=_allow_pat,
             emit=emit,
