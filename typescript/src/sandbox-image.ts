@@ -6,6 +6,7 @@ import type { SandboxTemplate } from "./cloud-models.js";
 import { Image, ImageBuildOperationType, dockerfileContent } from "./image.js";
 import type { ImageBuildOperation } from "./image.js";
 import { loadNative } from "./native-binding.js";
+import { __runWithInterrupt } from "./image-builds.js";
 
 /**
  * Sandbox-image build engine.
@@ -59,6 +60,14 @@ export interface CreateSandboxImageOptions {
    */
   buildArgs?: Record<string, string>;
   /**
+   * CAS builds only (`cas: true`): aborting requests *remote cancellation*
+   * of the Image Service build through a bounded handshake, and the call
+   * rejects with `ImageBuildInterruptedError` carrying the outcome. It is
+   * rejected for legacy builds, which have no build operation to cancel.
+   * Abandoning the promise alone never cancels anything.
+   */
+  signal?: AbortSignal;
+  /**
    * Print build progress to stderr. Ignored when an explicit `emit` is
    * passed via `deps`. Defaults to false — `createSandboxImage` is silent
    * by default when invoked programmatically (e.g. `Image.build()`).
@@ -95,6 +104,11 @@ export interface ImportSandboxImageOptions {
    * Service instead of a legacy template. Off by default.
    */
   cas?: boolean;
+  /**
+   * CAS imports only (`cas: true`): aborting requests remote cancellation of
+   * the Image Service import; see `CreateSandboxImageOptions.signal`.
+   */
+  signal?: AbortSignal;
   /**
    * Print build progress to stderr. Ignored when an explicit `emit` is
    * passed via `deps`. Defaults to false.
@@ -158,17 +172,69 @@ interface NativeBindingEvent {
   eventType: string;
   stream?: string | undefined | null;
   message: string;
+  /** CAS build events (`build_accepted`, `build_progress`, `build_terminal`, `interrupted`). */
+  buildId?: string | undefined | null;
+  clientRequestId?: string | undefined | null;
+  status?: string | undefined | null;
+  phase?: string | undefined | null;
+  attempt?: number | undefined | null;
+  outcome?: string | undefined | null;
+  confirmed?: boolean | undefined | null;
+}
+
+/** Credentials and scope for build lookups, waits and cancellations. */
+interface NativeBindingBuildClientOptions {
+  apiUrl: string;
+  bearerToken: string;
+  organizationId?: string | undefined | null;
+  projectId?: string | undefined | null;
+  namespace?: string | undefined | null;
+  useScopeHeaders?: boolean | undefined | null;
+  userAgent?: string | undefined | null;
 }
 
 interface NativeBinding {
   loadDockerConfigJson(): string;
+  /** `interruptId` is honored for CAS builds only; legacy builds ignore it. */
   buildSandboxImage(
     options: NativeBindingOptions,
     emit?: ((event: NativeBindingEvent) => void) | null | undefined,
+    interruptId?: number | undefined | null,
   ): Promise<string>;
   importSandboxImage(
     options: NativeBindingImportOptions,
     emit?: ((event: NativeBindingEvent) => void) | null | undefined,
+    interruptId?: number | undefined | null,
+  ): Promise<string>;
+  // --- Image Service build operations (CAS only) ---
+  createImageBuildInterrupt(): number;
+  triggerImageBuildInterrupt(id: number): void;
+  releaseImageBuildInterrupt(id: number): void;
+  /** JSON `{build, client_request_id}` after admission (and context seal). */
+  startImageBuild(
+    options: Omit<NativeBindingOptions, "builderDiskMb" | "dockerCompat">,
+    emit?: ((event: NativeBindingEvent) => void) | null | undefined,
+    interruptId?: number | undefined | null,
+  ): Promise<string>;
+  startImageImport(
+    options: Omit<NativeBindingImportOptions, "builderDiskMb" | "dockerCompat">,
+    emit?: ((event: NativeBindingEvent) => void) | null | undefined,
+    interruptId?: number | undefined | null,
+  ): Promise<string>;
+  /** BuildInfo JSON. */
+  getImageBuild(options: NativeBindingBuildClientOptions, buildId: string): Promise<string>;
+  /** The build's immutable result JSON. */
+  waitImageBuild(
+    options: NativeBindingBuildClientOptions,
+    buildId: string,
+    wait: { timeoutMs?: number | undefined | null; followLogs?: boolean | undefined | null },
+    emit?: ((event: NativeBindingEvent) => void) | null | undefined,
+    interruptId?: number | undefined | null,
+  ): Promise<string>;
+  /** JSON `{outcome, build}`. */
+  cancelImageBuild(
+    options: NativeBindingBuildClientOptions,
+    selector: { buildId?: string | undefined | null; clientRequestId?: string | undefined | null },
   ): Promise<string>;
   /** JSON array of every image of both families, newest first. */
   listSandboxImages(options: NativeBindingCatalogOptions): Promise<string>;
@@ -291,8 +357,35 @@ function eventToEmitDict(event: NativeBindingEvent): Record<string, unknown> {
     message: event.message,
   };
   if (event.stream != null) out.stream = event.stream;
+  // CAS build events carry structured state beside the message.
+  if (event.buildId != null) out.build_id = event.buildId;
+  if (event.clientRequestId !== undefined && event.eventType !== "status") {
+    out.client_request_id = event.clientRequestId;
+  }
+  if (event.status != null) out.status = event.status;
+  if (event.phase !== undefined && event.eventType.startsWith("build_")) out.phase = event.phase;
+  if (event.attempt != null) out.attempt = event.attempt;
+  if (event.outcome != null) out.outcome = event.outcome;
+  if (event.confirmed != null) out.confirmed = event.confirmed;
   return out;
 }
+
+/**
+ * @internal Shared with `image-builds.ts`, which implements the Image
+ * Service build operations on top of the same native binding and
+ * environment context.
+ */
+export const __imageBuildInternals = {
+  loadNativeBinding: () => loadNativeBinding(),
+  buildContextFromEnv: () => buildContextFromEnv(),
+  stderrEmit: (event: Record<string, unknown>) => stderrEmit(event),
+  noopEmit: (event: Record<string, unknown>) => noopEmit(event),
+  eventToEmitDict: (event: NativeBindingEvent) => eventToEmitDict(event),
+  imageRequiresContext: (image: Image) => imageRequiresContext(image),
+  defaultRegisteredName: (dockerfilePath: string) => defaultRegisteredName(dockerfilePath),
+  defaultRegisteredNameFromImage: (reference: string) =>
+    defaultRegisteredNameFromImage(reference),
+};
 
 /**
  * True when a `RUN` op bind-mounts the build context (reads host files).
@@ -447,41 +540,54 @@ export async function createSandboxImage(
       );
     }
 
+    if (options.signal !== undefined && !options.cas) {
+      throw new Error(
+        "signal is only supported for CAS image builds (cas: true); a legacy build has no " +
+          "Image Service build operation to cancel",
+      );
+    }
+
     emit({ type: "status", message: `Building image '${effectiveName}'...` });
 
     const binding = loadNativeBinding();
     let emitError: unknown;
-    const resultJson = await binding.buildSandboxImage(
-      {
-        apiUrl: context.apiUrl,
-        bearerToken,
-        dockerfilePath,
-        registeredName: effectiveName,
-        diskMb: options.diskMb,
-        builderDiskMb: options.builderDiskMb,
-        cpus: options.cpus,
-        memoryMb: options.memoryMb,
-        isPublic: options.isPublic ?? false,
-        organizationId: usePat ? context.organizationId : undefined,
-        projectId: usePat ? context.projectId : undefined,
-        namespace: context.namespace,
-        useScopeHeaders: usePat,
-        userAgent: undefined,
-        dockerCompat: options.dockerCompat ?? false,
-        dockerConfigJson: options.dockerConfigJson,
-        dockerfileText,
-        contextDir: nativeContextDir,
-        cas: options.cas ?? false,
-        buildArgs: options.buildArgs,
-      },
-      (event) => {
-        try {
-          emit(eventToEmitDict(event));
-        } catch (error) {
-          emitError ??= error;
-        }
-      },
-    );
+    const nativeOptions = {
+      apiUrl: context.apiUrl,
+      bearerToken,
+      dockerfilePath,
+      registeredName: effectiveName,
+      diskMb: options.diskMb,
+      builderDiskMb: options.builderDiskMb,
+      cpus: options.cpus,
+      memoryMb: options.memoryMb,
+      isPublic: options.isPublic ?? false,
+      organizationId: usePat ? context.organizationId : undefined,
+      projectId: usePat ? context.projectId : undefined,
+      namespace: context.namespace,
+      useScopeHeaders: usePat,
+      userAgent: undefined,
+      dockerCompat: options.dockerCompat ?? false,
+      dockerConfigJson: options.dockerConfigJson,
+      dockerfileText,
+      contextDir: nativeContextDir,
+      cas: options.cas ?? false,
+      buildArgs: options.buildArgs,
+    };
+    const forward = (event: NativeBindingEvent) => {
+      try {
+        emit(eventToEmitDict(event));
+      } catch (error) {
+        emitError ??= error;
+      }
+    };
+    // CAS builds run through the interrupt-aware bridge so an AbortSignal
+    // reaches the Rust cancellation handshake and typed build errors are
+    // decoded. Legacy builds keep the plain call and its error path.
+    const resultJson = options.cas
+      ? await __runWithInterrupt(options.signal, (interruptId) =>
+          binding.buildSandboxImage(nativeOptions, forward, interruptId),
+        )
+      : await binding.buildSandboxImage(nativeOptions, forward);
 
     if (emitError != null) {
       throw emitError;
@@ -558,6 +664,13 @@ export async function importSandboxImage(
     );
   }
 
+  if (options.signal !== undefined && !options.cas) {
+    throw new Error(
+      "signal is only supported for CAS image imports (cas: true); a legacy import has no " +
+        "Image Service build operation to cancel",
+    );
+  }
+
   emit({
     type: "status",
     message: `Importing image '${reference}' as '${effectiveName}'...`,
@@ -565,34 +678,37 @@ export async function importSandboxImage(
 
   const binding = loadNativeBinding();
   let emitError: unknown;
-  const resultJson = await binding.importSandboxImage(
-    {
-      apiUrl: context.apiUrl,
-      bearerToken,
-      imageReference: reference,
-      registeredName: effectiveName,
-      diskMb: options.diskMb,
-      builderDiskMb: options.builderDiskMb,
-      cpus: options.cpus,
-      memoryMb: options.memoryMb,
-      isPublic: options.isPublic ?? false,
-      organizationId: usePat ? context.organizationId : undefined,
-      projectId: usePat ? context.projectId : undefined,
-      namespace: context.namespace,
-      useScopeHeaders: usePat,
-      userAgent: undefined,
-      dockerCompat: options.dockerCompat ?? false,
-      dockerConfigJson: options.dockerConfigJson,
-      cas: options.cas ?? false,
-    },
-    (event) => {
-      try {
-        emit(eventToEmitDict(event));
-      } catch (error) {
-        emitError ??= error;
-      }
-    },
-  );
+  const nativeOptions = {
+    apiUrl: context.apiUrl,
+    bearerToken,
+    imageReference: reference,
+    registeredName: effectiveName,
+    diskMb: options.diskMb,
+    builderDiskMb: options.builderDiskMb,
+    cpus: options.cpus,
+    memoryMb: options.memoryMb,
+    isPublic: options.isPublic ?? false,
+    organizationId: usePat ? context.organizationId : undefined,
+    projectId: usePat ? context.projectId : undefined,
+    namespace: context.namespace,
+    useScopeHeaders: usePat,
+    userAgent: undefined,
+    dockerCompat: options.dockerCompat ?? false,
+    dockerConfigJson: options.dockerConfigJson,
+    cas: options.cas ?? false,
+  };
+  const forward = (event: NativeBindingEvent) => {
+    try {
+      emit(eventToEmitDict(event));
+    } catch (error) {
+      emitError ??= error;
+    }
+  };
+  const resultJson = options.cas
+    ? await __runWithInterrupt(options.signal, (interruptId) =>
+        binding.importSandboxImage(nativeOptions, forward, interruptId),
+      )
+    : await binding.importSandboxImage(nativeOptions, forward);
 
   if (emitError != null) {
     throw emitError;
@@ -663,6 +779,19 @@ function parseTemplate(json: string): SandboxTemplate {
  * a CAS image, a `sandbox_template_` id or a name registered only in the
  * platform registry deletes a legacy image. Rejects when neither catalog
  * knows the reference.
+ *
+ * Deleting removes a *published* image. An unfinished CAS build is cancelled
+ * with `cancelImageBuild({ buildId })` (or `tl sbx image build cancel
+ * BUILD_ID`), never by deleting its name: a name whose only state is an
+ * unfinished first build has no image, so the Image Service answers 404 and
+ * the lookup falls through to the platform registry as usual. A 202
+ * (deletion in progress) counts as success; a 409 `image_build_in_progress`,
+ * a 5xx or a transport failure rejects as is and never falls through.
+ *
+ * Accepted merged-catalog differences from the released SDKs, for legacy
+ * images: this deletes the platform-api template itself (the released SDKs
+ * only removed the engine registration and left the template listed), and
+ * an unknown name rejects instead of succeeding silently.
  */
 export async function deleteSandboxImage(imageName: string): Promise<void> {
   if (typeof imageName !== "string" || imageName.length === 0) {
@@ -693,6 +822,16 @@ export async function deleteSandboxImageWithCredentials(
  * and `buildId`), or `null` if neither the Image Service nor the platform
  * registry knows the reference. Uses the same environment-based Tensorlake
  * auth as `createSandboxImage`. Ingress derives project scope from the API key.
+ *
+ * An `image_` id names the *current* image under its name; a rebuild
+ * replaces it. A build's own immutable result is read with `getImageBuild`.
+ *
+ * Accepted merged-catalog difference from the released SDKs, for legacy
+ * images: a name that fits the Image Service grammar is looked up there first
+ * and only a clean 404 falls through to the platform registry, so Image
+ * Service unavailability (or a deploy 5xx) rejects the lookup of a legacy name
+ * where the released SDKs touched only platform-api. A `sandbox_template_` id
+ * never consults the Image Service.
  */
 export async function findSandboxImageByName(
   imageName: string,

@@ -125,6 +125,11 @@ fn parse_snapshot_registration_metadata(
 /// registered through the Image Service (adoption, ADR 0107 D9-D12); a
 /// completed legacy snapshot through the platform template registry, with
 /// the Dockerfile stored when one is given.
+///
+/// A CAS registration that the service answers with 202 continues as a
+/// build operation: the CLI reports its id, waits for durable publication
+/// (Ctrl+C cancels it) and prints the same final output. Legacy registration
+/// is unchanged and never touches the Image Service.
 pub async fn run(
     ctx: &CliContext,
     image_name: &str,
@@ -142,10 +147,23 @@ pub async fn run(
             eprintln!("⚠️  --dockerfile is ignored for CAS snapshots.");
         }
         let catalog = super::sandbox_image_catalog(ctx)?;
+        let guard = super::build::CasInterruptGuard::install();
+        let mut renderer = super::ImageBuildEventRenderer::new();
         let registered = catalog
             .image_service()
-            .adopt_snapshot(image_name, snapshot_id, is_public)
-            .await?;
+            .adopt_snapshot_and_wait(
+                image_name,
+                snapshot_id,
+                is_public,
+                guard.interrupt(),
+                |event| {
+                    guard.observe(&event);
+                    renderer.render(event)
+                },
+            )
+            .await
+            .map_err(super::build::build_error)?;
+        drop(renderer);
         let rootfs_disk_bytes = registered.rootfs_disk_bytes.unwrap_or(0);
         let snapshot_uri = registered.snapshot_uri.clone().unwrap_or_default();
         print_registered(

@@ -73,6 +73,7 @@ pub mod docker_config;
 pub mod document_ai;
 pub mod error;
 pub mod http_transport;
+pub mod image_builds;
 mod image_service_builds;
 pub mod images;
 pub mod retry;
