@@ -206,6 +206,11 @@ export function installNativeStub(overrides?: {
   };
 
   const binding: NativeSandboxBinding = {
+    NativeTcpTunnel: class {
+      async listen(): Promise<number> { throw new Error("tunnel stub not configured"); }
+      async close(): Promise<void> {}
+      async waitClosed(): Promise<void> {}
+    },
     // Mirrors the Rust `validate_managed_name` rule so tests drive accept/reject: reject
     // only empty, names containing '/', and all-digit names (reserved for PID).
     validateManagedName: (name: string) => {

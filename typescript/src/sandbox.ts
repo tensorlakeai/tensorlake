@@ -240,7 +240,7 @@ class SandboxProxyConnection {
     wsHeaders: Record<string, string>;
   } {
     // `baseUrl`/`wsHeaders` are still computed here for the WebSocket consumers
-    // (PTY, tunnel, desktop), which do not flow through the native HTTP client.
+    // (PTY, tunnel, desktop), including the Rust TCP relay's handshake.
     const { baseUrl, hostHeader, sandboxIdHeader } = resolveProxyTarget(
       proxyUrl,
       sandboxId,

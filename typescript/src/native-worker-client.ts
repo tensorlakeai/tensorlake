@@ -229,6 +229,11 @@ export function createWorkerBinding(
         return runtime.handle("NativeRepositoryClient", args);
       }
     },
+    NativeTcpTunnel: class {
+      constructor() {
+        return runtime.handle("NativeTcpTunnel", []);
+      }
+    },
     validateManagedName: (name: string) =>
       runtime.call(undefined, "validateManagedName", [name]),
   } as unknown as NativeSandboxBinding;
