@@ -1741,9 +1741,11 @@ enum ImageCommands {
         /// Completed snapshot ID backing this image
         snapshot_id: String,
 
-        /// Dockerfile to store in the platform sandbox template registry
+        /// Dockerfile to store with a legacy (non-CAS) image for reference.
+        /// Optional; CAS snapshots are registered through the Image Service,
+        /// which stores no Dockerfile.
         #[arg(long = "dockerfile", value_name = "PATH")]
-        dockerfile_path: String,
+        dockerfile_path: Option<String>,
 
         /// Whether the registered image should be public
         #[arg(long)]
@@ -1854,7 +1856,8 @@ enum ImageCommands {
 
     /// List all sandbox images
     Ls {
-        /// Show only CAS (content-addressed streaming) images
+        /// Accepted for compatibility and ignored: the list always includes
+        /// CAS and legacy images, told apart by the Format column.
         #[arg(long)]
         cas: bool,
 
@@ -2748,7 +2751,7 @@ async fn run_command(
                                 ctx,
                                 &image_name,
                                 &snapshot_id,
-                                &dockerfile_path,
+                                dockerfile_path.as_deref(),
                                 public,
                             )
                             .await
@@ -5231,8 +5234,26 @@ mod tests {
             })) => {
                 assert_eq!(image_name, "mighty-agent-0.0.69");
                 assert_eq!(snapshot_id, "snap_123");
-                assert_eq!(dockerfile_path, "./Dockerfile");
+                assert_eq!(dockerfile_path.as_deref(), Some("./Dockerfile"));
                 assert!(public);
+            }
+            _ => panic!("expected sbx image register command"),
+        }
+    }
+
+    #[test]
+    fn image_register_parses_without_a_dockerfile() {
+        match parse_command(["tl", "sbx", "image", "register", "cas-agent", "snap_123"]) {
+            Commands::Sbx(SbxCommands::Image(ImageCommands::Register {
+                image_name,
+                snapshot_id,
+                dockerfile_path,
+                public,
+            })) => {
+                assert_eq!(image_name, "cas-agent");
+                assert_eq!(snapshot_id, "snap_123");
+                assert_eq!(dockerfile_path, None);
+                assert!(!public);
             }
             _ => panic!("expected sbx image register command"),
         }

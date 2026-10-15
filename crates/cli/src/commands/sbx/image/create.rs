@@ -69,9 +69,9 @@ pub async fn run(
     .await
     .map_err(|error| CliError::Other(error.into()))?;
 
-    if output_json || cas {
-        // --cas prints the published Image Service image record; --json
-        // remains the opt-in for the legacy platform path.
+    if output_json {
+        // Both families answer the platform template shape (ADR 0107 D28);
+        // --json is the only opt-in for printing it.
         println!("{}", serde_json::to_string_pretty(&registered)?);
     }
 
