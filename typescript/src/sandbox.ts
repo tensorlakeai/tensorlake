@@ -957,9 +957,8 @@ export class Sandbox {
    *
    * Resource targets use create's cpus, memoryMb, and diskMb names. Resize
    * waits by default; wait=false returns admission. Timeout does not cancel it.
-   * CPU-only CAS sandboxes support CPU, memory, and root-disk resize; GPU CAS sandboxes
-   * support only root-disk growth and reject CPU and memory changes.
-   * Non-CAS sandboxes do not support live resize.
+   * Which runtimes and dimensions support a live resize is decided by the
+   * server, whose policy error is thrown unchanged.
    * Wait, timeout, and pollInterval are ignored on non-resource updates.
    * A no-op returns current resources with absent or earlier resize metadata.
    *
