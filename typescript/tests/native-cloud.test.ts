@@ -232,7 +232,9 @@ describe.skipIf(process.env.TENSORLAKE_TEST_NATIVE_CLOUD !== "1")("native cloud 
     await expect(client.requestResponse("GET", "/500")).rejects.toThrow("test error");
   });
 
-  it("returns a missing image after 404 even when its unused error body is truncated", async () => {
+  it("returns a status-only 404 even when its unused error body is truncated", async () => {
+    // Image lookups moved to the merged catalog in the native binding; the
+    // transport property they relied on is exercised directly.
     let attempts = 0;
     handler = (_request, response) => {
       attempts++;
@@ -240,9 +242,9 @@ describe.skipIf(process.env.TENSORLAKE_TEST_NATIVE_CLOUD !== "1")("native cloud 
       response.write("not found");
       setImmediate(() => response.destroy());
     };
-    const client = new CloudClient({ apiUrl: url, maxRetries: 1, retryBackoffMs: 1 });
-    clients.push(client);
-    expect(await client.findSandboxImageByName("missing")).toBeNull();
+    const client = transport({ maxRetries: 1 });
+    const response = await client.requestResponse("GET", "/missing", { statusOnlyCodes: new Set([404]) });
+    expect(response.status).toBe(404);
     expect(attempts).toBe(1);
   });
 
