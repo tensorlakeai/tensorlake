@@ -307,48 +307,37 @@ pub async fn run(args: &[&str], replies: Vec<Reply>, cwd: &std::path::Path) -> C
     .expect("CLI and fixture must finish within 60 seconds")
 }
 
-/// A build record as the Image Service reports it.
+/// A build record as the Image Service reports it (the twelve-field
+/// `BuildInfo`).
 pub fn build_json(build_id: &str, status: &str, result: Option<Value>) -> Value {
-    json!({
+    let mut record = json!({
         "build_id": build_id,
-        "client_request_id": "rid-1",
-        "project": "project-test",
-        "image_scope": "executor_fleet",
-        "kind": "import",
         "name": "img",
+        "kind": "import",
         "status": status,
         "phase": if status == "succeeded" { "finished" } else { "executing" },
         "attempt_no": 1,
-        "builder_sandbox_id": null,
-        "builder_resources": {"cpus": 2.0, "memory_mb": 4096},
-        "result": result,
-        "cleanup_pending": false,
-        "phase_deadline_ms": null,
-        "operation_deadline_ms": null,
         "created_at_ms": 1_760_000_000_000_u64,
         "updated_at_ms": 1_760_000_100_000_u64,
-    })
+    });
+    if let Some(result) = result {
+        record["result"] = result;
+    }
+    record
 }
 
-/// The Image Service's tenant record for a published image.
+/// The Image Service's tenant record for a published image: the trimmed
+/// eight fields. The SDK derives the template shape from them.
 pub fn image_record(public_id: &str, name: &str) -> Value {
     json!({
         "id": public_id,
         "name": name,
         "snapshot_id": "snap-cas",
-        "snapshot_uri": "snapshot://snap-cas",
-        "snapshot_sandbox_id": null,
-        "snapshot_format_version": "content_addressed_streaming_v1",
-        "snapshot_size_bytes": 42,
-        "rootfs_disk_bytes": 10_737_418_240_u64,
-        "rootfs_node_kind": "base",
-        "public": false,
-        "dockerfile": "",
-        "created_by_user_id": null,
+        "global": false,
+        "physical_size_bytes": 42,
+        "logical_size_bytes": 10_737_418_240_u64,
         "created_at": "2026-10-15T00:00:00.000Z",
         "updated_at": "2026-10-15T00:00:00.000Z",
-        "image_id": "a".repeat(64),
-        "build_id": "build-1",
     })
 }
 

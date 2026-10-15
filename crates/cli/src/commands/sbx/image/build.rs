@@ -251,7 +251,11 @@ pub async fn wait(
         .await
         .map_err(build_error)?;
     drop(renderer);
-    eprintln!("⚙️  Image '{}' registered ({})", result.name, result.id);
+    eprintln!(
+        "⚙️  Image '{}' registered ({})",
+        result.name.as_deref().unwrap_or("-"),
+        result.id.as_deref().unwrap_or("-")
+    );
     if output_json {
         println!("{}", serde_json::to_string_pretty(&result)?);
     }
@@ -318,7 +322,8 @@ pub fn cancel_outcome_lines(
             {
                 lines.push(format!(
                     "Image '{}' registered ({})",
-                    result.name, result.id
+                    result.name.as_deref().unwrap_or("-"),
+                    result.id.as_deref().unwrap_or("-")
                 ));
             }
             lines
@@ -376,17 +381,21 @@ fn print_build_info(info: &ImageBuildInfo) {
         ),
         ("Created", format_epoch_ms(info.created_at_ms)),
         ("Updated", format_epoch_ms(info.updated_at_ms)),
-        ("Phase deadline", format_epoch_ms(info.phase_deadline_ms)),
         (
             "Operation deadline",
             format_epoch_ms(info.operation_deadline_ms),
         ),
-        ("Cleanup pending", info.cleanup_pending.to_string()),
         (
             "Result",
             info.result
                 .as_ref()
-                .map(|result| format!("{} ({})", result.name, result.id))
+                .map(|result| {
+                    format!(
+                        "{} ({})",
+                        result.name.as_deref().unwrap_or("-"),
+                        result.id.as_deref().unwrap_or("-")
+                    )
+                })
                 .unwrap_or_else(|| "-".to_string()),
         ),
         (

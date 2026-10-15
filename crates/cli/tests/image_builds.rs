@@ -34,7 +34,8 @@ async fn build_get_prints_the_record_and_json() {
     assert!(stdout.contains("build-1"), "{stdout}");
     assert!(stdout.contains("running"), "{stdout}");
     assert!(stdout.contains("executing"), "{stdout}");
-    assert!(stdout.contains("Cleanup pending"), "{stdout}");
+    assert!(stdout.contains("Operation deadline"), "{stdout}");
+    assert!(!stdout.contains("Cleanup pending"), "{stdout}");
     assert_eq!(
         run_table.lines(),
         vec!["GET /images/v4/builds/build-1 HTTP/1.1"]
@@ -137,8 +138,19 @@ async fn build_wait_returns_the_operations_own_result() {
     .await;
     assert!(waited.output.status.success(), "{}", waited.stderr());
     let parsed: Value = serde_json::from_str(&waited.stdout()).expect("valid JSON on stdout");
+    // The result is the template-shaped record the catalog answers (camelCase,
+    // derived from the trimmed service record): no provenance extras.
     assert_eq!(parsed["id"], "image_ok");
-    assert_eq!(parsed["build_id"], "build-1");
+    assert_eq!(parsed["snapshotId"], "snap-cas");
+    assert_eq!(
+        parsed["snapshotFormatVersion"],
+        "content_addressed_streaming_v1"
+    );
+    assert!(
+        parsed.get("build_id").is_none() && parsed.get("buildId").is_none(),
+        "{parsed}"
+    );
+    assert!(parsed.get("imageId").is_none(), "{parsed}");
     assert!(
         waited
             .stderr()
@@ -483,7 +495,6 @@ async fn cas_create_no_wait_uploads_and_seals_then_prints_the_build_id() {
     admission["kind"] = json!("dockerfile");
     admission["context_upload"] = json!({
         "url": format!("{}/upload/build-9", server.url),
-        "method": "PUT",
         "max_bytes": 10_000_000,
     });
     server.script(vec![
@@ -517,6 +528,9 @@ async fn cas_create_no_wait_uploads_and_seals_then_prints_the_build_id() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "{stderr}");
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "build-9");
+    // The upload capability stays inside the admission step: nothing the
+    // handle reports carries it.
+    assert!(!stderr.contains("/upload/build-9"), "{stderr}");
     let lines: Vec<&str> = requests
         .iter()
         .map(|request| request.line.as_str())
@@ -785,7 +799,7 @@ async fn cas_ctrl_c_before_admission_resolves_by_request_id() {
 }
 
 #[tokio::test]
-async fn cas_register_waits_after_202_and_keeps_its_final_output() {
+async fn cas_register_retries_a_pending_registration_and_keeps_its_final_output() {
     let dir = tempfile::tempdir().unwrap();
     let snapshot = json!({
         "snapshot_id": "snap-cas",
@@ -796,8 +810,14 @@ async fn cas_register_waits_after_202_and_keeps_its_final_output() {
         "size_bytes": 42,
         "rootfs_disk_bytes": 10_737_418_240_u64,
     });
-    let mut direct = build_json("build-2", "pending", None);
-    direct["kind"] = json!("direct");
+    // The service never answers 202 for an adoption: a still-running
+    // operation is `503 publication_pending` naming the build, and the
+    // identical request under the same key joins it until it publishes.
+    let pending = json!({
+        "error": "registration of \"img\" is still pending (build build-2)",
+        "code": "publication_pending",
+        "build_id": "build-2",
+    });
     let registered = run(
         &["image", "register", "img", "snap-cas"],
         vec![
@@ -808,16 +828,18 @@ async fn cas_register_waits_after_202_and_keeps_its_final_output() {
                 200,
                 snapshot.clone(),
             ),
-            reply("POST", "/images/v4/images/from-snapshot", 202, direct),
             reply(
-                "GET",
-                "/images/v4/builds/build-2",
-                200,
-                build_json(
-                    "build-2",
-                    "succeeded",
-                    Some(image_record("image_reg", "img")),
-                ),
+                "POST",
+                "/images/v4/images/from-snapshot",
+                503,
+                pending.clone(),
+            ),
+            reply("POST", "/images/v4/images/from-snapshot", 503, pending),
+            reply(
+                "POST",
+                "/images/v4/images/from-snapshot",
+                201,
+                image_record("image_reg", "img"),
             ),
         ],
         dir.path(),
@@ -828,26 +850,51 @@ async fn cas_register_waits_after_202_and_keeps_its_final_output() {
         "{}",
         registered.stderr()
     );
-    let stdout = registered.stdout();
-    assert!(
-        stdout.contains("Registered image 'img' -> snapshot snap-cas"),
-        "{stdout}"
+    // The shared printer's output is unchanged: the CAS branch prints the
+    // derived `snapshot://` handle where the legacy branch prints the
+    // archive URI.
+    assert_eq!(
+        registered.stdout(),
+        "Registered image 'img' -> snapshot snap-cas (rootfs 10 GiB)\nTemplate: image_reg\n\
+         snapshot://snap-cas\n"
     );
-    assert!(stdout.contains("Template: image_reg"), "{stdout}");
     assert!(
-        registered.stderr().contains("continues as build build-2"),
+        registered
+            .stderr()
+            .contains("pending (build build-2); waiting for publication"),
         "{}",
         registered.stderr()
     );
-    let adoption = registered
+    let adoptions: Vec<_> = registered
         .requests
         .iter()
-        .find(|request| request.path() == "/images/v4/images/from-snapshot")
-        .unwrap();
-    assert_eq!(adoption.header("idempotency-key").map(str::len), Some(32));
-    assert_eq!(adoption.json()["snapshot_id"], "snap-cas");
+        .filter(|request| request.path() == "/images/v4/images/from-snapshot")
+        .collect();
+    assert_eq!(adoptions.len(), 3, "{:?}", registered.lines());
+    let keys: std::collections::HashSet<_> = adoptions
+        .iter()
+        .map(|request| request.header("idempotency-key").map(str::to_string))
+        .collect();
+    assert_eq!(keys.len(), 1, "one key across every retry");
+    assert_eq!(
+        adoptions[0].header("idempotency-key").map(str::len),
+        Some(32)
+    );
+    assert!(
+        adoptions
+            .iter()
+            .all(|request| request.json()["snapshot_id"] == "snap-cas")
+    );
+    assert!(
+        !registered
+            .lines()
+            .iter()
+            .any(|line| line.contains("/images/v4/builds/")),
+        "the pending registration is joined by replay, never polled: {:?}",
+        registered.lines()
+    );
 
-    // 201 publishes directly: no poll, same output.
+    // 201 publishes directly: no retry, same output.
     let published = run(
         &["image", "register", "img", "snap-cas"],
         vec![
@@ -869,11 +916,7 @@ async fn cas_register_waits_after_202_and_keeps_its_final_output() {
     )
     .await;
     assert!(published.output.status.success(), "{}", published.stderr());
-    assert!(
-        published.stdout().contains("Template: image_reg"),
-        "{}",
-        published.stdout()
-    );
+    assert_eq!(published.stdout(), registered.stdout());
     assert!(
         !published
             .lines()

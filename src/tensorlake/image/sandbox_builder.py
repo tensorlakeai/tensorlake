@@ -487,9 +487,10 @@ def find_sandbox_image_by_name(image_name: str) -> dict | None:
     """Look up a registered sandbox image by its registered name or id.
 
     Returns the image as a dict in the sandbox-template shape (CAS images
-    carry ``snapshot_format_version == "content_addressed_streaming_v1"``
-    plus ``image_id`` and ``build_id``), or ``None`` if neither the Image
-    Service nor the platform registry knows the reference. Uses the same
+    carry ``snapshot_format_version == "content_addressed_streaming_v1"``;
+    the shape is derived from the Image Service's trimmed record, so no
+    content digest or build provenance rides on it), or ``None`` if neither
+    the Image Service nor the platform registry knows the reference. Uses the same
     environment-based Tensorlake auth as :func:`build_sandbox_image`. Ingress
     derives project scope from the API key.
 

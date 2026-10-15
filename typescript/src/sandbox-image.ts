@@ -818,9 +818,10 @@ export async function deleteSandboxImageWithCredentials(
  * Look up a registered sandbox image by its registered name or id.
  *
  * Returns the image in the sandbox-template shape (CAS images carry
- * `snapshotFormatVersion === "content_addressed_streaming_v1"` plus `imageId`
- * and `buildId`), or `null` if neither the Image Service nor the platform
- * registry knows the reference. Uses the same environment-based Tensorlake
+ * `snapshotFormatVersion === "content_addressed_streaming_v1"`; the shape is
+ * derived from the Image Service's trimmed record, so no content digest or
+ * build provenance rides on it), or `null` if neither the Image Service nor
+ * the platform registry knows the reference. Uses the same environment-based Tensorlake
  * auth as `createSandboxImage`. Ingress derives project scope from the API key.
  *
  * An `image_` id names the *current* image under its name; a rebuild

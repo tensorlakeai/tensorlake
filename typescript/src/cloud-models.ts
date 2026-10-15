@@ -161,8 +161,9 @@ export interface ApplicationBuildResponse {
  * A registered sandbox image in the platform template shape. Both image
  * families answer it: legacy templates verbatim from the platform API, and
  * CAS images (`snapshotFormatVersion === "content_addressed_streaming_v1"`)
- * mapped from the Image Service record, which adds the `imageId` content
- * digest and `buildId` provenance fields.
+ * derived by the core from the Image Service's trimmed record (id, name,
+ * snapshot id, visibility, sizes, timestamps); no content digest or build
+ * provenance rides on either.
  */
 export interface SandboxTemplate {
   id?: string;
@@ -179,10 +180,6 @@ export interface SandboxTemplate {
   createdByUserId?: string;
   createdAt?: string;
   updatedAt?: string;
-  /** Content digest of a CAS image (provenance only). */
-  imageId?: string;
-  /** The build that published a CAS image's current content (provenance only). */
-  buildId?: string;
 }
 
 /** A registered file system as returned by the platform API. */

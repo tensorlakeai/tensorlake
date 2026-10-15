@@ -38,7 +38,6 @@ def _ctx(**overrides):
 def _build_json(build_id="build-1", status="pending", **extra):
     record = {
         "build_id": build_id,
-        "client_request_id": "rid-1",
         "kind": "dockerfile",
         "name": "img",
         "status": status,
@@ -46,7 +45,6 @@ def _build_json(build_id="build-1", status="pending", **extra):
         "attempt_no": 1,
         "builder_sandbox_id": None,
         "result": None,
-        "cleanup_pending": False,
         "operation_deadline_ms": None,
         "future_field": {"ignored": True},
     }
@@ -55,23 +53,22 @@ def _build_json(build_id="build-1", status="pending", **extra):
 
 
 def _result_json(public_id="image_ok", name="img"):
+    """A build result as the Rust core hands it over: the template shape
+    (camelCase keys) derived from the Image Service's trimmed record."""
     return {
         "id": public_id,
         "name": name,
-        "snapshot_id": "snap-cas",
-        "snapshot_uri": "snapshot://snap-cas",
-        "snapshot_sandbox_id": None,
-        "snapshot_format_version": "content_addressed_streaming_v1",
-        "snapshot_size_bytes": 42,
-        "rootfs_disk_bytes": 10 * 1024**3,
-        "rootfs_node_kind": "base",
+        "snapshotId": "snap-cas",
+        "snapshotSandboxId": None,
+        "snapshotUri": "snapshot://snap-cas",
+        "snapshotFormatVersion": "content_addressed_streaming_v1",
+        "snapshotSizeBytes": 42,
+        "rootfsDiskBytes": 10 * 1024**3,
+        "rootfsNodeKind": "base",
         "public": False,
         "dockerfile": "",
-        "created_by_user_id": None,
-        "created_at": "2026-10-15T00:00:00Z",
-        "updated_at": "2026-10-15T00:00:00Z",
-        "image_id": "a" * 64,
-        "build_id": "build-1",
+        "createdAt": "2026-10-15T00:00:00Z",
+        "updatedAt": "2026-10-15T00:00:00Z",
     }
 
 
@@ -317,6 +314,50 @@ class TestGetWaitCancel(unittest.TestCase):
         )
         self.assertEqual(handle.info.status, "succeeded")
         self.assertEqual(handle.info.result["id"], "image_ok")
+
+    def test_results_are_the_catalog_lookup_dict(self):
+        """``wait()``, a refreshed ``info.result`` and
+        ``find_sandbox_image_by_name`` present one image representation:
+        snake_case keys over the template shape, with no digest or build
+        provenance extras."""
+        from tensorlake.image import sandbox_builder as sbm
+
+        core_result = json.dumps(_result_json())
+        with (
+            patch.object(builds, "_build_context_from_env", return_value=_ctx()),
+            patch.object(sbm, "_build_context_from_env", return_value=_ctx()),
+            patch.object(
+                builds,
+                "_rust_get_image_build",
+                return_value=json.dumps(
+                    _build_json(status="succeeded", result=_result_json())
+                ),
+            ),
+            patch.object(builds, "_rust_wait_image_build", return_value=core_result),
+            patch.object(
+                sbm, "_rust_find_sandbox_image_by_name", return_value=core_result
+            ),
+        ):
+            handle = builds.get_build("build-1")
+            looked_up = sbm.find_sandbox_image_by_name("img")
+            self.assertEqual(handle.info.result, looked_up)
+            self.assertEqual(handle.wait(), looked_up)
+            self.assertEqual(handle.info.raw["result"], looked_up)
+        self.assertEqual(looked_up["snapshot_id"], "snap-cas")
+        self.assertEqual(looked_up["snapshot_uri"], "snapshot://snap-cas")
+        self.assertEqual(looked_up["rootfs_disk_bytes"], 10 * 1024**3)
+        self.assertNotIn("snapshotId", looked_up)
+        self.assertNotIn("image_id", looked_up)
+        self.assertNotIn("build_id", looked_up)
+        # The trimmed build view carries no cleanup state or upload capability.
+        info = builds.ImageBuildInfo.from_dict(
+            _build_json(
+                cleanup_pending=True,
+                context_upload={"url": "https://upload.test/ctx", "max_bytes": 1},
+            )
+        )
+        self.assertFalse(hasattr(info, "cleanup_pending"))
+        self.assertFalse(hasattr(info, "context_upload"))
 
     def test_wait_distinguishes_failed_cancelled_and_timeout(self):
         cases = [

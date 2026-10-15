@@ -73,7 +73,6 @@
 //! are the immutable record of one operation.
 
 use std::{
-    collections::BTreeMap,
     fmt,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -89,11 +88,15 @@ use crate::{
         ResolvedBuildContext, SandboxImageBuildError, SandboxImageBuildEvent,
         SandboxImageBuildOptions, SandboxImageImportOptions,
     },
+    sandbox_templates::models::SandboxTemplate,
 };
 
-/// The immutable publication result of one build: the image record exactly
-/// as the build published it, in the Image Service's own shape.
-pub type ImageBuildResult = ImageServiceImage;
+/// The immutable publication result of one build: the image exactly as the
+/// build published it, presented in the platform template shape the merged
+/// catalog answers (derived locally from the Image Service's trimmed
+/// record, see [`ImageServiceImage::into_template`]). One image
+/// representation for the SDK and the CLI.
+pub type ImageBuildResult = SandboxTemplate;
 
 /// The header carrying the client request id on admission routes.
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -238,91 +241,38 @@ wire_enum! {
     }
 }
 
-/// The builder sandbox's resources, as resolved by the service.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct BuilderResources {
-    pub cpus: f64,
-    pub memory_mb: u64,
-}
-
-/// A registered image the build pins as a parent.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ImageBuildParent {
-    pub reference: String,
-    pub public_id: String,
-}
-
 /// Where a Dockerfile build uploads its context, issued at admission (and
-/// re-issued on an exact replay) while the context is unsealed.
+/// re-issued on an exact replay) while the context is unsealed. Carried by
+/// the admission response only; it never appears on [`ImageBuildInfo`], so
+/// no `info()` output, `--json` print or binding record leaks the signed URL.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextUploadCapability {
     pub url: String,
     #[serde(default)]
-    pub method: Option<String>,
-    #[serde(default)]
     pub max_bytes: Option<u64>,
 }
 
-/// One build or import, as the Image Service reports it. Unknown fields are
-/// ignored so newer services remain readable.
+/// One build or import, as the Image Service reports it (the twelve-field
+/// `BuildInfo`). Unknown fields are ignored so newer services remain
+/// readable.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ImageBuildInfo {
     pub build_id: String,
-    /// The client request id the admission carried, when the service retains
-    /// it. The SDK never needs it back to cancel.
-    #[serde(default)]
-    pub client_request_id: Option<String>,
-    #[serde(default)]
-    pub project: Option<String>,
-    #[serde(default)]
-    pub image_scope: Option<String>,
     #[serde(default = "unknown_kind")]
     pub kind: ImageBuildKind,
+    /// The image name the operation publishes.
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default = "unknown_status")]
     pub status: ImageBuildStatus,
     #[serde(default)]
     pub phase: Option<ImageBuildPhase>,
+    /// Builder executions so far.
     #[serde(default)]
     pub attempt_no: u64,
+    /// The builder sandbox of the active attempt, while the build is running.
     #[serde(default)]
     pub builder_sandbox_id: Option<String>,
-    #[serde(default)]
-    pub builder_resources: Option<BuilderResources>,
-    #[serde(default)]
-    pub target_size_bytes: Option<u64>,
-    #[serde(default)]
-    pub scratch_size_bytes: Option<u64>,
-    #[serde(default)]
-    pub image_ref: Option<String>,
-    #[serde(default)]
-    pub dockerfile_path: Option<String>,
-    #[serde(default)]
-    pub build_args: BTreeMap<String, String>,
-    #[serde(default)]
-    pub context_digest: Option<String>,
-    #[serde(default)]
-    pub context_seal_deadline_ms: Option<u64>,
-    #[serde(default)]
-    pub parents: Vec<ImageBuildParent>,
-    #[serde(default)]
-    pub has_registry_credentials: Option<bool>,
-    #[serde(default)]
-    pub trace_id: Option<String>,
-    #[serde(default)]
-    pub image_id: Option<String>,
-    #[serde(default)]
-    pub public_id: Option<String>,
-    #[serde(default)]
-    pub error: Option<String>,
-    /// The immutable publication result of a succeeded build.
-    #[serde(default)]
-    pub result: Option<ImageBuildResult>,
-    #[serde(default)]
-    pub cleanup_pending: bool,
-    #[serde(default)]
-    pub phase_deadline_ms: Option<u64>,
     /// When the service gives the whole operation up, as epoch milliseconds.
     /// The SDK adds [`DEPLOYMENT_RECOVERY_ALLOWANCE`] when bounding a wait.
     #[serde(default)]
@@ -331,9 +281,22 @@ pub struct ImageBuildInfo {
     pub created_at_ms: Option<u64>,
     #[serde(default)]
     pub updated_at_ms: Option<u64>,
-    /// Present on an admission response for an unsealed Dockerfile build.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context_upload: Option<ContextUploadCapability>,
+    /// The immutable publication result of a succeeded build, in the
+    /// template shape (decoded from the service's trimmed record).
+    #[serde(default, deserialize_with = "deserialize_result")]
+    pub result: Option<ImageBuildResult>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// The service reports `result` as its trimmed image record; the SDK keeps
+/// the template-shaped projection of it.
+fn deserialize_result<'de, D>(deserializer: D) -> Result<Option<ImageBuildResult>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let wire: Option<ImageServiceImage> = Option::deserialize(deserializer)?;
+    Ok(wire.map(ImageServiceImage::into_template))
 }
 
 fn unknown_kind() -> ImageBuildKind {
@@ -502,7 +465,12 @@ impl fmt::Display for InterruptionReport {
             InterruptionOutcome::AlreadyCompleted(result) => {
                 write!(f, "Build {} already completed", build.unwrap_or("-"))?;
                 if let Some(result) = result {
-                    write!(f, " (image '{}', {})", result.name, result.id)?;
+                    write!(
+                        f,
+                        " (image '{}', {})",
+                        result.name.as_deref().unwrap_or("-"),
+                        result.id.as_deref().unwrap_or("-")
+                    )?;
                 }
                 Ok(())
             }
@@ -801,7 +769,9 @@ impl ImageBuildClient {
         Ok(ImageBuildHandle {
             client: self.clone(),
             build_id: info.build_id.clone(),
-            client_request_id: info.client_request_id.clone(),
+            // The service no longer reports the admission key; a handle from
+            // a lookup cancels by build id, which is the sufficient selector.
+            client_request_id: None,
             info,
         })
     }
@@ -969,6 +939,7 @@ mod tests {
             "future_field": {"x": 1},
             "result": null,
             "cleanup_pending": true,
+            "context_upload": {"url": "https://upload.test/ctx", "max_bytes": 8192},
             "operation_deadline_ms": 1_000,
         }))
         .unwrap();
@@ -977,7 +948,12 @@ mod tests {
             info.phase,
             Some(ImageBuildPhase::Unknown("warming".to_string()))
         );
-        assert!(info.cleanup_pending);
+        // Removed pre-trim fields and the upload capability are not part of
+        // the record: `info()` output never carries the signed URL.
+        let json = serde_json::to_value(&info).unwrap();
+        assert!(json.get("cleanup_pending").is_none(), "{json}");
+        assert!(json.get("context_upload").is_none(), "{json}");
+        assert!(!json.to_string().contains("upload.test"), "{json}");
         assert_eq!(
             info.operation_deadline(),
             Some(UNIX_EPOCH + Duration::from_millis(1_000) + DEPLOYMENT_RECOVERY_ALLOWANCE)

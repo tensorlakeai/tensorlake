@@ -43,7 +43,9 @@ use crate::{
         ImageBuildInfo, ImageBuildPhase, ImageBuildResult, ImageBuildStatus, ImageBuildWaitOptions,
         InterruptSignal, InterruptionOutcome, InterruptionReport, new_client_request_id,
     },
-    sandbox_image_catalog::{IMAGE_SERVICE_ID_PREFIX, ImageServiceImage, is_image_service_id},
+    sandbox_image_catalog::{
+        IMAGE_SERVICE_ID_PREFIX, ImageServiceImage, RegistrationWait, is_image_service_id,
+    },
     sandbox_images::{
         CommonBuildOptions, DockerfileBuildPlan, ResolvedBuildContext, SandboxImageBuildError,
         SandboxImageBuildEvent, SandboxImageContextFile, UnresolvableImageReferenceReason,
@@ -89,7 +91,7 @@ const MAX_PINNED_PARENTS: usize = 3;
 const DEFAULT_CAS_IMAGE_DISK_MB: u64 = 10 * 1024;
 const BYTES_PER_MIB: u64 = 1024 * 1024;
 
-const BUILD_POLL_INTERVAL: Duration = Duration::from_secs(3);
+pub(crate) const BUILD_POLL_INTERVAL: Duration = Duration::from_secs(3);
 const BUILDER_LOG_CHANNEL_CAPACITY: usize = 256;
 const BUILDER_LOG_DRAIN_GRACE: Duration = Duration::from_secs(2);
 const BUILDER_PROCESS_DISCOVERY_ATTEMPTS: usize = 10;
@@ -153,9 +155,9 @@ where
     // both build paths receive one record kind (ADR 0107 D18, D28).
     emit(SandboxImageBuildEvent::Status(format!(
         "Image '{registered_name}' registered ({})",
-        result.id
+        result.id.as_deref().unwrap_or("-")
     )));
-    Ok(serde_json::to_value(result.into_template())?)
+    Ok(serde_json::to_value(result)?)
 }
 
 /// Admit a build plan without waiting: resolve parents, admit under a fresh
@@ -225,6 +227,7 @@ where
             &mut emit,
         )
         .await?
+        .info
     } else {
         // A legacy template named like a Dockerfile reference cannot be a CAS
         // parent; the platform registry is consulted only to say so (D32).
@@ -266,7 +269,7 @@ where
             _ = interrupt.triggered() => None,
             sealed = upload_and_seal_context(
                 &client,
-                &created.build_id,
+                &created.info.build_id,
                 &upload,
                 &plan,
                 injected_dockerfile.as_deref(),
@@ -278,12 +281,13 @@ where
             Some(sealed) => sealed?,
             None => {
                 let report =
-                    interruption_for_build(&client, &created.build_id, Some(&request_id)).await;
+                    interruption_for_build(&client, &created.info.build_id, Some(&request_id))
+                        .await;
                 emit(SandboxImageBuildEvent::Interrupted(report.clone()));
                 return Err(ImageBuildError::Interrupted(report));
             }
         }
-        created
+        created.info
     };
 
     Ok(ImageBuildHandle {
@@ -668,7 +672,7 @@ fn direct_pin_public_id(reference: &str) -> Result<Option<String>> {
 /// rejects) and fall through to a registry pull, matching how the legacy
 /// path treats template-registry misses.
 async fn lookup_catalog_name(client: &Client, reference: &str) -> Result<Option<String>> {
-    let path = format!("/names/{reference}");
+    let path = format!("/images/name/{reference}");
     let request = client.request(Method::GET, &path).build()?;
     let response = client.execute_raw(request).await?;
     match response.status() {
@@ -767,6 +771,11 @@ struct ImageServiceErrorBody {
     message: Option<String>,
     #[serde(default)]
     code: Option<String>,
+    /// The build an error concerns (`build_failed`, `build_cancelled`,
+    /// `client_request_id_mismatch`, `publication_pending`), flattened into
+    /// the envelope by the service.
+    #[serde(default)]
+    build_id: Option<String>,
     #[serde(default)]
     image_name: Option<String>,
     #[serde(default)]
@@ -962,6 +971,30 @@ fn decode_build(body: &str) -> BuildResult<ImageBuildInfo> {
     Ok(ImageBuildInfo::from_json(value)?)
 }
 
+/// An admission response: the build plus, for a dockerfile build whose
+/// context is unsealed, the upload capability. The capability lives only
+/// here, for the upload and seal step; [`ImageBuildInfo`] never carries it.
+#[derive(Debug)]
+pub(crate) struct AdmittedBuild {
+    pub(crate) info: ImageBuildInfo,
+    pub(crate) context_upload: Option<ContextUploadCapability>,
+}
+
+fn decode_admission(body: &str) -> BuildResult<AdmittedBuild> {
+    let mut value: Value = serde_json::from_str(body)?;
+    let context_upload = match value
+        .as_object_mut()
+        .and_then(|object| object.remove("context_upload"))
+    {
+        Some(Value::Null) | None => None,
+        Some(capability) => Some(serde_json::from_value(capability)?),
+    };
+    Ok(AdmittedBuild {
+        info: ImageBuildInfo::from_json(value)?,
+        context_upload,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Admission
 // ---------------------------------------------------------------------------
@@ -978,7 +1011,7 @@ pub(crate) async fn admit_build(
     request_id: &str,
     interrupt: &InterruptSignal,
     emit: &mut impl FnMut(SandboxImageBuildEvent),
-) -> BuildResult<ImageBuildInfo> {
+) -> BuildResult<AdmittedBuild> {
     emit(SandboxImageBuildEvent::Status(
         "Creating Image Service build...".to_string(),
     ));
@@ -993,7 +1026,7 @@ pub(crate) async fn admit_build(
         let response = send_raw(client, request).await?;
         match response.status {
             StatusCode::OK | StatusCode::CREATED | StatusCode::ACCEPTED => {
-                decode_build(&response.body).map_err(RequestFailure::from)
+                decode_admission(&response.body).map_err(RequestFailure::from)
             }
             status => Err(RequestFailure::new(
                 service_error(status, &response.body, Some(request_id)),
@@ -1012,28 +1045,33 @@ pub(crate) async fn admit_build(
         }
     };
     emit(SandboxImageBuildEvent::Accepted {
-        build_id: created.build_id.clone(),
+        build_id: created.info.build_id.clone(),
         client_request_id: Some(request_id.to_string()),
     });
     emit(SandboxImageBuildEvent::Status(accepted_build_message(
-        &created,
+        &created.info,
     )));
     Ok(created)
 }
 
 /// Admit a direct publication (`POST /images/from-snapshot`) under
-/// `request_id`: 201 is the published image, 202 the operation to wait on.
-/// Conflicts and validation answers are typed like build admission; an
-/// interruption while unresolved resolves through the request id.
+/// `request_id`: 201 is the published image, `503 publication_pending` the
+/// operation to keep retrying under the same key. Conflicts and validation
+/// answers are typed like build admission; an interruption while unresolved
+/// resolves through the request id. Every request is bounded by `wait`'s
+/// absolute registration deadline: the per-request reconnect budget is
+/// clamped to it and a request still in flight at the deadline is abandoned
+/// and reported as the registration timeout.
 pub(crate) async fn admit_direct(
     client: &Client,
     path: &str,
     body: &Value,
     request_id: &str,
+    wait: &RegistrationWait,
     interrupt: &InterruptSignal,
 ) -> BuildResult<crate::sandbox_image_catalog::SnapshotAdoption> {
     use crate::sandbox_image_catalog::SnapshotAdoption;
-    let deadline = Instant::now() + ADMISSION_RETRY_BUDGET;
+    let deadline = (Instant::now() + ADMISSION_RETRY_BUDGET).min(wait.deadline);
     let mut silent = |_event| {};
     let attempted = with_reconnects(
         "Image Service",
@@ -1047,11 +1085,36 @@ pub(crate) async fn admit_direct(
                 .json(body)
                 .build()
                 .map_err(SdkError::Http)?;
-            let response = send_raw(client, request).await?;
+            let remaining = wait.deadline.saturating_duration_since(Instant::now());
+            let response = match tokio::time::timeout(remaining, send_raw(client, request)).await {
+                Ok(response) => response?,
+                // The registration deadline passed while the request was in
+                // flight: abandon it. A 408 is retryable, so the reconnect
+                // loop reports expiry rather than a definitive failure.
+                Err(_elapsed) => {
+                    return Err(RequestFailure::new(
+                        ImageBuildError::Service {
+                            status: StatusCode::REQUEST_TIMEOUT.as_u16(),
+                            message: "the registration wait expired during the request".to_string(),
+                        },
+                        None,
+                    ));
+                }
+            };
             match response.status {
-                StatusCode::ACCEPTED => decode_build(&response.body)
-                    .map(|info| SnapshotAdoption::Accepted(Box::new(info)))
-                    .map_err(RequestFailure::from),
+                StatusCode::SERVICE_UNAVAILABLE => {
+                    let parsed: ImageServiceErrorBody =
+                        serde_json::from_str(&response.body).unwrap_or_default();
+                    match (parsed.code.as_deref(), parsed.build_id) {
+                        (Some("publication_pending"), Some(build_id)) => {
+                            Ok(SnapshotAdoption::Pending { build_id })
+                        }
+                        _ => Err(RequestFailure::new(
+                            service_error(response.status, &response.body, Some(request_id)),
+                            response.retry_after,
+                        )),
+                    }
+                }
                 status if status.is_success() => {
                     let image: ImageServiceImage =
                         serde_json::from_str(&response.body).map_err(ImageBuildError::Json)?;
@@ -1067,7 +1130,14 @@ pub(crate) async fn admit_direct(
     .await;
     match attempted {
         Attempted::Done(adoption) => Ok(adoption),
-        Attempted::Failed(error) | Attempted::Expired(error) => Err(error),
+        Attempted::Failed(error) => Err(error),
+        Attempted::Expired(error) => {
+            if Instant::now() >= wait.deadline {
+                Err(wait.timeout(request_id))
+            } else {
+                Err(error)
+            }
+        }
         Attempted::Interrupted => Err(ImageBuildError::Interrupted(
             interruption_for_unresolved_admission(client, request_id).await,
         )),
@@ -1075,13 +1145,7 @@ pub(crate) async fn admit_direct(
 }
 
 fn accepted_build_message(created: &ImageBuildInfo) -> String {
-    match &created.builder_resources {
-        Some(resources) => format!(
-            "Build {} accepted (builder: {} CPU, {} MiB)",
-            created.build_id, resources.cpus, resources.memory_mb
-        ),
-        None => format!("Build {} accepted", created.build_id),
-    }
+    format!("Build {} accepted", created.build_id)
 }
 
 // ---------------------------------------------------------------------------
@@ -1197,7 +1261,7 @@ fn interruption_outcome(response: CancelBuildResponse) -> InterruptionOutcome {
 
 /// The handshake for an admitted build: cancel by build id within the
 /// budget and report what the service observed.
-async fn interruption_for_build(
+pub(crate) async fn interruption_for_build(
     client: &Client,
     build_id: &str,
     client_request_id: Option<&str>,
@@ -1283,12 +1347,8 @@ async fn upload_and_seal_context(
         )));
     }
 
-    let method = upload
-        .method
-        .as_deref()
-        .unwrap_or("PUT")
-        .parse::<Method>()
-        .map_err(|_| ImageBuildError::other("context upload capability method is invalid"))?;
+    // The capability is always a PUT; the service no longer spells it out.
+    let method = Method::PUT;
 
     emit(SandboxImageBuildEvent::Status(format!(
         "Uploading build context ({tar_bytes} bytes)..."
@@ -1963,7 +2023,11 @@ mod tests {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     use super::*;
-    use crate::{ClientBuilder, image_builds::ImageBuildKind};
+    use crate::{
+        ClientBuilder,
+        image_builds::ImageBuildKind,
+        sandbox_image_catalog::{ImageServiceCatalog, RegistrationWaitPolicy},
+    };
 
     #[test]
     fn dockerfile_and_import_requests_apply_global_scope_or_private_default() {
@@ -2034,16 +2098,13 @@ mod tests {
     }
 
     #[test]
-    fn accepted_build_message_reports_resolved_resources_when_available() {
+    fn accepted_build_message_names_the_build_only() {
+        // The service no longer echoes the resolved builder resources.
         assert_eq!(
             accepted_build_message(&info_from(serde_json::json!({
                 "build_id": "build-1",
                 "builder_resources": {"cpus": 2.5, "memory_mb": 6144},
             }))),
-            "Build build-1 accepted (builder: 2.5 CPU, 6144 MiB)"
-        );
-        assert_eq!(
-            accepted_build_message(&info_from(serde_json::json!({"build_id": "build-1"}))),
             "Build build-1 accepted"
         );
     }
@@ -2431,15 +2492,18 @@ mod tests {
         // The result is the build's own immutable record; the template shape
         // is derived from it (ADR 0107 D18/D28), never re-read.
         let result = terminal_result(&info).unwrap();
-        assert_eq!(result.id, "image_abc123");
-        assert_eq!(result.name, "image-1");
-        let image = serde_json::to_value(result.into_template()).unwrap();
+        assert_eq!(result.id.as_deref(), Some("image_abc123"));
+        assert_eq!(result.name.as_deref(), Some("image-1"));
+        let image = serde_json::to_value(result).unwrap();
         assert_eq!(image["snapshotId"], "snap123");
         assert_eq!(
             image["snapshotFormatVersion"],
             "content_addressed_streaming_v1"
         );
-        assert_eq!(image["imageId"], image_id);
+        assert!(
+            image.get("imageId").is_none(),
+            "no digest extra on the derived record: {image}"
+        );
         assert!(events.contains(&SandboxImageBuildEvent::BuildLog {
             stream: "stdout".to_string(),
             message: "still building".to_string(),
@@ -2528,8 +2592,12 @@ mod tests {
         .unwrap();
 
         let result = terminal_result(&info).unwrap();
-        assert_eq!(result.id, "image_def456");
-        assert_eq!(result.image_id.as_deref(), Some(image_id.as_str()));
+        assert_eq!(result.id.as_deref(), Some("image_def456"));
+        assert_eq!(
+            result.snapshot_format_version.as_deref(),
+            Some("content_addressed_streaming_v1"),
+            "the template shape is derived from the trimmed record"
+        );
         assert_eq!(attempt_one_attaches.load(Ordering::Relaxed), 1);
         assert_eq!(attempt_two_attaches.load(Ordering::Relaxed), 1);
         assert_eq!(
@@ -2597,7 +2665,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(created.build_id, "build-1");
+        assert_eq!(created.info.build_id, "build-1");
         let requests = server.finish().await;
         assert_eq!(requests.len(), 3);
         for request in &requests {
@@ -2743,8 +2811,8 @@ mod tests {
             .unwrap();
         assert_eq!(completed.outcome, CancelBuildOutcome::AlreadyCompleted);
         assert_eq!(
-            completed.build.unwrap().result.unwrap().id,
-            "image_won".to_string()
+            completed.build.unwrap().result.unwrap().id.as_deref(),
+            Some("image_won")
         );
 
         let not_admitted = cancel_build(
@@ -3046,6 +3114,172 @@ mod tests {
         assert_eq!(requests[2].json(), json!({"build_id": "build-1"}));
     }
 
+    fn pending_reply(build_id: &str) -> Reply {
+        Reply::Status(
+            503,
+            json!({
+                "error": "registration is still pending",
+                "code": "publication_pending",
+                "build_id": build_id,
+            }),
+        )
+    }
+
+    fn registration_policy(limit: Duration, poll_interval: Duration) -> RegistrationWaitPolicy {
+        RegistrationWaitPolicy {
+            limit,
+            poll_interval,
+        }
+    }
+
+    /// A `publication_pending` answer is progress, not unavailability: the
+    /// registration keeps re-POSTing the identical request under the same
+    /// key until the image publishes, announcing the pending build once.
+    #[tokio::test]
+    async fn registration_retries_pending_answers_under_one_key_until_published() {
+        let (base_url, server) = recording_image_service(vec![
+            pending_reply("build-9"),
+            pending_reply("build-9"),
+            pending_reply("build-9"),
+            Reply::Status(
+                201,
+                published_image_record("image_reg", "img", &"a".repeat(64)),
+            ),
+        ])
+        .await;
+        let client = ClientBuilder::new(&base_url).build().unwrap();
+        let catalog = ImageServiceCatalog::new(&client, &base_url);
+        let mut events = Vec::new();
+        let template = catalog
+            .adopt_snapshot_and_wait_with(
+                "img",
+                "snap-cas",
+                false,
+                registration_policy(Duration::from_secs(10), Duration::from_millis(10)),
+                &InterruptSignal::new(),
+                |event| events.push(event),
+            )
+            .await
+            .unwrap();
+        assert_eq!(template.id.as_deref(), Some("image_reg"));
+        assert_eq!(
+            template.snapshot_format_version.as_deref(),
+            Some("content_addressed_streaming_v1")
+        );
+        let requests = server.completed().await;
+        assert_eq!(requests.len(), 4);
+        let keys: HashSet<String> = requests
+            .iter()
+            .map(|request| request.header("idempotency-key").unwrap().to_string())
+            .collect();
+        assert_eq!(keys.len(), 1, "one key across every retry");
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.line.ends_with("/images/from-snapshot HTTP/1.1")),
+            "{:?}",
+            requests.iter().map(|r| &r.line).collect::<Vec<_>>()
+        );
+        let key = keys.into_iter().next().unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, SandboxImageBuildEvent::Accepted { .. }))
+                .count(),
+            1,
+            "the pending build is announced once"
+        );
+        assert!(events.contains(&SandboxImageBuildEvent::Accepted {
+            build_id: "build-9".to_string(),
+            client_request_id: Some(key),
+        }));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            SandboxImageBuildEvent::Status(message) if message.contains("pending (build build-9)")
+        )));
+    }
+
+    /// A pending streak past the registration wait bound is a timeout naming
+    /// the pending build; nothing is cancelled and no fresh key is minted.
+    #[tokio::test]
+    async fn registration_pending_past_the_bound_times_out_naming_the_build() {
+        let replies: Vec<Reply> = (0..40).map(|_| pending_reply("build-9")).collect();
+        let (base_url, server) = recording_image_service(replies).await;
+        let client = ClientBuilder::new(&base_url).build().unwrap();
+        let catalog = ImageServiceCatalog::new(&client, &base_url);
+        let started = Instant::now();
+        let error = catalog
+            .adopt_snapshot_and_wait_with(
+                "img",
+                "snap-cas",
+                false,
+                registration_policy(Duration::from_millis(250), Duration::from_millis(40)),
+                &InterruptSignal::new(),
+                |_| {},
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        let ImageBuildError::Timeout { build_id, .. } = error else {
+            panic!("expected a timeout, got {error}");
+        };
+        assert_eq!(build_id, "build-9");
+        let requests = server.finish().await;
+        assert!(requests.len() >= 2, "{}", requests.len());
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.line.ends_with("/images/from-snapshot HTTP/1.1")),
+            "no cancel and nothing but the same POST: {:?}",
+            requests.iter().map(|r| &r.line).collect::<Vec<_>>()
+        );
+        let keys: HashSet<String> = requests
+            .iter()
+            .map(|request| request.header("idempotency-key").unwrap().to_string())
+            .collect();
+        assert_eq!(keys.len(), 1);
+    }
+
+    /// A POST still in flight when the registration deadline passes is
+    /// abandoned at the deadline rather than running its own reconnect
+    /// budget to the end; no answer ever named a build, so the timeout
+    /// names the request id.
+    #[tokio::test]
+    async fn registration_abandons_an_in_flight_request_at_the_deadline() {
+        let (base_url, server) =
+            recording_image_service(vec![Reply::Hang(Duration::from_secs(3))]).await;
+        let client = ClientBuilder::new(&base_url).build().unwrap();
+        let catalog = ImageServiceCatalog::new(&client, &base_url);
+        let started = Instant::now();
+        let error = catalog
+            .adopt_snapshot_and_wait_with(
+                "img",
+                "snap-cas",
+                false,
+                registration_policy(Duration::from_millis(300), Duration::from_millis(40)),
+                &InterruptSignal::new(),
+                |_| {},
+            )
+            .await
+            .unwrap_err();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(250) && elapsed < Duration::from_secs(2),
+            "{elapsed:?}"
+        );
+        let ImageBuildError::Timeout { build_id, waited } = error else {
+            panic!("expected a timeout, got {error}");
+        };
+        assert!(build_id.starts_with("(request "), "{build_id}");
+        assert!(waited >= Duration::from_millis(250));
+        let requests = server.finish().await;
+        assert_eq!(requests.len(), 1, "no second POST and no cancel");
+    }
+
     /// Interrupted before the admission answered: the admission is not
     /// replayed; the request id resolves it through the cancel route, and
     /// `not_admitted` is reported as exactly that.
@@ -3144,7 +3378,7 @@ mod tests {
         };
         match &report.outcome {
             InterruptionOutcome::AlreadyCompleted(Some(result)) => {
-                assert_eq!(result.id, "image_won");
+                assert_eq!(result.id.as_deref(), Some("image_won"));
             }
             other => panic!("unexpected outcome {other:?}"),
         }
@@ -3275,25 +3509,19 @@ mod tests {
         ImageBuildInfo::from_json(value).unwrap()
     }
 
-    /// The Image Service's tenant record for a published image.
-    fn published_image_record(public_id: &str, name: &str, image_id: &str) -> Value {
+    /// The Image Service's tenant record for a published image: the trimmed
+    /// eight fields. `_image_id` is accepted for the callers that still
+    /// name the content; the record carries no digest.
+    fn published_image_record(public_id: &str, name: &str, _image_id: &str) -> Value {
         json!({
             "id": public_id,
             "name": name,
             "snapshot_id": "snap123",
-            "snapshot_uri": "snapshot://snap123",
-            "snapshot_sandbox_id": null,
-            "snapshot_format_version": "content_addressed_streaming_v1",
-            "snapshot_size_bytes": 42,
-            "rootfs_disk_bytes": 10_737_418_240_u64,
-            "rootfs_node_kind": "base",
-            "public": false,
-            "dockerfile": "",
-            "created_by_user_id": null,
+            "global": false,
+            "physical_size_bytes": 42,
+            "logical_size_bytes": 10_737_418_240_u64,
             "created_at": "2026-10-15T00:00:00.000Z",
             "updated_at": "2026-10-15T00:00:00.000Z",
-            "image_id": image_id,
-            "build_id": "build-1",
         })
     }
 

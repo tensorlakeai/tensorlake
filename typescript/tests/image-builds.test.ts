@@ -29,7 +29,6 @@ type Emit = (event: Record<string, unknown>) => void;
 function buildJson(status = "pending", extra: Record<string, unknown> = {}) {
   return {
     build_id: "build-1",
-    client_request_id: "rid-1",
     kind: "dockerfile",
     name: "img",
     status,
@@ -37,31 +36,28 @@ function buildJson(status = "pending", extra: Record<string, unknown> = {}) {
     attempt_no: 1,
     builder_sandbox_id: null,
     result: null,
-    cleanup_pending: false,
     operation_deadline_ms: null,
     future_field: { ignored: true },
     ...extra,
   };
 }
 
+/** A build result as the core hands it over: the template shape derived from the trimmed record. */
 function resultJson() {
   return {
     id: "image_ok",
     name: "img",
-    snapshot_id: "snap-cas",
-    snapshot_uri: "snapshot://snap-cas",
-    snapshot_sandbox_id: null,
-    snapshot_format_version: "content_addressed_streaming_v1",
-    snapshot_size_bytes: 42,
-    rootfs_disk_bytes: 10737418240,
-    rootfs_node_kind: "base",
+    snapshotId: "snap-cas",
+    snapshotSandboxId: null,
+    snapshotUri: "snapshot://snap-cas",
+    snapshotFormatVersion: "content_addressed_streaming_v1",
+    snapshotSizeBytes: 42,
+    rootfsDiskBytes: 10737418240,
+    rootfsNodeKind: "base",
     public: false,
     dockerfile: "",
-    created_by_user_id: null,
-    created_at: "2026-10-15T00:00:00Z",
-    updated_at: "2026-10-15T00:00:00Z",
-    image_id: "a".repeat(64),
-    build_id: "build-1",
+    createdAt: "2026-10-15T00:00:00Z",
+    updatedAt: "2026-10-15T00:00:00Z",
   };
 }
 
@@ -251,7 +247,13 @@ describe("image build operations", () => {
     const handle = await getImageBuild("build-1");
     const result = await handle.wait({ timeoutMs: 1500, followLogs: true, emit: (e) => events.push(e) });
     expect(result.id).toBe("image_ok");
-    expect(result.buildId).toBe("build-1");
+    // One image representation: the result is the template-shaped record
+    // the catalog answers, with no digest or build provenance extras.
+    expect(result.snapshotFormatVersion).toBe("content_addressed_streaming_v1");
+    expect(result.snapshotUri).toBe("snapshot://snap-cas");
+    expect(result).toEqual(resultJson());
+    expect("buildId" in result).toBe(false);
+    expect("imageId" in result).toBe(false);
     expect(handle.info.status).toBe("succeeded");
     const [, buildId, waitOptions, , interruptId] = binding.waitImageBuild.mock.calls[0] as unknown as [
       unknown,
