@@ -5,6 +5,7 @@
 #![allow(clippy::too_many_arguments)]
 
 mod function_agent;
+mod tunnel;
 
 use std::future::Future;
 use std::io::Write;
@@ -4510,6 +4511,7 @@ fn _cloud_sdk(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<CloudSandboxClient>()?;
     module.add_class::<CloudSandboxProxyClient>()?;
     module.add_class::<CloudSandboxDesktopClient>()?;
+    module.add_class::<tunnel::CloudTcpTunnel>()?;
     module.add_class::<CloudDocumentAIClient>()?;
     module.add_class::<function_agent::FunctionAgentCore>()?;
     module.add_function(wrap_pyfunction!(create_image_context_file, module)?)?;

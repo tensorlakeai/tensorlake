@@ -1,164 +1,244 @@
-import errno
-import queue
+"""Binding regressions against real sockets; transport stress tests live in Rust."""
+
+import asyncio
+import concurrent.futures
+import inspect
 import socket
-import threading
-import time
 import unittest
 from unittest.mock import patch
 
-import tensorlake.sandbox.sandbox as sandbox_module
-import tensorlake.sandbox.tunnel as tunnel_module
-from tensorlake.sandbox import Sandbox, TcpTunnel, TunnelAddress
+from websockets.asyncio.server import serve
+from websockets.exceptions import ConnectionClosed
+
+from tensorlake.sandbox import AsyncTcpTunnel, TcpTunnel, TunnelAddress
 from tensorlake.sandbox.exceptions import SandboxError
 from tensorlake.sandbox.tunnel import build_tunnel_ws_url
 
-_WS_BINARY = 0x2
-_WS_CLOSE = 0x8
-_WS_PONG = 0xA
 
+class TunnelTestsMixin:
+    tunnel_class = TcpTunnel
 
-class _FakeRustProxyClient:
-    def __init__(self, *args, **kwargs):
-        pass
+    async def start(self, base_url="http://127.0.0.1:1", **kwargs):
+        kwargs = {
+            "base_url": base_url,
+            "ws_headers": {},
+            "remote_port": 9000,
+            "local_port": 0,
+            **kwargs,
+        }
+        tunnel = self.tunnel_class.listen(**kwargs)
+        if inspect.isawaitable(tunnel):
+            tunnel = await tunnel
+        self.addAsyncCleanup(self.close_tunnel, tunnel)
+        return tunnel
 
-    def close(self):
-        return None
+    async def close_tunnel(self, tunnel):
+        result = tunnel.close()
+        if inspect.isawaitable(result):
+            await result
 
-    def base_url(self):
-        return "http://localhost:9443"
+    async def server(self, handler):
+        server = await serve(handler, "127.0.0.1", 0, close_timeout=0.1)
 
+        async def close():
+            server.close()
+            await server.wait_closed()
 
-class _FakeWebSocketConnection:
-    """Stands in for ``websocket.WebSocket`` in the sync relay."""
+        self.addAsyncCleanup(close)
+        return f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}"
 
-    def __init__(self):
-        self.sent = []
-        self.frames = queue.Queue()
-        self.close_sent = False
-        self.shutdown_called = False
-        self.pings = 0
-        self.timeout = None
-        self.send_error = None
-        self.send_close_error = None
-        self.answer_close = True
-
-    def settimeout(self, timeout):
-        self.timeout = timeout
-
-    def send_binary(self, data):
-        if self.send_error is not None:
-            raise self.send_error
-        self.sent.append(bytes(data))
-
-    def send_close(self, status=1000, reason=b""):
-        if self.send_close_error is not None:
-            raise self.send_close_error
-        self.close_sent = True
-        if self.answer_close:
-            # Server answers the close handshake.
-            self.frames.put((_WS_CLOSE, b""))
-
-    def ping(self, payload=b""):
-        self.pings += 1
-
-    def recv_data(self, control_frame=False):
-        item = self.frames.get(timeout=5)
-        if item is None:
-            raise ConnectionError("websocket closed")
-        if isinstance(item, Exception):
-            raise item
-        return item
-
-    def shutdown(self):
-        self.shutdown_called = True
-        self.frames.put(None)
-
-
-class _FlakyListener:
-    """Wraps a listening socket so ``accept`` raises scripted errors first."""
-
-    def __init__(self, listener, errors):
-        self._listener = listener
-        self._errors = list(errors)
-        self.accept_calls = 0
-
-    def accept(self):
-        self.accept_calls += 1
-        if self._errors:
-            raise self._errors.pop(0)
-        return self._listener.accept()
-
-    def __getattr__(self, name):
-        return getattr(self._listener, name)
-
-
-class _FakeWebSocketModule:
-    def __init__(self, ws=None, error=None):
-        self.ws = ws
-        self.error = error
-        self.calls = []
-        # Set by tests that need the connect to block until released.
-        self.connecting = threading.Event()
-        self.release = threading.Event()
-        self.release.set()
-
-    def create_connection(self, url, header=None, timeout=None, **kwargs):
-        self.connecting.set()
-        self.release.wait(timeout=5)
-        self.calls.append(
-            {
-                "url": url,
-                "header": list(header or []),
-                "timeout": timeout,
-                "host": kwargs.get("host"),
-            }
+    async def connect(self, tunnel):
+        reader, writer = await asyncio.open_connection(
+            tunnel.local_host, tunnel.local_port
         )
-        if self.error is not None:
-            raise self.error
-        return self.ws
+        self.addCleanup(writer.close)
+        return reader, writer
 
+    async def test_routing_headers_binary_data_and_remote_close(self):
+        headers = {}
 
-def _wait_until(predicate, timeout=2.0):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        time.sleep(0.01)
-    return predicate()
+        async def peer(ws):
+            headers.update(ws.request.headers)
+            self.assertEqual(ws.request.path, "/api/v1/tunnels/tcp?port=9000")
+            self.assertEqual(await ws.recv(), b"hello")
+            await ws.send(bytes([0, 255, 128, 1]))
 
+        url = await self.server(peer)
+        tunnel = await self.start(
+            url,
+            ws_headers={
+                "Host": "sbx.local",
+                "Authorization": "Bearer test-key",
+                "x-tensorlake-sandbox-id": "sbx-test",
+                "x-tensorlake-route-hint": "route-test",
+            },
+        )
+        reader, writer = await self.connect(tunnel)
+        writer.write(b"hello")
+        self.assertEqual(
+            await asyncio.wait_for(reader.read(), 3), bytes([0, 255, 128, 1])
+        )
+        self.assertEqual(headers["host"], "sbx.local")
+        self.assertEqual(headers["authorization"], "Bearer test-key")
+        self.assertEqual(headers["x-tensorlake-sandbox-id"], "sbx-test")
+        self.assertEqual(headers["x-tensorlake-route-hint"], "route-test")
+        self.assertEqual(tunnel.remote_port, 9000)
+        self.assertEqual(
+            tunnel.address(), TunnelAddress("127.0.0.1", tunnel.local_port)
+        )
 
-def _free_port() -> int:
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return probe.getsockname()[1]
+    async def test_concurrent_immediate_writes_and_large_payloads(self):
+        async def echo(ws):
+            try:
+                async for data in ws:
+                    await ws.send(data)
+            except ConnectionClosed:
+                pass
 
+        tunnel = await self.start(await self.server(echo))
 
-class TestTcpTunnel(unittest.TestCase):
-    def make_sandbox(self, proxy_url="http://localhost:9443", sandbox_id="sbx-1"):
-        fake = _FakeRustProxyClient()
+        def exercise():
+            def one(n):
+                data = bytes([n]) * (256 * 1024 if n % 10 == 0 else 128)
+                with socket.create_connection(
+                    (tunnel.local_host, tunnel.local_port), timeout=5
+                ) as client:
+                    client.sendall(data)
+                    received = bytearray()
+                    while len(received) < len(data):
+                        chunk = client.recv(len(data) - len(received))
+                        self.assertTrue(chunk, f"premature EOF on connection {n}")
+                        received.extend(chunk)
+                    self.assertEqual(received, data)
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as clients:
+                list(clients.map(one, range(100)))
+
+        await asyncio.wait_for(asyncio.to_thread(exercise), 30)
+
+    async def test_close_stops_listener_and_active_connections(self):
+        connected = asyncio.Event()
+
+        async def peer(ws):
+            connected.set()
+            await ws.wait_closed()
+
+        tunnel = await self.start(await self.server(peer))
+        reader, _ = await self.connect(tunnel)
+        await asyncio.wait_for(connected.wait(), 3)
+        await asyncio.wait_for(self.close_tunnel(tunnel), 1)
+        self.assertTrue(tunnel.closed)
+        self.assertEqual(await asyncio.wait_for(reader.read(), 1), b"")
+        with self.assertRaises(OSError):
+            await asyncio.open_connection(tunnel.local_host, tunnel.local_port)
+        await self.close_tunnel(tunnel)
+
+    async def test_close_during_handshake(self):
+        connected = asyncio.Event()
+
+        async def stalled(reader, writer):
+            connected.set()
+            await reader.read()
+            writer.close()
+
+        server = await asyncio.start_server(stalled, "127.0.0.1", 0)
+        self.addCleanup(server.close)
+        tunnel = await self.start(
+            f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+        )
+        reader, _ = await self.connect(tunnel)
+        await asyncio.wait_for(connected.wait(), 3)
+        await asyncio.wait_for(self.close_tunnel(tunnel), 1)
+        self.assertEqual(await asyncio.wait_for(reader.read(), 1), b"")
+
+    async def test_connect_failure_closes_only_that_connection(self):
+        tunnel = await self.start()
+        reader, _ = await self.connect(tunnel)
+        self.assertEqual(await asyncio.wait_for(reader.read(), 3), b"")
+        self.assertFalse(tunnel.closed)
+
+    async def test_bind_failure_is_sandbox_error(self):
+        with socket.socket() as occupied:
+            occupied.bind(("127.0.0.1", 0))
+            occupied.listen()
+            with self.assertRaisesRegex(SandboxError, "failed to bind"):
+                await self.start(local_port=occupied.getsockname()[1])
+
+    async def test_rejects_invalid_arguments(self):
+        for args in [{"remote_port": p} for p in [0, -1, 65536, True, "80"]] + [
+            {"local_port": -1},
+            {"connect_timeout": 0},
+            {"connect_timeout": -1},
+            {"connect_timeout": float("nan")},
+            {"connect_timeout": "invalid"},
+        ]:
+            with self.subTest(args=args), self.assertRaises(SandboxError):
+                await self.start(**args)
+
+    async def test_local_port_defaults_to_remote_port(self):
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        tunnel = await self.start(remote_port=port, local_port=None)
+        self.assertEqual(tunnel.local_port, port)
+
+    async def test_context_manager(self):
+        tunnel = await self.start()
+        if isinstance(tunnel, AsyncTcpTunnel):
+            async with tunnel as entered:
+                self.assertIs(entered, tunnel)
+        else:
+            with tunnel as entered:
+                self.assertIs(entered, tunnel)
+        self.assertTrue(tunnel.closed)
+
+    async def test_sandbox_create_tunnel_preserves_host_routing(self):
+        import tensorlake.sandbox.async_sandbox as async_module
+        import tensorlake.sandbox.sandbox as sync_module
+        from tensorlake.sandbox import AsyncSandbox, Sandbox
+
+        is_async = self.tunnel_class is AsyncTcpTunnel
+        module, cls = (
+            (async_module, AsyncSandbox) if is_async else (sync_module, Sandbox)
+        )
+
+        class FakeProxy:
+            def __init__(self, **kwargs):
+                pass
+
+            def close(self):
+                pass
+
+            def base_url(self):
+                return url
+
+        key = "RustCloudSandboxProxyClient"
+
+        async def peer(ws):
+            self.assertEqual(ws.request.headers["host"], "sbx-test.local")
+            await ws.send(b"ready")
+            await ws.wait_closed()
+
+        url = await self.server(peer)
         with (
-            patch.object(sandbox_module, "_RUST_SANDBOX_PROXY_CLIENT_AVAILABLE", True),
-            patch.object(
-                sandbox_module,
-                "RustCloudSandboxProxyClient",
-                side_effect=lambda **kwargs: fake,
-            ),
+            patch.object(module, "_RUST_SANDBOX_PROXY_CLIENT_AVAILABLE", True),
+            patch.object(module, key, FakeProxy),
         ):
-            sandbox = Sandbox(
-                sandbox_id=sandbox_id,
-                proxy_url=proxy_url,
-                api_key="secret",
-            )
-        sandbox._rust_client = fake
-        sandbox._base_url = proxy_url
-        return sandbox
+            sandbox = cls(sandbox_id="sbx-test", proxy_url=url, api_key="test-key")
+        tunnel = sandbox.create_tunnel(9000, local_port=0)
+        if is_async:
+            tunnel = await tunnel
+        self.addAsyncCleanup(self.close_tunnel, tunnel)
+        reader, _ = await self.connect(tunnel)
+        self.assertEqual(await asyncio.wait_for(reader.readexactly(5), 3), b"ready")
+        result = sandbox.close()
+        if inspect.isawaitable(result):
+            await result
+        await self.close_tunnel(tunnel)
+        self.assertTrue(tunnel.closed)
 
-    def connect_client(self, tunnel):
-        client = socket.create_connection((tunnel.local_host, tunnel.local_port))
-        client.settimeout(2)
-        self.addCleanup(client.close)
-        return client
 
+class TestTcpTunnel(TunnelTestsMixin, unittest.IsolatedAsyncioTestCase):
     def test_build_tunnel_ws_url(self):
         self.assertEqual(
             build_tunnel_ws_url("https://sandbox.tensorlake.ai", 8080),
@@ -168,327 +248,6 @@ class TestTcpTunnel(unittest.TestCase):
             build_tunnel_ws_url("http://localhost:9443/", 5901),
             "ws://localhost:9443/api/v1/tunnels/tcp?port=5901",
         )
-
-    def test_binds_local_port_and_relays_bytes(self):
-        sandbox = self.make_sandbox(proxy_url="https://sandbox.tensorlake.ai")
-        fake_ws = _FakeWebSocketConnection()
-        fake_module = _FakeWebSocketModule(ws=fake_ws)
-
-        with patch.object(tunnel_module, "websocket", fake_module):
-            tunnel = sandbox.create_tunnel(8080, local_port=0)
-            self.addCleanup(tunnel.close)
-
-            self.assertIsInstance(tunnel, TcpTunnel)
-            self.assertEqual(tunnel.remote_port, 8080)
-            self.assertEqual(tunnel.local_host, "127.0.0.1")
-            self.assertNotEqual(tunnel.local_port, 0)
-            self.assertEqual(
-                tunnel.address(),
-                TunnelAddress(host="127.0.0.1", port=tunnel.local_port),
-            )
-
-            client = self.connect_client(tunnel)
-            self.assertTrue(_wait_until(lambda: fake_module.calls))
-            call = fake_module.calls[0]
-            self.assertEqual(
-                call["url"], "wss://sandbox.tensorlake.ai/api/v1/tunnels/tcp?port=8080"
-            )
-            self.assertIn("Authorization: Bearer secret", call["header"])
-            self.assertEqual(call["timeout"], 10.0)
-
-            client.sendall(b"hello")
-            self.assertTrue(_wait_until(lambda: fake_ws.sent))
-            self.assertEqual(fake_ws.sent[0], b"hello")
-
-            fake_ws.frames.put((_WS_BINARY, b"world"))
-            self.assertEqual(client.recv(1024), b"world")
-
-            # Closing the local client sends a close frame to the sandbox.
-            client.close()
-            self.assertTrue(_wait_until(lambda: fake_ws.close_sent))
-            self.assertTrue(_wait_until(lambda: fake_ws.shutdown_called))
-
-            tunnel.close()
-            self.assertTrue(tunnel.closed)
-
-    def test_uses_sandbox_host_override_for_localhost_proxy(self):
-        sandbox = self.make_sandbox(
-            proxy_url="http://localhost:9443", sandbox_id="sbx-local"
-        )
-        fake_ws = _FakeWebSocketConnection()
-        fake_module = _FakeWebSocketModule(ws=fake_ws)
-
-        with patch.object(tunnel_module, "websocket", fake_module):
-            tunnel = sandbox.create_tunnel(5901, local_port=0)
-            self.addCleanup(tunnel.close)
-            self.connect_client(tunnel)
-            self.assertTrue(_wait_until(lambda: fake_module.calls))
-            call = fake_module.calls[0]
-            self.assertEqual(
-                call["url"], "ws://localhost:9443/api/v1/tunnels/tcp?port=5901"
-            )
-            # websocket-client writes its own Host line and appends ``header``
-            # verbatim, so the override must go through the ``host`` option.
-            self.assertEqual(call["host"], "sbx-local.local")
-            self.assertFalse(
-                [line for line in call["header"] if line.startswith("Host:")]
-            )
-
-    def test_local_port_defaults_to_remote_port(self):
-        sandbox = self.make_sandbox()
-        port = _free_port()
-        with patch.object(tunnel_module, "websocket", _FakeWebSocketModule()):
-            tunnel = sandbox.create_tunnel(port)
-            self.addCleanup(tunnel.close)
-            self.assertEqual(tunnel.local_port, port)
-            self.assertEqual(tunnel.remote_port, port)
-
-    def test_sandbox_close_closes_local_connection(self):
-        sandbox = self.make_sandbox()
-        fake_ws = _FakeWebSocketConnection()
-        with patch.object(tunnel_module, "websocket", _FakeWebSocketModule(ws=fake_ws)):
-            tunnel = sandbox.create_tunnel(8080, local_port=0)
-            self.addCleanup(tunnel.close)
-            client = self.connect_client(tunnel)
-            self.assertTrue(_wait_until(lambda: fake_ws.timeout is not None))
-
-            fake_ws.frames.put((_WS_CLOSE, b""))
-            self.assertEqual(client.recv(1024), b"")
-            self.assertTrue(_wait_until(lambda: fake_ws.shutdown_called))
-
-    def test_local_disconnect_without_close_reply_closes_relay(self):
-        sandbox = self.make_sandbox()
-        fake_ws = _FakeWebSocketConnection()
-        # The proxy never answers the close frame. Without a deadline the
-        # reader thread would ping forever and the relay would leak.
-        fake_ws.answer_close = False
-        with (
-            patch.object(tunnel_module, "websocket", _FakeWebSocketModule(ws=fake_ws)),
-            patch.object(tunnel_module, "TUNNEL_CLOSE_TIMEOUT", 0.2),
-        ):
-            tunnel = sandbox.create_tunnel(8080, local_port=0)
-            self.addCleanup(tunnel.close)
-            client = self.connect_client(tunnel)
-            self.assertTrue(_wait_until(lambda: fake_ws.timeout is not None))
-            self.assertEqual(len(tunnel._relays), 1)
-
-            client.close()
-            self.assertTrue(_wait_until(lambda: fake_ws.close_sent))
-            self.assertTrue(_wait_until(lambda: fake_ws.shutdown_called))
-            self.assertTrue(_wait_until(lambda: not tunnel._relays))
-            self.assertTrue(
-                _wait_until(
-                    lambda: not any(
-                        t.name.startswith("tensorlake-tunnel-relay-")
-                        for t in threading.enumerate()
-                    )
-                )
-            )
-
-    def test_close_frame_send_failure_closes_relay(self):
-        sandbox = self.make_sandbox()
-        fake_ws = _FakeWebSocketConnection()
-        fake_ws.send_close_error = TimeoutError("send timed out")
-        with patch.object(tunnel_module, "websocket", _FakeWebSocketModule(ws=fake_ws)):
-            tunnel = sandbox.create_tunnel(8080, local_port=0)
-            self.addCleanup(tunnel.close)
-            client = self.connect_client(tunnel)
-            self.assertTrue(_wait_until(lambda: fake_ws.timeout is not None))
-
-            client.close()
-            self.assertTrue(_wait_until(lambda: fake_ws.shutdown_called))
-            self.assertTrue(_wait_until(lambda: not tunnel._relays))
-
-    def test_websocket_send_failure_closes_relay(self):
-        sandbox = self.make_sandbox()
-        fake_ws = _FakeWebSocketConnection()
-        # The websocket stays readable: recv_data keeps blocking on the
-        # frame queue. Only sends fail, as on a send timeout.
-        fake_ws.send_error = TimeoutError("send timed out")
-        with patch.object(tunnel_module, "websocket", _FakeWebSocketModule(ws=fake_ws)):
-            tunnel = sandbox.create_tunnel(8080, local_port=0)
-            self.addCleanup(tunnel.close)
-            client = self.connect_client(tunnel)
-            self.assertTrue(_wait_until(lambda: fake_ws.timeout is not None))
-
-            client.sendall(b"hello")
-            # Both directions stop: the websocket is shut down and the
-            # local client sees the connection end.
-            self.assertTrue(_wait_until(lambda: fake_ws.shutdown_called))
-            self.assertEqual(client.recv(1024), b"")
-            self.assertEqual(fake_ws.sent, [])
-            self.assertTrue(_wait_until(lambda: not tunnel._relays))
-
-    def test_close_during_websocket_connect_shuts_down_websocket(self):
-        sandbox = self.make_sandbox()
-        fake_ws = _FakeWebSocketConnection()
-        # The peer never answers a close frame, so a leaked relay would
-        # keep its reader thread alive.
-        fake_ws.answer_close = False
-        fake_module = _FakeWebSocketModule(ws=fake_ws)
-        fake_module.release.clear()
-        with patch.object(tunnel_module, "websocket", fake_module):
-            tunnel = sandbox.create_tunnel(8080, local_port=0)
-            self.addCleanup(tunnel.close)
-            client = self.connect_client(tunnel)
-            self.assertTrue(fake_module.connecting.wait(timeout=2))
-
-            # Close the tunnel while the websocket connect is pending, then
-            # let the connect succeed.
-            tunnel.close()
-            self.assertEqual(client.recv(1024), b"")
-            fake_module.release.set()
-
-            self.assertTrue(_wait_until(lambda: fake_ws.shutdown_called))
-            # The relay never started pumping on the late websocket.
-            self.assertFalse(fake_ws.close_sent)
-            self.assertEqual(tunnel._relays, set())
-
-    def test_websocket_connect_failure_closes_local_connection(self):
-        sandbox = self.make_sandbox()
-        fake_module = _FakeWebSocketModule(error=ConnectionRefusedError("nope"))
-        with patch.object(tunnel_module, "websocket", fake_module):
-            tunnel = sandbox.create_tunnel(8080, local_port=0)
-            self.addCleanup(tunnel.close)
-            client = self.connect_client(tunnel)
-            self.assertEqual(client.recv(1024), b"")
-            self.assertEqual(len(fake_module.calls), 1)
-
-    def test_close_stops_listener_and_active_connections(self):
-        sandbox = self.make_sandbox()
-        fake_ws = _FakeWebSocketConnection()
-        with patch.object(tunnel_module, "websocket", _FakeWebSocketModule(ws=fake_ws)):
-            with sandbox.create_tunnel(8080, local_port=0) as tunnel:
-                client = self.connect_client(tunnel)
-                self.assertTrue(_wait_until(lambda: fake_ws.timeout is not None))
-                address = (tunnel.local_host, tunnel.local_port)
-
-            self.assertTrue(tunnel.closed)
-            self.assertEqual(client.recv(1024), b"")
-            self.assertTrue(_wait_until(lambda: fake_ws.shutdown_called))
-            with self.assertRaises(OSError):
-                socket.create_connection(address, timeout=1)
-
-            # Closing twice is a no-op.
-            tunnel.close()
-
-    def test_rejects_invalid_arguments(self):
-        sandbox = self.make_sandbox()
-        with patch.object(tunnel_module, "websocket", _FakeWebSocketModule()):
-            with self.assertRaises(SandboxError):
-                sandbox.create_tunnel(0)
-            with self.assertRaises(SandboxError):
-                sandbox.create_tunnel(70000)
-            with self.assertRaises(SandboxError):
-                sandbox.create_tunnel(8080, local_port=70000)
-            with self.assertRaises(SandboxError):
-                sandbox.create_tunnel(8080, local_port=0, connect_timeout=-1)
-            # Zero makes the websocket connect non-blocking and fail at once.
-            with self.assertRaises(SandboxError):
-                sandbox.create_tunnel(8080, local_port=0, connect_timeout=0)
-
-    def make_tunnel_with_listener_errors(self, fake_ws, errors):
-        """Build a tunnel whose listener raises ``errors`` before accepting."""
-        tunnel = TcpTunnel(
-            base_url="http://localhost:9443",
-            ws_headers={},
-            remote_port=8080,
-            local_port=0,
-        )
-        self.addCleanup(tunnel.close)
-        listener = _FlakyListener(tunnel._listener, errors)
-        tunnel._listener = listener
-        patcher = patch.object(
-            tunnel_module, "websocket", _FakeWebSocketModule(ws=fake_ws)
-        )
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        tunnel._start()
-        return tunnel, listener
-
-    def test_accept_loop_survives_transient_accept_errors(self):
-        fake_ws = _FakeWebSocketConnection()
-        with patch.object(tunnel_module, "TUNNEL_ACCEPT_RETRY_DELAY", 0.01):
-            tunnel, listener = self.make_tunnel_with_listener_errors(
-                fake_ws,
-                [
-                    ConnectionAbortedError(errno.ECONNABORTED, "aborted"),
-                    OSError(errno.EMFILE, "too many open files"),
-                ],
-            )
-            client = self.connect_client(tunnel)
-            client.sendall(b"still alive")
-            self.assertTrue(_wait_until(lambda: fake_ws.sent == [b"still alive"]))
-        self.assertGreaterEqual(listener.accept_calls, 3)
-        self.assertFalse(tunnel.closed)
-
-    def test_accept_loop_closes_tunnel_on_listener_failure(self):
-        fake_ws = _FakeWebSocketConnection()
-        tunnel, _ = self.make_tunnel_with_listener_errors(
-            fake_ws, [OSError(errno.EIO, "listener broke")]
-        )
-        # The tunnel reports closed and the port is released.
-        self.assertTrue(_wait_until(lambda: tunnel.closed))
-        address = (tunnel.local_host, tunnel.local_port)
-        with self.assertRaises(OSError):
-            socket.create_connection(address, timeout=1)
-
-    def test_unanswered_ping_closes_relay(self):
-        sandbox = self.make_sandbox()
-        fake_ws = _FakeWebSocketConnection()
-        with patch.object(tunnel_module, "websocket", _FakeWebSocketModule(ws=fake_ws)):
-            tunnel = sandbox.create_tunnel(8080, local_port=0)
-            self.addCleanup(tunnel.close)
-            client = self.connect_client(tunnel)
-            self.assertTrue(_wait_until(lambda: fake_ws.timeout is not None))
-
-            # First read timeout: the relay pings and keeps waiting.
-            fake_ws.frames.put(socket.timeout("read timed out"))
-            self.assertTrue(_wait_until(lambda: fake_ws.pings == 1))
-            self.assertFalse(fake_ws.shutdown_called)
-
-            # Second read timeout with no frame in between: the peer is dead.
-            fake_ws.frames.put(socket.timeout("read timed out"))
-            self.assertTrue(_wait_until(lambda: fake_ws.shutdown_called))
-            self.assertEqual(client.recv(1024), b"")
-            self.assertTrue(_wait_until(lambda: not tunnel._relays))
-
-    def test_pong_keeps_idle_relay_alive(self):
-        sandbox = self.make_sandbox()
-        fake_ws = _FakeWebSocketConnection()
-        with patch.object(tunnel_module, "websocket", _FakeWebSocketModule(ws=fake_ws)):
-            tunnel = sandbox.create_tunnel(8080, local_port=0)
-            self.addCleanup(tunnel.close)
-            client = self.connect_client(tunnel)
-            self.assertTrue(_wait_until(lambda: fake_ws.timeout is not None))
-
-            for expected_pings in (1, 2, 3):
-                fake_ws.frames.put(socket.timeout("read timed out"))
-                self.assertTrue(_wait_until(lambda: fake_ws.pings == expected_pings))
-                # The peer answers, so the next timeout pings again.
-                fake_ws.frames.put((_WS_PONG, b""))
-
-            self.assertFalse(fake_ws.shutdown_called)
-            fake_ws.frames.put((_WS_BINARY, b"data"))
-            self.assertEqual(client.recv(1024), b"data")
-            self.assertEqual(len(tunnel._relays), 1)
-
-    def test_bind_failure_raises_sandbox_error(self):
-        sandbox = self.make_sandbox()
-        holder = socket.create_server(("127.0.0.1", 0))
-        self.addCleanup(holder.close)
-        taken = holder.getsockname()[1]
-        with patch.object(tunnel_module, "websocket", _FakeWebSocketModule()):
-            with self.assertRaises(SandboxError) as ctx:
-                sandbox.create_tunnel(8080, local_port=taken)
-        self.assertIn("failed to bind local tunnel listener", str(ctx.exception))
-
-    def test_requires_websocket_client(self):
-        sandbox = self.make_sandbox()
-        with patch.object(tunnel_module, "websocket", None):
-            with self.assertRaises(SandboxError) as ctx:
-                sandbox.create_tunnel(8080, local_port=0)
-        self.assertIn("websocket-client is required", str(ctx.exception))
 
 
 if __name__ == "__main__":
