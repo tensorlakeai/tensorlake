@@ -41,6 +41,70 @@ async fn delete_sandbox_template_sends_encoded_delete_request() {
 }
 
 #[tokio::test]
+async fn by_id_and_by_name_routes_treat_404_as_absent() {
+    for (operation, expected_line, status) in [
+        (
+            "get_by_id",
+            "GET /platform/v1/organizations/org-1/projects/proj-1/sandbox-templates/sandbox_template_1 HTTP/1.1\r\n",
+            404,
+        ),
+        (
+            "delete_by_id",
+            "DELETE /platform/v1/organizations/org-1/projects/proj-1/sandbox-templates/sandbox_template_1 HTTP/1.1\r\n",
+            404,
+        ),
+        (
+            "delete_by_name",
+            "DELETE /platform/v1/organizations/org-1/projects/proj-1/sandbox-templates/by-name/tensorlake%2Fpython%3A3.12-slim HTTP/1.1\r\n",
+            204,
+        ),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let address = listener.local_addr().expect("listener address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let request_bytes = read_http_request(&mut socket).await;
+            let response =
+                format!("HTTP/1.1 {status} Test\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+            request_bytes
+        });
+        let client = ClientBuilder::new(&format!("http://{}", address))
+            .build()
+            .expect("build client");
+        let templates = SandboxTemplatesClient::new(client, "org-1", "proj-1");
+        match operation {
+            "get_by_id" => assert!(
+                templates
+                    .get_by_id("sandbox_template_1")
+                    .await
+                    .unwrap()
+                    .is_none()
+            ),
+            "delete_by_id" => assert!(!templates.delete_by_id("sandbox_template_1").await.unwrap()),
+            "delete_by_name" => assert!(
+                templates
+                    .delete_by_name("tensorlake/python:3.12-slim")
+                    .await
+                    .unwrap()
+            ),
+            _ => unreachable!(),
+        }
+        let request_text =
+            String::from_utf8_lossy(&server.await.expect("server join")).into_owned();
+        assert!(
+            request_text.starts_with(expected_line),
+            "{operation}: {request_text}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn list_sandbox_templates_follows_pagination() {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await

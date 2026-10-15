@@ -30,12 +30,15 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     Client,
+    sandbox_image_catalog::{IMAGE_SERVICE_ID_PREFIX, ImageServiceImage, is_image_service_id},
     sandbox_images::{
         CommonBuildOptions, DockerfileBuildPlan, SandboxImageBuildError, SandboxImageBuildEvent,
-        SandboxImageContextFile, client_builder, collect_dir_files, follow_started_process_output,
-        is_localhost, normalize_context_file_path, open_context_file, resolve_build_context,
-        sandbox_lifecycle_client, sandbox_proxy_client,
+        SandboxImageContextFile, UnresolvableImageReferenceReason, client_builder,
+        collect_dir_files, emit_plan_warnings, follow_started_process_output, is_localhost,
+        normalize_context_file_path, open_context_file, platform_client, resolve_build_context,
+        sandbox_lifecycle_client, sandbox_proxy_client, sandbox_templates_client_for,
     },
+    sandbox_templates::{SandboxTemplatesClient, models::SandboxTemplate},
     sandboxes::{SandboxesClient, models::ProcessInfo},
 };
 
@@ -51,10 +54,10 @@ pub const IMAGE_SERVICE_URL_ENV: &str = "TENSORLAKE_IMAGE_SERVICE_URL";
 /// prefix-relative (`/builds`, not `/v1/builds`).
 const IMAGE_SERVICE_INGRESS_PATH: &str = "/images/v4";
 
-/// Immutable image reference prefix (`cas-v1:<64 hex sha256>`). A Dockerfile
-/// reference written in this form pins the image id directly, with no
-/// catalog name lookup.
-const CAS_IMAGE_REF_PREFIX: &str = "cas-v1:";
+/// The retired immutable reference scheme. A Dockerfile reference written in
+/// this form is refused: parents are pinned by name or `image_` id (ADR 0107
+/// D16, D32).
+const CAS_V1_REFERENCE_PREFIX: &str = "cas-v1:";
 
 /// Where the Dockerfile text is injected into the context tar when the
 /// Dockerfile does not live inside the context directory (`-f` outside the
@@ -95,6 +98,12 @@ pub(crate) async fn run_image_service_build<F>(
 where
     F: FnMut(SandboxImageBuildEvent),
 {
+    // Build args expand `FROM` references before parents are resolved, so a
+    // `FROM python:${PY_TAG}` with a supplied or defaulted PY_TAG pins the
+    // registered image it names; only references left with an unexpanded
+    // variable remain unresolvable and are warned about.
+    let plan = expand_build_arg_references(plan, &build_args);
+    emit_plan_warnings(&plan, &mut emit);
     warn_ignored_options(&options, &mut emit);
     let disk_mb = cas_target_disk_mb(options.disk_mb)?;
     let is_public = options.is_public;
@@ -142,7 +151,10 @@ where
         return wait_for_publication(&client, &ctx, &created, &plan.registered_name, emit).await;
     }
 
-    let parents = resolve_parents(&client, &plan, &mut emit).await?;
+    // A legacy template named like a Dockerfile reference cannot be a CAS
+    // parent; the platform registry is consulted only to say so (D32).
+    let templates = sandbox_templates_client_for(&ctx, platform_client(&ctx)?)?;
+    let parents = resolve_parents(&client, &templates, &plan, &mut emit).await?;
     let (dockerfile_in_context, injected_dockerfile) = context_dockerfile(&plan, dockerfile_path)?;
     let created = create_build(
         &client,
@@ -288,36 +300,135 @@ fn builder_resource_overrides(options: &CommonBuildOptions) -> Result<Option<Val
     Ok((!resources.is_empty()).then_some(Value::Object(resources)))
 }
 
-/// Builder-rootfs sizing and compatibility mode belong to the legacy
-/// platform-api rootfs builder. `disk_mb` is supported by Image Service and
-/// sizes the final published target; `builder_disk_mb` remains legacy-only.
+/// Builder-rootfs sizing belongs to the legacy platform-api rootfs builder:
+/// the Image Service sizes the builder's scratch space from `disk_mb`, which
+/// also sizes the published target. Docker compatibility mode needs no
+/// warning: CAS builds always run BuildKit (ADR 0107 D29).
 fn warn_ignored_options(
     options: &CommonBuildOptions,
     emit: &mut impl FnMut(SandboxImageBuildEvent),
 ) {
-    let mut ignored = Vec::new();
     if options.builder_disk_mb.is_some() {
-        ignored.push("builder_disk_mb");
-    }
-    if options.docker_compat {
-        ignored.push("docker_compat");
-    }
-    if !ignored.is_empty() {
-        emit(SandboxImageBuildEvent::Warning(format!(
-            "Image Service builds ignore: {}.",
-            ignored.join(", ")
-        )));
+        emit(SandboxImageBuildEvent::Warning(
+            "builder_disk_mb is ignored for CAS builds: the builder's disk is sized from \
+             disk_mb, the size of the published image."
+                .to_string(),
+        ));
     }
 }
 
+/// Expand `$VAR`, `${VAR}`, `${VAR:-default}` and `${VAR-default}` in the
+/// plan's `FROM` references from the supplied build args, then the
+/// Dockerfile's global `ARG` defaults (ADR 0107 D31). References that still
+/// carry a variable afterwards stay unresolvable; references that expanded
+/// completely become ordinary catalog candidates. The Dockerfile text itself
+/// is untouched: BuildKit performs the same expansion in the builder.
+pub(crate) fn expand_build_arg_references(
+    mut plan: DockerfileBuildPlan,
+    build_args: &[(String, String)],
+) -> DockerfileBuildPlan {
+    let lookup = |name: &str| -> Option<String> {
+        build_args
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.clone())
+            .or_else(|| {
+                plan.global_build_args
+                    .iter()
+                    .find(|(key, _)| key == name)
+                    .and_then(|(_, default)| default.clone())
+            })
+    };
+    let expanded_base = expand_reference(&plan.base_image, &lookup);
+    let expanded_additional: Vec<String> = plan
+        .unresolvable_image_references
+        .iter()
+        .filter(|unresolvable| {
+            unresolvable.reason == UnresolvableImageReferenceReason::BuildArgExpansion
+                && unresolvable.reference != plan.base_image
+        })
+        .filter_map(|unresolvable| {
+            let expanded = expand_reference(&unresolvable.reference, &lookup);
+            (!expanded.contains('$')).then_some(expanded)
+        })
+        .collect();
+    let base_expanded = expanded_base != plan.base_image && !expanded_base.contains('$');
+    plan.unresolvable_image_references.retain(|unresolvable| {
+        if unresolvable.reason != UnresolvableImageReferenceReason::BuildArgExpansion {
+            return true;
+        }
+        expand_reference(&unresolvable.reference, &lookup).contains('$')
+    });
+    for reference in expanded_additional {
+        if reference != expanded_base
+            && !reference.eq_ignore_ascii_case("scratch")
+            && !plan.additional_image_references.contains(&reference)
+        {
+            plan.additional_image_references.push(reference);
+        }
+    }
+    if base_expanded {
+        plan.base_image = expanded_base;
+    }
+    plan
+}
+
+/// Substitute Dockerfile-style variable references in one image reference.
+fn expand_reference(reference: &str, lookup: &dyn Fn(&str) -> Option<String>) -> String {
+    let mut out = String::with_capacity(reference.len());
+    let mut rest = reference;
+    while let Some(index) = rest.find('$') {
+        out.push_str(&rest[..index]);
+        let after = &rest[index + 1..];
+        if let Some(inner) = after.strip_prefix('{') {
+            let Some(close) = inner.find('}') else {
+                out.push_str(&rest[index..]);
+                return out;
+            };
+            let expression = &inner[..close];
+            let (name, default) = match expression.split_once(":-") {
+                Some((name, default)) => (name, Some(default)),
+                None => match expression.split_once('-') {
+                    Some((name, default)) => (name, Some(default)),
+                    None => (expression, None),
+                },
+            };
+            match lookup(name) {
+                Some(value) if !value.is_empty() || default.is_none() => out.push_str(&value),
+                _ => match default {
+                    Some(default) => out.push_str(default),
+                    None => out.push_str(&rest[index..index + 2 + close + 1]),
+                },
+            }
+            rest = &inner[close + 1..];
+        } else {
+            let end = after
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .unwrap_or(after.len());
+            let name = &after[..end];
+            match lookup(name) {
+                Some(value) if !name.is_empty() => out.push_str(&value),
+                _ => out.push_str(&rest[index..index + 1 + end]),
+            }
+            rest = &after[end..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Resolve the plan's external references against the Image Service catalog
-/// and return the resolved parents the build request submits. A
-/// `cas-v1:<64 hex>` reference pins the image id directly; every other
-/// plain reference is looked up as a catalog name, and a miss means the
-/// guest pulls the reference from a registry. References the plan already
-/// marked unresolvable (`$` expansions, `@` digest pins) never reach here.
+/// and return the resolved parents the build request submits, each pinned
+/// by the registered image's `image_` id. An `image_` reference pins the id
+/// directly; every other plain reference is looked up as a catalog name. A
+/// miss that names a legacy platform template is an error (a CAS build
+/// cannot be layered on a legacy image); any other miss means the guest
+/// pulls the reference from a registry. References the plan still marks
+/// unresolvable (`$` expansions left after build-arg expansion, `@` digest
+/// pins) never reach here.
 async fn resolve_parents(
     client: &Client,
+    templates: &SandboxTemplatesClient,
     plan: &DockerfileBuildPlan,
     emit: &mut impl FnMut(SandboxImageBuildEvent),
 ) -> Result<Vec<Value>> {
@@ -335,33 +446,38 @@ async fn resolve_parents(
     let mut pinned_references = Vec::new();
     for reference in candidates {
         let catalog_reference = cas_catalog_reference(reference);
-        let image_id = match direct_pin_image_id(reference)? {
-            Some(image_id) => Some(image_id),
+        let public_id = match direct_pin_public_id(reference)? {
+            Some(public_id) => Some(public_id),
             None => lookup_catalog_name(client, catalog_reference.as_ref()).await?,
         };
-        if image_id.is_none() && catalog_reference.as_ref() != reference {
+        if public_id.is_none() && catalog_reference.as_ref() != reference {
             return Err(SandboxImageBuildError::usage(format!(
                 "CAS base image '{}' was not found while resolving Dockerfile reference \
                  '{}'. Publish the CAS base first or use an existing tensorlake/cas image.",
                 catalog_reference, reference
             )));
         }
-        let Some(image_id) = image_id else {
+        let Some(public_id) = public_id else {
+            if templates.find_by_name(reference).await?.is_some() {
+                return Err(SandboxImageBuildError::usage(format!(
+                    "'{reference}' is a legacy image; a CAS build can use CAS images or \
+                     registry references as a base; rebuild '{reference}' with --cas first"
+                )));
+            }
             continue; // external registry reference, pulled by the guest
         };
         if catalog_reference.as_ref() == reference {
             emit(SandboxImageBuildEvent::Status(format!(
-                "Resolved '{reference}' to registered image {CAS_IMAGE_REF_PREFIX}{image_id}"
+                "Resolved '{reference}' to registered image {public_id}"
             )));
         } else {
             emit(SandboxImageBuildEvent::Status(format!(
-                "Resolved '{reference}' through CAS image '{}' to \
-                 {CAS_IMAGE_REF_PREFIX}{image_id}",
+                "Resolved '{reference}' through CAS image '{}' to {public_id}",
                 catalog_reference
             )));
         }
         pinned_references.push(reference.to_string());
-        parents.push(json!({ "reference": reference, "image_id": image_id }));
+        parents.push(json!({ "reference": reference, "public_id": public_id }));
     }
     if parents.len() > MAX_PINNED_PARENTS {
         return Err(SandboxImageBuildError::usage(format!(
@@ -388,30 +504,35 @@ fn cas_catalog_reference(reference: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Owned(format!("tensorlake/cas/{remainder}"))
 }
 
-/// `cas-v1:<64 lowercase hex>` pins an image id directly. The prefix with a
-/// malformed id is an error rather than a registry fallthrough: no registry
-/// image can live under the reserved scheme.
-fn direct_pin_image_id(reference: &str) -> Result<Option<String>> {
-    let Some(image_id) = reference.strip_prefix(CAS_IMAGE_REF_PREFIX) else {
-        return Ok(None);
-    };
-    if image_id.len() != 64
-        || !image_id
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    {
+/// An `image_<id>` reference pins the registered image directly, with no
+/// name lookup; the service validates the pin against the caller's project.
+/// The retired `cas-v1:` scheme is an error rather than a registry
+/// fallthrough: no registry image can live under it, and digests are no
+/// longer addresses.
+fn direct_pin_public_id(reference: &str) -> Result<Option<String>> {
+    if reference.starts_with(CAS_V1_REFERENCE_PREFIX) {
         return Err(SandboxImageBuildError::usage(format!(
-            "reference '{reference}' uses the reserved {CAS_IMAGE_REF_PREFIX} scheme but is not \
-             a 64-lowercase-hex image id"
+            "reference '{reference}' pins a content digest, which is no longer supported; pin \
+             the image by name or its image_ id"
         )));
     }
-    Ok(Some(image_id.to_string()))
+    if !reference.starts_with(IMAGE_SERVICE_ID_PREFIX) {
+        return Ok(None);
+    }
+    if !is_image_service_id(reference) {
+        return Err(SandboxImageBuildError::usage(format!(
+            "reference '{reference}' uses the reserved {IMAGE_SERVICE_ID_PREFIX} prefix but is \
+             not an image id"
+        )));
+    }
+    Ok(Some(reference.to_string()))
 }
 
-/// Look up a reference as a catalog name in the caller's project. `404` and
-/// `400` both mean "not a registered image" (absent, or a reference shape
-/// the name grammar rejects) and fall through to a registry pull, matching
-/// how the legacy path treats template-registry misses.
+/// Look up a reference as a catalog name in the caller's project and return
+/// the registered image's `image_` id. `404` and `400` both mean "not a
+/// registered image" (absent, or a reference shape the name grammar
+/// rejects) and fall through to a registry pull, matching how the legacy
+/// path treats template-registry misses.
 async fn lookup_catalog_name(client: &Client, reference: &str) -> Result<Option<String>> {
     let path = format!("/names/{reference}");
     let request = client.request(Method::GET, &path).build()?;
@@ -419,15 +540,8 @@ async fn lookup_catalog_name(client: &Client, reference: &str) -> Result<Option<
     match response.status() {
         StatusCode::NOT_FOUND | StatusCode::BAD_REQUEST => Ok(None),
         status if status.is_success() => {
-            let body: Value = response.json().await?;
-            body.get("image_id")
-                .and_then(Value::as_str)
-                .map(|image_id| Some(image_id.to_string()))
-                .ok_or_else(|| {
-                    SandboxImageBuildError::other(format!(
-                        "Image Service name lookup for '{reference}' returned no image_id"
-                    ))
-                })
+            let image: ImageServiceImage = response.json().await?;
+            Ok(Some(image.id))
         }
         status => {
             let body = response.text().await.unwrap_or_default();
@@ -767,7 +881,7 @@ where
     let (log_sender, mut log_receiver) = tokio::sync::mpsc::channel(BUILDER_LOG_CHANNEL_CAPACITY);
     let dropped_logs = Arc::new(AtomicUsize::new(0));
     let mut followers = tokio::task::JoinSet::new();
-    let image_id = loop {
+    let public_id = loop {
         drain_ready_builder_logs(&mut log_receiver, &dropped_logs, &mut emit);
         let request = client.request(Method::GET, &path).build()?;
         let response = client.execute_raw(request).await?;
@@ -803,12 +917,12 @@ where
                 )
                 .await;
                 break build
-                    .get("image_id")
+                    .get("public_id")
                     .and_then(Value::as_str)
                     .map(str::to_string)
                     .ok_or_else(|| {
                         SandboxImageBuildError::other(format!(
-                            "build {build_id} succeeded but reports no image_id"
+                            "build {build_id} succeeded but reports no public_id"
                         ))
                     })?;
             }
@@ -880,7 +994,7 @@ where
     };
 
     let request = client
-        .request(Method::GET, &published_image_path(&image_id))
+        .request(Method::GET, &published_image_path(&public_id))
         .build()?;
     let response = client.execute_raw(request).await?;
     if !response.status().is_success() {
@@ -890,15 +1004,18 @@ where
             "published image lookup failed (HTTP {status}): {body}"
         )));
     }
-    let image: Value = response.json().await?;
+    // The record is returned in the platform template shape so callers of
+    // both build paths receive one record kind (ADR 0107 D18, D28).
+    let image: ImageServiceImage = response.json().await?;
+    let template: SandboxTemplate = image.into();
     emit(SandboxImageBuildEvent::Status(format!(
-        "Image '{registered_name}' published ({CAS_IMAGE_REF_PREFIX}{image_id})"
+        "Image '{registered_name}' registered ({public_id})"
     )));
-    Ok(image)
+    Ok(serde_json::to_value(template)?)
 }
 
-fn published_image_path(image_id: &str) -> String {
-    format!("/images/{image_id}")
+fn published_image_path(public_id: &str) -> String {
+    format!("/images/{public_id}")
 }
 
 fn build_poll_timeout(build_id: &str, timeout: Duration) -> SandboxImageBuildError {
@@ -1193,14 +1310,20 @@ mod tests {
         warn_ignored_options(&options, &mut |event| events.push(event));
         assert!(events.is_empty());
 
+        // Docker compatibility mode means nothing for a BuildKit-only path
+        // and is accepted silently (ADR 0107 D29).
+        options.docker_compat = true;
+        warn_ignored_options(&options, &mut |event| events.push(event));
+        assert!(events.is_empty());
+
         options.builder_disk_mb = Some(20_480);
         warn_ignored_options(&options, &mut |event| events.push(event));
-        assert_eq!(
-            events,
-            vec![SandboxImageBuildEvent::Warning(
-                "Image Service builds ignore: builder_disk_mb.".to_string()
-            )]
-        );
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            SandboxImageBuildEvent::Warning(message)
+                if message.contains("builder_disk_mb is ignored for CAS builds")
+        ));
     }
 
     #[test]
@@ -1252,16 +1375,153 @@ mod tests {
     }
 
     #[test]
-    fn direct_pins_accept_only_lowercase_hex_ids() {
-        let hex = "a".repeat(64);
+    fn direct_pins_accept_image_ids_and_refuse_digests() {
         assert_eq!(
-            direct_pin_image_id(&format!("cas-v1:{hex}")).unwrap(),
-            Some(hex)
+            direct_pin_public_id("image_abc123").unwrap(),
+            Some("image_abc123".to_string())
         );
-        assert_eq!(direct_pin_image_id("alpine:3.20").unwrap(), None);
-        assert_eq!(direct_pin_image_id("team/base").unwrap(), None);
-        assert!(direct_pin_image_id("cas-v1:NOT-HEX").is_err());
-        assert!(direct_pin_image_id(&format!("cas-v1:{}", "a".repeat(63))).is_err());
+        assert_eq!(direct_pin_public_id("alpine:3.20").unwrap(), None);
+        assert_eq!(direct_pin_public_id("team/base").unwrap(), None);
+        let hex = "a".repeat(64);
+        let error = direct_pin_public_id(&format!("cas-v1:{hex}"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("pin the image by name or its image_ id"),
+            "{error}"
+        );
+        assert!(direct_pin_public_id("image_NOT-AN-ID").is_err());
+    }
+
+    #[test]
+    fn build_args_expand_from_references_before_resolution() {
+        let mut plan = plan_with_context(std::env::temp_dir());
+        plan.base_image = "python:${PY_TAG}".to_string();
+        plan.global_build_args = vec![
+            ("PY_TAG".to_string(), Some("3.12-slim".to_string())),
+            ("TOOLS".to_string(), None),
+        ];
+        plan.unresolvable_image_references = vec![
+            crate::sandbox_images::UnresolvableImageReference {
+                line_number: 2,
+                reference: "python:${PY_TAG}".to_string(),
+                reason: UnresolvableImageReferenceReason::BuildArgExpansion,
+            },
+            crate::sandbox_images::UnresolvableImageReference {
+                line_number: 3,
+                reference: "$TOOLS".to_string(),
+                reason: UnresolvableImageReferenceReason::BuildArgExpansion,
+            },
+            crate::sandbox_images::UnresolvableImageReference {
+                line_number: 4,
+                reference: "team/${SIDE:-base}:v1".to_string(),
+                reason: UnresolvableImageReferenceReason::BuildArgExpansion,
+            },
+            crate::sandbox_images::UnresolvableImageReference {
+                line_number: 5,
+                reference: "pinned@sha256:abc".to_string(),
+                reason: UnresolvableImageReferenceReason::DigestPin,
+            },
+        ];
+
+        // Defaults alone: the base and the defaulted side reference expand,
+        // the ARG without a default stays unresolvable, the digest pin stays.
+        let expanded = expand_build_arg_references(plan.clone(), &[]);
+        assert_eq!(expanded.base_image, "python:3.12-slim");
+        assert_eq!(
+            expanded.additional_image_references,
+            vec!["team/base:v1".to_string()]
+        );
+        let remaining: Vec<&str> = expanded
+            .unresolvable_image_references
+            .iter()
+            .map(|unresolvable| unresolvable.reference.as_str())
+            .collect();
+        assert_eq!(remaining, vec!["$TOOLS", "pinned@sha256:abc"]);
+
+        // Supplied build args win over the Dockerfile defaults.
+        let expanded = expand_build_arg_references(
+            plan,
+            &[
+                ("PY_TAG".to_string(), "3.13".to_string()),
+                ("TOOLS".to_string(), "team/tools".to_string()),
+            ],
+        );
+        assert_eq!(expanded.base_image, "python:3.13");
+        assert_eq!(
+            expanded.additional_image_references,
+            vec!["team/tools".to_string(), "team/base:v1".to_string()]
+        );
+        assert_eq!(expanded.unresolvable_image_references.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn parents_pin_by_public_id_and_refuse_legacy_templates() {
+        // The Image Service knows `team/base`; `old-base` is unknown there
+        // but registered as a legacy platform template.
+        let (image_service_url, image_service) = scripted_image_service_with_status(vec![
+            (
+                200,
+                published_image_record("image_base1", "team/base", &"c".repeat(64)),
+            ),
+            (404, json!({"error": "name \"old-base\" not found"})),
+        ])
+        .await;
+        let (platform_url, platform) = scripted_image_service_with_status(vec![(
+            200,
+            json!({"id": "sandbox_template_1", "name": "old-base", "snapshotId": "snap-1"}),
+        )])
+        .await;
+        let client = ClientBuilder::new(&image_service_url).build().unwrap();
+        let templates = SandboxTemplatesClient::new_api_key_scoped(
+            ClientBuilder::new(&platform_url).build().unwrap(),
+        );
+        let mut plan = plan_with_context(std::env::temp_dir());
+        plan.base_image = "team/base".to_string();
+        plan.additional_image_references = vec!["old-base".to_string()];
+        let mut events = Vec::new();
+        let error = resolve_parents(&client, &templates, &plan, &mut |event| events.push(event))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("'old-base' is a legacy image"), "{error}");
+        assert!(
+            error.contains("rebuild 'old-base' with --cas first"),
+            "{error}"
+        );
+        assert!(events.contains(&SandboxImageBuildEvent::Status(
+            "Resolved 'team/base' to registered image image_base1".to_string()
+        )));
+        image_service.await.unwrap();
+        platform.await.unwrap();
+
+        // A registry reference nobody registered pins nothing and pulls.
+        let (image_service_url, image_service) = scripted_image_service_with_status(vec![
+            (404, json!({"error": "not found"})),
+            (
+                200,
+                published_image_record("image_direct", "team/direct", &"d".repeat(64)),
+            ),
+        ])
+        .await;
+        let (platform_url, platform) =
+            scripted_image_service_with_status(vec![(404, json!({"message": "not found"}))]).await;
+        let client = ClientBuilder::new(&image_service_url).build().unwrap();
+        let templates = SandboxTemplatesClient::new_api_key_scoped(
+            ClientBuilder::new(&platform_url).build().unwrap(),
+        );
+        let mut plan = plan_with_context(std::env::temp_dir());
+        plan.base_image = "alpine:3.20".to_string();
+        plan.additional_image_references = vec!["image_direct".to_string()];
+        let parents = resolve_parents(&client, &templates, &plan, &mut |_| {})
+            .await
+            .unwrap();
+        assert_eq!(
+            parents,
+            vec![json!({"reference": "image_direct", "public_id": "image_direct"})]
+        );
+        image_service.await.unwrap();
+        platform.await.unwrap();
     }
 
     #[test]
@@ -1416,8 +1676,9 @@ mod tests {
                 "status": "succeeded",
                 "attempt_no": 1,
                 "image_id": image_id,
+                "public_id": "image_abc123",
             }),
-            json!({"image_id": image_id}),
+            published_image_record("image_abc123", "image-1", &image_id),
         ])
         .await;
         let client = ClientBuilder::new(&base_url).build().unwrap();
@@ -1443,11 +1704,22 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(image["image_id"], image_id);
+        // The result is the platform template shape (ADR 0107 D18/D28).
+        assert_eq!(image["id"], "image_abc123");
+        assert_eq!(image["name"], "image-1");
+        assert_eq!(image["snapshotId"], "snap123");
+        assert_eq!(
+            image["snapshotFormatVersion"],
+            "content_addressed_streaming_v1"
+        );
+        assert_eq!(image["imageId"], image_id);
         assert!(events.contains(&SandboxImageBuildEvent::BuildLog {
             stream: "stdout".to_string(),
             message: "still building".to_string(),
         }));
+        assert!(events.contains(&SandboxImageBuildEvent::Status(
+            "Image 'image-1' registered (image_abc123)".to_string()
+        )));
         server.await.unwrap();
     }
 
@@ -1479,8 +1751,9 @@ mod tests {
                 "status": "succeeded",
                 "attempt_no": 2,
                 "image_id": image_id,
+                "public_id": "image_def456",
             }),
-            json!({"image_id": image_id}),
+            published_image_record("image_def456", "image-1", &image_id),
         ])
         .await;
         let client = ClientBuilder::new(&base_url).build().unwrap();
@@ -1529,7 +1802,8 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(image["image_id"], image_id);
+        assert_eq!(image["id"], "image_def456");
+        assert_eq!(image["imageId"], image_id);
         assert_eq!(attempt_one_attaches.load(Ordering::Relaxed), 1);
         assert_eq!(attempt_two_attaches.load(Ordering::Relaxed), 1);
         assert_eq!(
@@ -1570,13 +1844,47 @@ mod tests {
         }
     }
 
+    /// The Image Service's tenant record for a published image.
+    fn published_image_record(public_id: &str, name: &str, image_id: &str) -> Value {
+        json!({
+            "id": public_id,
+            "name": name,
+            "snapshot_id": "snap123",
+            "snapshot_uri": "snapshot://snap123",
+            "snapshot_sandbox_id": null,
+            "snapshot_format_version": "content_addressed_streaming_v1",
+            "snapshot_size_bytes": 42,
+            "rootfs_disk_bytes": 10_737_418_240_u64,
+            "rootfs_node_kind": "base",
+            "public": false,
+            "dockerfile": "",
+            "created_by_user_id": null,
+            "created_at": "2026-10-15T00:00:00.000Z",
+            "updated_at": "2026-10-15T00:00:00.000Z",
+            "image_id": image_id,
+            "build_id": "build-1",
+        })
+    }
+
     async fn scripted_image_service(
         responses: Vec<Value>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        scripted_image_service_with_status(
+            responses
+                .into_iter()
+                .map(|response| (200, response))
+                .collect(),
+        )
+        .await
+    }
+
+    async fn scripted_image_service_with_status(
+        responses: Vec<(u16, Value)>,
     ) -> (String, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            for response in responses {
+            for (status, response) in responses {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut request = Vec::new();
                 let mut buffer = [0_u8; 1024];
@@ -1592,7 +1900,7 @@ mod tests {
                 }
                 let body = serde_json::to_vec(&response).unwrap();
                 let headers = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    "HTTP/1.1 {status} Response\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
                 );
                 stream.write_all(headers.as_bytes()).await.unwrap();
@@ -1613,6 +1921,7 @@ mod tests {
             unresolvable_image_references: Vec::new(),
             ignored_instructions: Vec::new(),
             import_image_reference: None,
+            global_build_args: Vec::new(),
         }
     }
 

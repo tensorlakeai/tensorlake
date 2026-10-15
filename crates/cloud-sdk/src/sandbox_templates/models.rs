@@ -42,6 +42,13 @@ pub struct CreateSandboxTemplateRequest {
     pub additional_local_images: Option<Vec<LocalImageInput>>,
 }
 
+/// One registered sandbox image in the platform template shape. Both image
+/// families answer it: legacy templates verbatim from the platform API, and
+/// CAS images mapped from the Image Service record by
+/// [`crate::sandbox_image_catalog`]. Fields the server did not send stay
+/// `None`; keys the model does not know are kept verbatim in `extra` so
+/// machine consumers see the complete record (the CAS provenance fields
+/// `imageId` and `buildId` travel there).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SandboxTemplate {
@@ -65,11 +72,82 @@ pub struct SandboxTemplate {
     pub rootfs_node_kind: Option<String>,
     #[serde(default)]
     pub public: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dockerfile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by_user_id: Option<String>,
+    /// RFC 3339 creation time (or an epoch number rendered as a string).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "string_or_number"
+    )]
+    pub created_at: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "string_or_number"
+    )]
+    pub updated_at: Option<String>,
+    #[serde(flatten)]
+    pub extra: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+/// Accept a timestamp written as a string or as a JSON number.
+fn string_or_number<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(match value {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(text)) => Some(text),
+        Some(serde_json::Value::Number(number)) => Some(number.to_string()),
+        Some(other) => {
+            return Err(serde::de::Error::custom(format!(
+                "expected a timestamp string or number, got {other}"
+            )));
+        }
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::CreateSandboxTemplateRequest;
+    use super::{CreateSandboxTemplateRequest, SandboxTemplate};
+
+    #[test]
+    fn sandbox_template_keeps_unknown_keys_and_timestamps() {
+        let template: SandboxTemplate = serde_json::from_value(serde_json::json!({
+            "id": "sandbox_template_1",
+            "name": "python",
+            "snapshotId": "snap-1",
+            "createdAt": "2026-10-15T00:00:00.000Z",
+            "updatedAt": 1_792_022_400_000_u64,
+            "dockerfile": "FROM python\n",
+            "createdByUserId": "user-1",
+            "customField": {"nested": true},
+        }))
+        .unwrap();
+        assert_eq!(
+            template.created_at.as_deref(),
+            Some("2026-10-15T00:00:00.000Z")
+        );
+        assert_eq!(template.updated_at.as_deref(), Some("1792022400000"));
+        assert_eq!(template.dockerfile.as_deref(), Some("FROM python\n"));
+        assert_eq!(
+            template.extra["customField"],
+            serde_json::json!({"nested": true})
+        );
+        let json = serde_json::to_value(&template).unwrap();
+        assert_eq!(json["customField"]["nested"], true);
+        assert_eq!(json["createdByUserId"], "user-1");
+        // Fields the platform did not send are not invented.
+        let bare: SandboxTemplate =
+            serde_json::from_value(serde_json::json!({"id": "sandbox_template_2"})).unwrap();
+        let json = serde_json::to_value(&bare).unwrap();
+        assert!(json.get("createdAt").is_none());
+        assert!(json.get("dockerfile").is_none());
+    }
 
     #[test]
     fn create_sandbox_template_request_serializes_as_camel_case() {
