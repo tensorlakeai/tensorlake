@@ -162,7 +162,11 @@ class ProtocolWriter:
     def __init__(self, core: FunctionAgentCore, loop: asyncio.AbstractEventLoop):
         self._core = core
         self._loop = loop
-        self._lock = threading.Lock()
+        self._registry_lock = threading.Lock()
+        self._attempt_locks: weakref.WeakValueDictionary[str, threading.Lock] = (
+            weakref.WeakValueDictionary()
+        )
+        self._lifecycle_lock = threading.Lock()
 
     def write(self, message: dict[str, Any]) -> None:
         encoded = json.dumps(message, separators=(",", ":"), ensure_ascii=False)
@@ -170,8 +174,28 @@ class ProtocolWriter:
         async def submit_output() -> None:
             await self._core.submit_output(encoded)
 
-        with self._lock:
-            asyncio.run_coroutine_threadsafe(submit_output(), self._loop).result()
+        attempt_id = message.get("attempt_id")
+        if isinstance(attempt_id, str):
+            with self._registry_lock:
+                # Every waiter keeps a strong reference before dropping the registry
+                # lock. No historical attempt keys survive the last writer, and no
+                # global admission limit can strand another attempt's completion.
+                lock = self._attempt_locks.get(attempt_id)
+                if lock is None:
+                    lock = threading.Lock()
+                    self._attempt_locks[attempt_id] = lock
+        else:
+            lock = self._lifecycle_lock
+        # Preserve same-attempt ordering through the native durable ACK (or error).
+        # Cancellation of an asyncio.to_thread caller does not cancel this worker
+        # or release its lock while the native write is still pending.
+        try:
+            with lock:
+                asyncio.run_coroutine_threadsafe(submit_output(), self._loop).result()
+        finally:
+            # An exception traceback may retain this frame after write returns.
+            # Do not let it keep an otherwise idle ordering entry alive.
+            del lock
 
 
 class RuntimeRequestState(RequestState):
