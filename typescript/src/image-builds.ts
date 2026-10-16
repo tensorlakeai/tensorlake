@@ -82,7 +82,11 @@ export class ImageBuildError extends Error {
   }
 }
 
-/** No such build is visible to the project (unknown or foreign). */
+/**
+ * No such build is visible to the project: unknown, foreign or retired. A
+ * finished build is kept only while it is its image's current build; a later
+ * build of the image or deleting the image retires it.
+ */
 export class ImageBuildNotFoundError extends ImageBuildError {
   constructor(details: ImageBuildErrorDetails) {
     super(details);

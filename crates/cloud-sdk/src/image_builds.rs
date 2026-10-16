@@ -538,7 +538,13 @@ pub enum ImageBuildError {
     Usage(String),
     #[error("{0}")]
     Auth(String),
-    #[error("build {build_id} not found")]
+    /// Unknown, foreign or retired: a finished build is kept only while it
+    /// is its image's current build; a later build of the image or deleting
+    /// the image retires it (ADR 0108).
+    #[error(
+        "build {build_id} not found: finished builds are kept only while they are their image's \
+         current build; a later build of the image or deleting the image retires them"
+    )]
     NotFound { build_id: String },
     #[error("{0}")]
     InProgress(ImageBuildConflict),
@@ -912,6 +918,22 @@ pub(crate) fn reject_legacy_reference(build_id: &str) -> Result<(), ImageBuildEr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A missing build is the same error whether it never existed, belongs to
+    /// another project or was retired; the message says why a known id can
+    /// stop resolving (ADR 0108 retirement).
+    #[test]
+    fn not_found_explains_retirement() {
+        let error = ImageBuildError::NotFound {
+            build_id: "build-x".to_string(),
+        };
+        let message = error.to_string();
+        assert!(message.starts_with("build build-x not found"), "{message}");
+        assert!(message.contains("current build"), "{message}");
+        assert!(message.contains("retires them"), "{message}");
+        assert_eq!(error.code(), "not_found");
+        assert_eq!(error.build_id(), Some("build-x"));
+    }
 
     #[test]
     fn client_request_ids_are_32_hex_and_validate() {
