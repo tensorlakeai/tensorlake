@@ -9,9 +9,11 @@ use crate::{
 use serde_json::{Value, json};
 use std::{path::Path, time::Duration};
 
+#[cfg(feature = "mount")]
 const GUEST_SOCKET: &str = "/run/tensorlake/fs-control.sock";
 
 pub enum Connection {
+    #[cfg(feature = "mount")]
     Guest,
     Remote {
         client: reqwest::Client,
@@ -29,6 +31,7 @@ impl Connection {
     pub async fn request(&self, body: Value) -> Result<Value> {
         let response = tokio::time::timeout(Duration::from_secs(20), async {
             match self {
+                #[cfg(feature = "mount")]
                 Self::Guest => guest_request(body).await,
                 Self::Remote { client, target } => {
                     let response = with_sandbox_headers(
@@ -158,6 +161,7 @@ impl Connection {
     }
 }
 
+#[cfg(feature = "mount")]
 pub async fn guest_available() -> Result<bool> {
     match tokio::fs::symlink_metadata(GUEST_SOCKET).await {
         Ok(_) => Ok(true),
@@ -166,7 +170,7 @@ pub async fn guest_available() -> Result<bool> {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "mount"))]
 async fn guest_request(body: Value) -> Result<Value> {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
     let mut stream = tokio::net::UnixStream::connect(GUEST_SOCKET).await?;
@@ -186,7 +190,7 @@ async fn guest_request(body: Value) -> Result<Value> {
     Ok(serde_json::from_str(&line)?)
 }
 
-#[cfg(not(unix))]
+#[cfg(all(not(unix), feature = "mount"))]
 async fn guest_request(_body: Value) -> Result<Value> {
     Err(CliError::usage("guest filesystem control requires Unix"))
 }
