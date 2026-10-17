@@ -180,10 +180,7 @@ pub fn find_local_config_path() -> Option<PathBuf> {
         if config.exists() {
             return Some(config);
         }
-        match dir.parent() {
-            Some(parent) => dir = parent,
-            None => return None,
-        }
+        dir = dir.parent()?;
     }
 }
 
@@ -644,10 +641,7 @@ fn find_gitignore_path(start: &Path) -> Option<PathBuf> {
         if dir.join(".git").is_dir() {
             return Some(dir.join(".gitignore"));
         }
-        match dir.parent() {
-            Some(parent) => dir = parent,
-            None => return None,
-        }
+        dir = dir.parent()?;
     }
 }
 

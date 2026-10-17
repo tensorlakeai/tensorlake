@@ -466,7 +466,7 @@ enum FsCommands {
         batch: u64,
     },
 
-    /// Create a permanent, billed snapshot of the drive (a clean tree is a quiet no-op)
+    /// Create a permanent, billed snapshot; runtime mounts return an exact retained version
     Snapshot {
         /// A mounted directory (default: the attachment containing the current directory)
         path: Option<PathBuf>,
@@ -474,6 +474,12 @@ enum FsCommands {
         /// Snapshot message
         #[arg(short, long)]
         message: Option<String>,
+        /// Retry a sandbox snapshot operation without capturing a new tree
+        #[arg(long)]
+        request_id: Option<String>,
+        /// Print the sandbox snapshot receipt as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Show local changes, last autosave, and permanent snapshot count
     Status {
@@ -1667,6 +1673,27 @@ enum SbxCommands {
 
 #[derive(Subcommand)]
 enum SbxFsCommands {
+    /// Retain an exact snapshot of a runtime-managed writable mount
+    Snapshot {
+        sandbox_id: String,
+        #[arg(short, long)]
+        path: PathBuf,
+        #[arg(short, long)]
+        message: Option<String>,
+        #[arg(long)]
+        request_id: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect pending writes and the last saved version of a runtime mount
+    Status {
+        sandbox_id: String,
+        #[arg(short, long)]
+        path: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Attach a registered file system to a running sandbox
     Attach {
         /// Sandbox ID or name
@@ -2832,6 +2859,29 @@ async fn run_command(
                         }
                     },
                     SbxCommands::Fs(fs_cmd) => match fs_cmd {
+                        SbxFsCommands::Snapshot {
+                            sandbox_id,
+                            path,
+                            message,
+                            request_id,
+                            json,
+                        } => {
+                            commands::fs_runtime::Connection::remote(ctx, &sandbox_id)
+                                .await?
+                                .snapshot(&path, message.as_deref(), request_id.as_deref(), json)
+                                .await
+                        }
+                        SbxFsCommands::Status {
+                            sandbox_id,
+                            path,
+                            json,
+                        } => {
+                            commands::fs_runtime::Connection::remote(ctx, &sandbox_id)
+                                .await?
+                                .status(&path, json)
+                                .await
+                        }
+
                         SbxFsCommands::Attach {
                             sandbox_id,
                             file_system_id,
@@ -2976,6 +3026,53 @@ fn purge_credentials_on_auth_failure(result: &error::Result<()>) {
 // with a clear "not available" error.
 #[cfg(feature = "mount")]
 async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Result<()> {
+    if matches!(
+        &subcmd,
+        FsCommands::Snapshot { .. } | FsCommands::Status { .. } | FsCommands::Doctor { .. }
+    ) && commands::fs_runtime::guest_available().await?
+    {
+        let path = match &subcmd {
+            FsCommands::Snapshot { path, .. }
+            | FsCommands::Status { path, .. }
+            | FsCommands::Doctor { path, .. } => path.clone().unwrap_or(std::env::current_dir()?),
+            _ => unreachable!(),
+        };
+        let path = if path.is_absolute() {
+            path
+        } else {
+            std::env::current_dir()?.join(path)
+        };
+        let runtime = commands::fs_runtime::Connection::Guest;
+        // Explicit user mounts retain their local CLI control path, even inside
+        // a sandbox that also has runtime-managed mounts.
+        if !gsvc_fs_client::is_registered_mount(&path).map_err(CliError::from)? {
+            return match &subcmd {
+                FsCommands::Snapshot {
+                    message,
+                    request_id,
+                    json,
+                    ..
+                } => {
+                    runtime
+                        .snapshot(&path, message.as_deref(), request_id.as_deref(), *json)
+                        .await
+                }
+                FsCommands::Status { json, .. } | FsCommands::Doctor { json, .. } => {
+                    runtime.status(&path, *json).await
+                }
+                _ => unreachable!(),
+            };
+        }
+    }
+    if let FsCommands::Snapshot {
+        request_id, json, ..
+    } = &subcmd
+        && (request_id.is_some() || *json)
+    {
+        return Err(CliError::usage(
+            "--request-id and --json require a runtime-managed sandbox mount",
+        ));
+    }
     // Setup and the daemon-owned FSKit refresh helper are local operations and do not require
     // project authentication. The latter receives only a state path plus immutable head token;
     // it fetches exact path facts from the already-authenticated local daemon.
@@ -3484,6 +3581,56 @@ async fn run_git_command(ctx: &CliContext, subcmd: GitCommands) -> error::Result
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn runtime_snapshot_commands_accept_replay_identity() {
+        use clap::Parser;
+        let id = "3c82cb31-4afc-4d51-bb61-e546c55566d3";
+        for args in [
+            vec![
+                "tl",
+                "fs",
+                "snapshot",
+                "/work",
+                "--request-id",
+                id,
+                "--json",
+            ],
+            vec![
+                "tl",
+                "sbx",
+                "fs",
+                "snapshot",
+                "sandbox",
+                "--path",
+                "/work",
+                "--request-id",
+                id,
+                "--json",
+            ],
+        ] {
+            match super::Cli::try_parse_from(args).unwrap().command.unwrap() {
+                super::Commands::Fs(super::FsCommands::Snapshot {
+                    request_id, json, ..
+                })
+                | super::Commands::Sbx(super::SbxCommands::Fs(super::SbxFsCommands::Snapshot {
+                    request_id,
+                    json,
+                    ..
+                })) => {
+                    assert_eq!(request_id.as_deref(), Some(id));
+                    assert!(json);
+                }
+                _ => panic!("expected snapshot command"),
+            }
+        }
+        assert!(
+            super::Cli::try_parse_from([
+                "tl", "sbx", "fs", "status", "sandbox", "--path", "/work", "--json"
+            ])
+            .is_ok()
+        );
+    }
+
     use super::*;
     use clap::CommandFactory;
 
@@ -4137,6 +4284,7 @@ mod tests {
             Commands::Fs(FsCommands::Snapshot {
                 path: None,
                 message: None,
+                ..
             }) => {}
             _ => panic!("expected fs snapshot command"),
         }
@@ -4152,7 +4300,7 @@ mod tests {
         }
 
         match parse_command(["tl", "fs", "snapshot", "./w", "-m", "wip"]) {
-            Commands::Fs(FsCommands::Snapshot { path, message }) => {
+            Commands::Fs(FsCommands::Snapshot { path, message, .. }) => {
                 assert_eq!(path, Some(PathBuf::from("./w")));
                 assert_eq!(message.as_deref(), Some("wip"));
             }
