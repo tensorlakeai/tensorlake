@@ -689,13 +689,31 @@ export async function getImageBuild(buildId: string): Promise<ImageBuildHandle> 
   return new ImageBuildHandle(parseBuildInfo(JSON.parse(json) as Record<string, unknown>), credentials);
 }
 
-/** `getImageBuild(buildId)` then `wait(options)`. */
+/**
+ * `getImageBuild(buildId)` then `wait(options)`, as one interruptible
+ * operation: the lookup runs inside the native wait, under the same
+ * `AbortSignal` and `timeoutMs`, so an abort during a slow or stalled first
+ * request still cancels the build by its id.
+ */
 export async function waitImageBuild(
   buildId: string,
   options: ImageBuildWaitOptions = {},
 ): Promise<ImageBuildResult> {
-  const handle = await getImageBuild(buildId);
-  return handle.wait(options);
+  rejectLegacyReference(buildId);
+  const credentials = credentialsFromEnv();
+  const binding = __imageBuildInternals.loadNativeBinding();
+  const emitter = makeEmitter(options);
+  const json = await __runWithInterrupt(options.signal, (interruptId) =>
+    binding.waitImageBuild(
+      clientOptions(credentials),
+      buildId,
+      { timeoutMs: options.timeoutMs, followLogs: options.followLogs ?? false },
+      emitter.forward,
+      interruptId,
+    ),
+  );
+  emitter.rethrow();
+  return parseResult(json);
 }
 
 export interface CancelImageBuildSelector {

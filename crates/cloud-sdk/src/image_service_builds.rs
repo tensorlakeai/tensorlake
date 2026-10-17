@@ -104,6 +104,11 @@ const IMAGE_BUILDER_COMMAND: &str = "tl-image-builder";
 const ADMISSION_RETRY_BUDGET: Duration = Duration::from_secs(120);
 /// How long a single build lookup keeps reconnecting.
 const LOOKUP_RETRY_BUDGET: Duration = Duration::from_secs(30);
+/// Upper bound on one Image Service request. The clients set no transport
+/// timeout, so without it a stalled connection would hang a caller past
+/// every budget above; a request that hits it is a retryable failure and
+/// the reconnect loop decides whether its deadline still allows another.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 /// Reconnect backoff: `0.5 s × 2^n`, capped here, with ±25% jitter.
 const MAX_RECONNECT_BACKOFF: Duration = Duration::from_secs(15);
 /// Cap on a `Retry-After` the service asks for.
@@ -910,9 +915,26 @@ enum Attempted<T> {
     Expired(ImageBuildError),
 }
 
+/// The failure a request that outlived its bound is reported as: a 408,
+/// which is retryable, so the loop reconnects while the deadline allows and
+/// reports expiry (not a definitive failure) once it does not.
+fn request_timed_out(label: &str, bound: Duration) -> RequestFailure {
+    RequestFailure::new(
+        ImageBuildError::Service {
+            status: StatusCode::REQUEST_TIMEOUT.as_u16(),
+            message: format!("{label} did not answer within {:.1}s", bound.as_secs_f64()),
+        },
+        None,
+    )
+}
+
 /// Repeat `attempt` across retryable failures until `deadline`, with
 /// backoff, jitter and `Retry-After`, reporting each reconnect through
 /// `emit`. An `interrupt` cuts the loop (and an in-flight request) short.
+/// The deadline bounds the requests themselves, not only the retries and
+/// sleeps between them: an attempt still in flight at the deadline (or
+/// after [`REQUEST_TIMEOUT`]) is abandoned, so a stalled connection never
+/// holds a caller past its budget.
 async fn with_reconnects<T, F, Fut>(
     label: &str,
     deadline: Instant,
@@ -929,17 +951,24 @@ where
         if interrupt.is_some_and(InterruptSignal::is_triggered) {
             return Attempted::Interrupted;
         }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Attempted::Expired(*request_timed_out(label, Duration::ZERO).error);
+        }
+        let bound = remaining.min(REQUEST_TIMEOUT);
+        let request = tokio::time::timeout(bound, attempt());
         let outcome = match interrupt {
             Some(signal) => tokio::select! {
                 biased;
                 _ = signal.triggered() => return Attempted::Interrupted,
-                outcome = attempt() => outcome,
+                outcome = request => outcome,
             },
-            None => attempt().await,
+            None => request.await,
         };
         let failure = match outcome {
-            Ok(value) => return Attempted::Done(value),
-            Err(failure) => failure,
+            Ok(Ok(value)) => return Attempted::Done(value),
+            Ok(Err(failure)) => failure,
+            Err(_elapsed) => request_timed_out(label, bound),
         };
         if !is_retryable(&failure.error) {
             return Attempted::Failed(*failure.error);
@@ -1059,9 +1088,9 @@ pub(crate) async fn admit_build(
 /// operation to keep retrying under the same key. Conflicts and validation
 /// answers are typed like build admission; an interruption while unresolved
 /// resolves through the request id. Every request is bounded by `wait`'s
-/// absolute registration deadline: the per-request reconnect budget is
-/// clamped to it and a request still in flight at the deadline is abandoned
-/// and reported as the registration timeout.
+/// absolute registration deadline: the reconnect budget is clamped to it, so
+/// a request still in flight at the deadline is abandoned and reported as
+/// the registration timeout.
 pub(crate) async fn admit_direct(
     client: &Client,
     path: &str,
@@ -1085,22 +1114,9 @@ pub(crate) async fn admit_direct(
                 .json(body)
                 .build()
                 .map_err(SdkError::Http)?;
-            let remaining = wait.deadline.saturating_duration_since(Instant::now());
-            let response = match tokio::time::timeout(remaining, send_raw(client, request)).await {
-                Ok(response) => response?,
-                // The registration deadline passed while the request was in
-                // flight: abandon it. A 408 is retryable, so the reconnect
-                // loop reports expiry rather than a definitive failure.
-                Err(_elapsed) => {
-                    return Err(RequestFailure::new(
-                        ImageBuildError::Service {
-                            status: StatusCode::REQUEST_TIMEOUT.as_u16(),
-                            message: "the registration wait expired during the request".to_string(),
-                        },
-                        None,
-                    ));
-                }
-            };
+            // The reconnect loop abandons a request still in flight at the
+            // registration deadline (its deadline is clamped to it).
+            let response = send_raw(client, request).await?;
             match response.status {
                 StatusCode::SERVICE_UNAVAILABLE => {
                     let parsed: ImageServiceErrorBody =
@@ -1602,6 +1618,77 @@ where
             let mut emit = |event| sink.try_emit(event);
             follow_builder_logs(&ctx, &sandbox_id, &mut emit).await
         },
+    )
+    .await
+}
+
+/// Look `build_id` up and wait for it as one interruptible operation. The
+/// lookup runs under `interrupt` and under the caller's timeout, so a Ctrl+C
+/// during a slow or stalled first request runs the cancellation handshake
+/// (the build id is the sufficient selector) instead of ending the process
+/// without a request, and a short `timeout` bounds the whole wait, lookup
+/// included. Emits nothing about the lookup itself: the caller already
+/// knows the id it passed.
+pub(crate) async fn lookup_and_wait<F>(
+    client: &Client,
+    ctx: Option<&ResolvedBuildContext>,
+    build_id: &str,
+    options: &ImageBuildWaitOptions,
+    interrupt: &InterruptSignal,
+    mut emit: F,
+) -> BuildResult<ImageBuildInfo>
+where
+    F: FnMut(SandboxImageBuildEvent),
+{
+    let started = Instant::now();
+    let caller_deadline = options.timeout.map(|timeout| started + timeout);
+    let lookup_deadline = match caller_deadline {
+        Some(caller) => caller.min(started + LOOKUP_RETRY_BUDGET),
+        None => started + LOOKUP_RETRY_BUDGET,
+    };
+    let attempted = with_reconnects(
+        "Image Service",
+        lookup_deadline,
+        Some(interrupt),
+        &mut emit,
+        || get_build_attempt(client, build_id),
+    )
+    .await;
+    let info = match attempted {
+        Attempted::Done(info) => info,
+        Attempted::Failed(error) => return Err(error),
+        Attempted::Expired(error) => {
+            return Err(match caller_deadline {
+                Some(caller) if Instant::now() >= caller => ImageBuildError::Timeout {
+                    build_id: build_id.to_string(),
+                    waited: started.elapsed(),
+                },
+                _ => error,
+            });
+        }
+        Attempted::Interrupted => {
+            let report = interruption_for_build(client, build_id, None).await;
+            emit(SandboxImageBuildEvent::Interrupted(report.clone()));
+            return Err(ImageBuildError::Interrupted(report));
+        }
+    };
+    // The wait's own clock starts now; what the lookup used is taken off
+    // the caller's timeout so the whole operation honors it.
+    let options = ImageBuildWaitOptions {
+        timeout: options
+            .timeout
+            .map(|timeout| timeout.saturating_sub(started.elapsed())),
+        follow_logs: options.follow_logs,
+    };
+    wait_for_terminal(
+        client,
+        ctx,
+        build_id,
+        None,
+        Some(info),
+        &options,
+        interrupt,
+        emit,
     )
     .await
 }
@@ -3205,6 +3292,155 @@ mod tests {
                 "build_id": build_id,
             }),
         )
+    }
+
+    /// The deadline bounds a request in flight, not only the retries and
+    /// sleeps around it: a cancel handshake against a service that never
+    /// answers ends at its budget (not when the connection does), with the
+    /// 408 the abandoned attempt is reported as, and no second attempt is
+    /// started once the budget is gone.
+    #[tokio::test]
+    async fn a_stalled_request_is_abandoned_at_the_loop_deadline() {
+        const HOLD: Duration = Duration::from_secs(60);
+        let (base_url, server) = recording_image_service(vec![Reply::Hang(HOLD)]).await;
+        let client = ClientBuilder::new(&base_url).build().unwrap();
+        let started = Instant::now();
+        let error = cancel_build(
+            &client,
+            &CancelBuildSelector::BuildId("build-1".to_string()),
+            Duration::from_millis(300),
+        )
+        .await
+        .unwrap_err();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(300) && elapsed < HOLD / 2,
+            "{elapsed:?}"
+        );
+        // The handshake wraps the abandoned attempt's 408 in its own
+        // "no acknowledgement" error, which the callers report as an
+        // unconfirmed cancellation.
+        let message = error.to_string();
+        assert!(
+            message.contains("no cancellation acknowledgement"),
+            "{message}"
+        );
+        assert!(message.contains("HTTP 408"), "{message}");
+        assert!(message.contains("did not answer within"), "{message}");
+        assert_eq!(
+            server.finish().await.len(),
+            1,
+            "no attempt after the budget"
+        );
+    }
+
+    /// `wait` with a caller timeout against a service that never answers the
+    /// first lookup: the lookup is bounded by that timeout too, so the wait
+    /// reports the build's timeout (naming the id) instead of running the
+    /// lookup's own budget, and a timeout never cancels.
+    #[tokio::test]
+    async fn the_initial_lookup_of_a_wait_honors_the_caller_timeout() {
+        const HOLD: Duration = Duration::from_secs(60);
+        let (base_url, server) = recording_image_service(vec![Reply::Hang(HOLD)]).await;
+        let client = ClientBuilder::new(&base_url).build().unwrap();
+        let ctx = test_build_context(&base_url);
+        let started = Instant::now();
+        let error = lookup_and_wait(
+            &client,
+            Some(&ctx),
+            "build-1",
+            &ImageBuildWaitOptions {
+                timeout: Some(Duration::from_millis(300)),
+                follow_logs: false,
+            },
+            &InterruptSignal::new(),
+            |_event| {},
+        )
+        .await
+        .unwrap_err();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(300) && elapsed < HOLD / 2,
+            "{elapsed:?}"
+        );
+        let ImageBuildError::Timeout { build_id, waited } = error else {
+            panic!("expected a timeout, got {error}");
+        };
+        assert_eq!(build_id, "build-1");
+        assert!(waited >= Duration::from_millis(300));
+        let requests = server.finish().await;
+        assert_eq!(
+            requests.len(),
+            1,
+            "{:?}",
+            requests.iter().map(|r| &r.line).collect::<Vec<_>>()
+        );
+        assert!(
+            requests[0].line.starts_with("GET /builds/build-1 "),
+            "{}",
+            requests[0].line
+        );
+    }
+
+    /// An interrupt while the first lookup of a wait is still unanswered
+    /// runs the cancellation handshake by build id (the id the caller
+    /// passed is enough), and the wait ends as an interruption. The
+    /// recording server answers one connection at a time, so the lookup's
+    /// hold is short enough for the cancel to be served after it.
+    #[tokio::test]
+    async fn an_interrupt_during_the_initial_lookup_cancels_by_build_id() {
+        let (base_url, server) = recording_image_service(vec![
+            Reply::Hang(Duration::from_millis(300)),
+            Reply::Status(
+                200,
+                json!({"outcome": "cancelled", "build": build_json("cancelled", 1, None, None)}),
+            ),
+        ])
+        .await;
+        let client = ClientBuilder::new(&base_url).build().unwrap();
+        let ctx = test_build_context(&base_url);
+        let interrupt = InterruptSignal::new();
+        let trigger = interrupt.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            trigger.trigger();
+        });
+        let mut events = Vec::new();
+        let started = Instant::now();
+        let error = lookup_and_wait(
+            &client,
+            Some(&ctx),
+            "build-1",
+            &ImageBuildWaitOptions::default(),
+            &interrupt,
+            |event| events.push(event),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the hung lookup was abandoned"
+        );
+        let ImageBuildError::Interrupted(report) = error else {
+            panic!("expected an interruption, got {error}");
+        };
+        assert_eq!(report.build_id.as_deref(), Some("build-1"));
+        assert!(report.is_confirmed_cancelled(), "{report}");
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, SandboxImageBuildEvent::Interrupted(_))),
+            "the handshake is reported through the event stream"
+        );
+        let requests = server.finish().await;
+        let cancel = requests
+            .iter()
+            .find(|request| request.line.starts_with("POST /builds/cancel "))
+            .expect("cancel by build id");
+        assert_eq!(
+            serde_json::from_str::<Value>(&cancel.body).unwrap(),
+            json!({"build_id": "build-1"})
+        );
     }
 
     fn registration_policy(limit: Duration, poll_interval: Duration) -> RegistrationWaitPolicy {

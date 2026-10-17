@@ -259,6 +259,94 @@ async fn build_wait_timeout_names_the_build_and_the_next_commands() {
     );
 }
 
+/// `--timeout` bounds the first request too: against a service that never
+/// answers the lookup, the wait ends at the timeout (naming the build and
+/// the next commands), not when the connection does, and nothing is
+/// cancelled.
+#[tokio::test]
+async fn build_wait_timeout_bounds_a_stalled_initial_lookup() {
+    let dir = tempfile::tempdir().unwrap();
+    let started = std::time::Instant::now();
+    let timed_out = run(
+        &["image", "build", "wait", "build-1", "--timeout", "0.2"],
+        vec![
+            introspection(),
+            hang("GET", "/images/v4/builds/build-1", Duration::from_secs(20)),
+        ],
+        dir.path(),
+    )
+    .await;
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "the stalled lookup was abandoned at the timeout: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(timed_out.code(), Some(1), "{}", timed_out.stderr());
+    let stderr = timed_out.stderr();
+    assert!(stderr.contains("build build-1 did not finish"), "{stderr}");
+    assert!(
+        stderr.contains("tl sbx image build cancel build-1"),
+        "{stderr}"
+    );
+    assert!(
+        timed_out
+            .lines()
+            .iter()
+            .all(|line| line.starts_with("GET ")),
+        "a timeout never cancels: {:?}",
+        timed_out.lines()
+    );
+}
+
+/// Ctrl+C while the wait's first lookup is still unanswered: the handler is
+/// already installed and the lookup runs inside the interruptible wait, so
+/// the build is cancelled by the id the user passed and the CLI exits with
+/// the interrupt status.
+#[tokio::test]
+async fn build_wait_ctrl_c_during_the_initial_lookup_cancels_by_build_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = start(vec![
+        introspection(),
+        hang("GET", "/images/v4/builds/build-7", Duration::from_secs(20)),
+        reply(
+            "POST",
+            "/images/v4/builds/cancel",
+            200,
+            json!({"outcome": "cancelled", "build": build_json("build-7", "cancelled", None)}),
+        ),
+    ])
+    .await;
+    let child = image_support::command(
+        &server.url,
+        &["image", "build", "wait", "build-7"],
+        dir.path(),
+    )
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::piped())
+    .spawn()
+    .unwrap();
+    // The lookup is on the wire and unanswered.
+    server.wait_for("GET", "/images/v4/builds/build-7").await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    unsafe {
+        libc::kill(child.id().unwrap() as i32, libc::SIGINT);
+    }
+    let output = tokio::time::timeout(Duration::from_secs(40), child.wait_with_output())
+        .await
+        .expect("interrupted CLI must exit")
+        .unwrap();
+    let requests = server.finish().await;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(130), "{stderr}");
+    assert!(stderr.contains("Cancelling build build-7..."), "{stderr}");
+    assert!(stderr.contains("Build build-7 cancelled"), "{stderr}");
+    let cancel = requests
+        .iter()
+        .find(|request| request.path() == "/images/v4/builds/cancel")
+        .expect("cancel handshake by build id");
+    assert_eq!(cancel.json(), json!({"build_id": "build-7"}));
+}
+
 #[tokio::test]
 async fn build_cancel_by_build_id_is_sufficient_and_distinguishes_outcomes() {
     let dir = tempfile::tempdir().unwrap();

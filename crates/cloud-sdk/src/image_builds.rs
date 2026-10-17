@@ -50,8 +50,14 @@
 //! deadline and the caller sets none, by [`DEFAULT_WAIT_LIMIT`]. A timeout is
 //! reported as [`ImageBuildError::Timeout`] carrying the build id: the
 //! operation may still be running, and it is neither failed nor cancelled by
-//! the client. Builder logs are followed through the sandbox API as a
-//! courtesy: losing them is a warning, not the end of the wait.
+//! the client. Every deadline bounds the requests in flight as well as the
+//! retries and sleeps between them: a request the service never answers is
+//! abandoned at the deadline (or after a per-request bound), so a stalled
+//! connection cannot hold a wait, a lookup or the cancellation handshake
+//! past its budget. [`ImageBuildClient::wait_build`] runs the initial lookup
+//! inside the same interruptible, timeout-bounded operation as the wait.
+//! Builder logs are followed through the sandbox API as a courtesy: losing
+//! them is a warning, not the end of the wait.
 //!
 //! # Interruption
 //!
@@ -780,6 +786,35 @@ impl ImageBuildClient {
             client_request_id: None,
             info,
         })
+    }
+
+    /// Look `build_id` up and wait for it in one interruptible operation:
+    /// [`Self::get`] followed by [`ImageBuildHandle::wait`], with the lookup
+    /// itself under `interrupt` and under `options.timeout`. Ctrl+C during a
+    /// slow or stalled first request therefore cancels the build (its id is
+    /// the sufficient selector) rather than ending the process silently,
+    /// and a short timeout bounds the lookup too.
+    pub async fn wait_build<F>(
+        &self,
+        build_id: &str,
+        options: ImageBuildWaitOptions,
+        interrupt: &InterruptSignal,
+        emit: F,
+    ) -> Result<ImageBuildResult, ImageBuildError>
+    where
+        F: FnMut(SandboxImageBuildEvent),
+    {
+        reject_legacy_reference(build_id)?;
+        let info = image_service_builds::lookup_and_wait(
+            &self.client,
+            Some(&self.ctx),
+            build_id,
+            &options,
+            interrupt,
+            emit,
+        )
+        .await?;
+        image_service_builds::terminal_result(&info)
     }
 
     /// Cancel one build, bounded by [`CANCEL_HANDSHAKE_BUDGET`]. The outcome

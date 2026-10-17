@@ -569,12 +569,11 @@ pub async fn wait_image_build(
         None => None,
     };
     let interrupt = interrupt_for(interrupt_id);
-    let mut handle = client
-        .get(&build_id)
-        .await
-        .map_err(image_build_napi_error)?;
-    let result = handle
-        .wait(
+    // The lookup runs under the interrupt too: an abort during a slow or
+    // stalled first request cancels the build by its id.
+    let result = client
+        .wait_build(
+            &build_id,
             ImageBuildWaitOptions {
                 timeout,
                 follow_logs: wait.follow_logs.unwrap_or(false),
