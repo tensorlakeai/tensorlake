@@ -49,5 +49,7 @@ transaction before requesting its snapshot. Kernel flush does not flush applicat
 buffers that have never been written to the filesystem.
 
 This requires the matching Artifact Storage and guest runtime release. Updating only
-`tl` does not add support to an existing runtime. V1 retains at most 128 request
-receipts per local mount store and rejects new requests at capacity.
+`tl` does not add support to an existing runtime. Completed request IDs remain
+replayable for the lifetime of the local mount state. A helper restart resumes a
+durably captured cut within the original five-minute deadline; it fails explicitly
+if no cut was captured or the deadline expired.
