@@ -1,7 +1,14 @@
 use crate::auth::context::CliContext;
 use crate::commands::sbx::snapshot::fetch_snapshot_info;
 use crate::error::{CliError, Result};
-use tensorlake::sandbox_templates::models::CreateSandboxTemplateRequest;
+use tensorlake::{
+    sandbox_image_catalog::{CAS_SNAPSHOT_FORMAT_VERSION, validate_registered_name},
+    sandbox_templates::models::{CreateSandboxTemplateRequest, SandboxTemplate},
+};
+
+/// The Dockerfile text sent for a legacy registration without `--dockerfile`
+/// (ADR 0107 D11): the platform stores it verbatim and nothing reads it.
+const OMITTED_DOCKERFILE: &str = "<omitted>";
 
 #[derive(Debug)]
 struct SnapshotRegistrationMetadata {
@@ -12,10 +19,10 @@ struct SnapshotRegistrationMetadata {
     rootfs_disk_bytes: u64,
 }
 
-fn parse_snapshot_registration_metadata(
-    snapshot_id: &str,
-    info: &serde_json::Value,
-) -> Result<SnapshotRegistrationMetadata> {
+/// The snapshot must be `completed` for either family. A CAS snapshot that
+/// is `local_ready` (or still publishing) is resumable but not yet durable,
+/// which is what registration needs (ADR 0107 D39).
+fn require_completed(snapshot_id: &str, info: &serde_json::Value) -> Result<()> {
     let status = info
         .get("status")
         .and_then(|value| value.as_str())
@@ -25,13 +32,37 @@ fn parse_snapshot_registration_metadata(
                 snapshot_id
             ))
         })?;
-    if status != "completed" {
-        return Err(CliError::Other(anyhow::anyhow!(
+    match status {
+        "completed" => Ok(()),
+        "local_ready" | "in_progress" | "pending" | "replicating" => {
+            Err(CliError::Other(anyhow::anyhow!(
+                "snapshot {} is not completed (status: {}): its publication is still in \
+                 progress; retry once it is completed",
+                snapshot_id,
+                status
+            )))
+        }
+        other => Err(CliError::Other(anyhow::anyhow!(
             "snapshot {} is not completed (status: {})",
             snapshot_id,
-            status
-        )));
+            other
+        ))),
     }
+}
+
+fn snapshot_format_version(info: &serde_json::Value) -> Option<String> {
+    info.get("snapshot_format_version")
+        .or_else(|| info.get("snapshotFormatVersion"))
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn parse_snapshot_registration_metadata(
+    snapshot_id: &str,
+    info: &serde_json::Value,
+) -> Result<SnapshotRegistrationMetadata> {
+    require_completed(snapshot_id, info)?;
 
     let sandbox_id = info
         .get("sandbox_id")
@@ -81,35 +112,78 @@ fn parse_snapshot_registration_metadata(
             ))
         })?;
 
-    let snapshot_format_version = info
-        .get("snapshot_format_version")
-        .or_else(|| info.get("snapshotFormatVersion"))
-        .and_then(|value| value.as_str())
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string);
-
     Ok(SnapshotRegistrationMetadata {
         sandbox_id,
         snapshot_uri,
-        snapshot_format_version,
+        snapshot_format_version: snapshot_format_version(info),
         snapshot_size_bytes,
         rootfs_disk_bytes,
     })
 }
 
+/// `tl sbx image register <name> <snapshot-id>`: a completed CAS snapshot is
+/// registered through the Image Service (adoption, ADR 0107 D9-D12); a
+/// completed legacy snapshot through the platform template registry, with
+/// the Dockerfile stored when one is given.
+///
+/// A CAS registration the service answers with `503 publication_pending`
+/// is still running as a build operation: the CLI reports its id, retries
+/// the identical request under the same key until it publishes (Ctrl+C
+/// cancels it) and prints the same final output. Legacy registration is
+/// unchanged and never touches the Image Service.
 pub async fn run(
     ctx: &CliContext,
     image_name: &str,
     snapshot_id: &str,
-    dockerfile_path: &str,
+    dockerfile_path: Option<&str>,
     is_public: bool,
 ) -> Result<()> {
+    validate_registered_name(image_name).map_err(CliError::usage)?;
     let client = ctx.client()?;
-    let templates_client = super::sandbox_templates_client(ctx)?;
-    let dockerfile = tokio::fs::read_to_string(dockerfile_path)
-        .await
-        .map_err(CliError::Io)?;
     let snapshot_info = fetch_snapshot_info(ctx, &client, snapshot_id).await?;
+
+    if snapshot_format_version(&snapshot_info).as_deref() == Some(CAS_SNAPSHOT_FORMAT_VERSION) {
+        require_completed(snapshot_id, &snapshot_info)?;
+        if dockerfile_path.is_some() {
+            eprintln!("⚠️  --dockerfile is ignored for CAS snapshots.");
+        }
+        let catalog = super::sandbox_image_catalog(ctx)?;
+        let guard = super::build::CasInterruptGuard::install();
+        let mut renderer = super::ImageBuildEventRenderer::new();
+        let registered = catalog
+            .image_service()
+            .adopt_snapshot_and_wait(
+                image_name,
+                snapshot_id,
+                is_public,
+                guard.interrupt(),
+                |event| {
+                    guard.observe(&event);
+                    renderer.render(event)
+                },
+            )
+            .await
+            .map_err(super::build::build_error)?;
+        drop(renderer);
+        let rootfs_disk_bytes = registered.rootfs_disk_bytes.unwrap_or(0);
+        let snapshot_uri = registered.snapshot_uri.clone().unwrap_or_default();
+        print_registered(
+            image_name,
+            snapshot_id,
+            rootfs_disk_bytes,
+            &registered,
+            &snapshot_uri,
+        );
+        return Ok(());
+    }
+
+    let templates_client = super::sandbox_templates_client(ctx)?;
+    let dockerfile = match dockerfile_path {
+        Some(path) => tokio::fs::read_to_string(path)
+            .await
+            .map_err(CliError::Io)?,
+        None => OMITTED_DOCKERFILE.to_string(),
+    };
     let snapshot = parse_snapshot_registration_metadata(snapshot_id, &snapshot_info)?;
 
     let registered = templates_client
@@ -136,23 +210,38 @@ pub async fn run(
     let rootfs_disk_bytes = registered
         .rootfs_disk_bytes
         .unwrap_or(snapshot.rootfs_disk_bytes);
-    let rootfs_disk_gib = rootfs_disk_bytes / (1024 * 1024 * 1024);
     let snapshot_uri = registered
         .snapshot_uri
-        .as_deref()
-        .unwrap_or(&snapshot.snapshot_uri);
-    let template_id = registered.id.as_deref().unwrap_or("-");
-
-    println!(
-        "Registered image '{}' -> snapshot {} (rootfs {} GiB)\nTemplate: {}\n{}",
-        image_name, snapshot_id, rootfs_disk_gib, template_id, snapshot_uri
+        .clone()
+        .unwrap_or_else(|| snapshot.snapshot_uri.clone());
+    print_registered(
+        image_name,
+        snapshot_id,
+        rootfs_disk_bytes,
+        &registered,
+        &snapshot_uri,
     );
     Ok(())
 }
 
+fn print_registered(
+    image_name: &str,
+    snapshot_id: &str,
+    rootfs_disk_bytes: u64,
+    registered: &SandboxTemplate,
+    snapshot_uri: &str,
+) {
+    let rootfs_disk_gib = rootfs_disk_bytes / (1024 * 1024 * 1024);
+    let template_id = registered.id.as_deref().unwrap_or("-");
+    println!(
+        "Registered image '{}' -> snapshot {} (rootfs {} GiB)\nTemplate: {}\n{}",
+        image_name, snapshot_id, rootfs_disk_gib, template_id, snapshot_uri
+    );
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse_snapshot_registration_metadata;
+    use super::{parse_snapshot_registration_metadata, require_completed};
     use serde_json::json;
 
     #[test]
@@ -174,6 +263,27 @@ mod tests {
             err.to_string()
                 .contains("snapshot snap-1 is not completed (status: in_progress)")
         );
+    }
+
+    #[test]
+    fn local_ready_snapshots_are_still_publishing() {
+        let err = require_completed(
+            "snap-1",
+            &json!({"status": "local_ready", "snapshot_format_version": "content_addressed_streaming_v1"}),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("snapshot snap-1 is not completed (status: local_ready)")
+        );
+        assert!(err.to_string().contains("publication is still in progress"));
+        let err = require_completed("snap-1", &json!({"status": "failed"})).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("snapshot snap-1 is not completed (status: failed)")
+        );
+        assert!(!err.to_string().contains("still in progress"));
+        assert!(require_completed("snap-1", &json!({"status": "completed"})).is_ok());
     }
 
     #[test]

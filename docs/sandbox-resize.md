@@ -1,9 +1,8 @@
 # Resize a running sandbox
 
-Resize CPU, memory, or the root disk of a running CPU-only CAS sandbox.
-Running GPU CAS sandboxes support root-disk growth only; CPU and memory changes
-are rejected before submitting an update.
-Non-CAS sandboxes do not support live resize.
+Resize CPU, memory, or the root disk of a running sandbox. Which runtimes and
+dimensions support a live resize is the server's policy: an unsupported target
+is rejected by the server and its message is reported unchanged.
 Use `tl sbx describe <id>` to check its current allocation. Memory
 and disk values are MiB, with the same resource names and units as create.
 Omitted dimensions stay unchanged; send name, proxy, and network updates separately.
@@ -207,8 +206,8 @@ incompatible response, not confirmation of completion.
   capture, pinned memory, and virtual machine state remain server/driver decisions.
 
 A sandbox must be running. Full-snapshot-restored or suspended-then-resumed
-CPU-only CAS sandboxes may resize once running. GPU CAS sandboxes support only root-disk
-growth. Unchanged CPU and memory targets are omitted from the update, so they may
-be supplied alongside a larger disk target without requesting a CPU or memory
-resize. GPU allocation, pool templates, and attached volumes cannot be resized
-through this API. Suspended, paused, and non-CAS sandboxes do not support live resize.
+sandboxes may resize once running. Unchanged CPU and memory targets are omitted
+from the update, so they may be supplied alongside a larger disk target without
+requesting a CPU or memory resize. GPU allocation, pool templates, and attached
+volumes cannot be resized through this API. Suspended and paused sandboxes do
+not support live resize; the server decides which runtimes and dimensions do.

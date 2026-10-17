@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use tensorlake::sandbox_images::{
     CommonBuildOptions, SandboxImageBuildOptions, build_sandbox_image,
+    build_sandbox_image_with_interrupt,
 };
 
 use crate::{
@@ -9,7 +10,10 @@ use crate::{
     error::{CliError, Result},
 };
 
-use super::ImageBuildEventRenderer;
+use super::{
+    ImageBuildEventRenderer,
+    build::{CasInterruptGuard, cas_operation_error},
+};
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
@@ -24,8 +28,15 @@ pub async fn run(
     docker_compat: bool,
     cas: bool,
     build_args: &[String],
+    no_wait: bool,
     output_json: bool,
 ) -> Result<()> {
+    if no_wait && !cas {
+        return Err(CliError::usage(
+            "--no-wait is only supported with --cas: a legacy image build has no Image Service \
+             build operation to leave running",
+        ));
+    }
     let build_args = build_args
         .iter()
         .map(|raw| {
@@ -63,15 +74,61 @@ pub async fn run(
     };
 
     let mut renderer = ImageBuildEventRenderer::new();
+    if cas {
+        // CAS builds are Image Service operations: the build id is printed
+        // at admission and Ctrl+C runs the remote cancellation handshake.
+        let guard = CasInterruptGuard::install();
+        if no_wait {
+            let handle = tensorlake::image_builds::start_build(
+                options,
+                ctx.docker_config_json(),
+                guard.interrupt(),
+                |event| {
+                    guard.observe(&event);
+                    renderer.render(event)
+                },
+            )
+            .await
+            .map_err(super::build::build_error)?;
+            drop(renderer);
+            eprintln!(
+                "⚙️  Build {} admitted; wait for it with: tl sbx image build wait {}",
+                handle.build_id(),
+                handle.build_id()
+            );
+            if output_json {
+                println!("{}", serde_json::to_string_pretty(handle.info())?);
+            } else {
+                println!("{}", handle.build_id());
+            }
+            return Ok(());
+        }
+        let registered = build_sandbox_image_with_interrupt(
+            options,
+            ctx.docker_config_json(),
+            guard.interrupt(),
+            |event| {
+                guard.observe(&event);
+                renderer.render(event)
+            },
+        )
+        .await
+        .map_err(cas_operation_error)?;
+        if output_json {
+            println!("{}", serde_json::to_string_pretty(&registered)?);
+        }
+        return Ok(());
+    }
+
     let registered = build_sandbox_image(options, ctx.docker_config_json(), |event| {
         renderer.render(event)
     })
     .await
     .map_err(|error| CliError::Other(error.into()))?;
 
-    if output_json || cas {
-        // --cas prints the published Image Service image record; --json
-        // remains the opt-in for the legacy platform path.
+    if output_json {
+        // Both families answer the platform template shape (ADR 0107 D28);
+        // --json is the only opt-in for printing it.
         println!("{}", serde_json::to_string_pretty(&registered)?);
     }
 

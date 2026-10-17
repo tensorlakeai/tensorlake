@@ -964,12 +964,11 @@ class AsyncSandbox:
     ) -> Traced[SandboxInfo]:
         """Update this sandbox's properties.
 
-        Resource names and units match create. CPU-only CAS sandboxes support CPU,
-        memory, and root-disk resize. GPU CAS sandboxes support only root-disk growth
-        and reject CPU and memory changes. Non-CAS sandboxes do not support live
-        resize. Resize requires a running sandbox and cannot be mixed with name,
-        proxy, or network changes. Omitted dimensions retain their confirmed
-        allocation.
+        Resource names and units match create. Which runtimes and dimensions
+        support a live resize is decided by the server, whose policy error is
+        raised unchanged. Resize requires a running sandbox and cannot be mixed
+        with name, proxy, or network changes. Omitted dimensions retain their
+        confirmed allocation.
         Integer-valued floats such as 2048.0 are accepted for memory and disk;
         fractional values and booleans are rejected without rounding.
 

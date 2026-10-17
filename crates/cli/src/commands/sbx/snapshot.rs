@@ -184,6 +184,13 @@ async fn create_snapshot_with_details_until(
                 error
             )));
         }
+        if current_status == "deleting" {
+            spinner.finish_with_message("Snapshot is being deleted");
+            return Err(CliError::Other(anyhow::anyhow!(
+                "Snapshot {} is being deleted",
+                snapshot_id
+            )));
+        }
 
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }

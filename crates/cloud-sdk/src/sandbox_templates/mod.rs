@@ -136,19 +136,65 @@ impl SandboxTemplatesClient {
         }
     }
 
-    /// Delete a sandbox template by registered name.
+    /// Look up a sandbox template by its `sandbox_template_` id. Returns
+    /// `Ok(None)` only on a clean 404.
+    pub async fn get_by_id(
+        &self,
+        template_id: &str,
+    ) -> Result<Option<Traced<SandboxTemplate>>, SdkError> {
+        let encoded = urlencoding::encode(template_id);
+        let path = format!("{}/{}", self.endpoint(), encoded);
+        let req = self.client.build_get_json_request(&path, None)?;
+        match self.client.execute_json::<SandboxTemplate>(req).await {
+            Ok(traced) => Ok(Some(traced)),
+            Err(SdkError::ServerError { status, .. }) if status == StatusCode::NOT_FOUND => {
+                Ok(None)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Delete a sandbox template by its `sandbox_template_` id. A 404 is an
+    /// error, as it always was; see [`Self::delete_by_id`] for the optional
+    /// form the merged catalog uses.
     ///
-    /// The `name` argument is percent-encoded into the URL path so image-style
-    /// references containing `/` and `:` (e.g. `tensorlake/python:3.12-slim`)
-    /// round-trip correctly.
-    pub async fn delete(&self, name: &str) -> Result<Traced<()>, SdkError> {
-        let encoded = urlencoding::encode(name);
+    /// The argument is percent-encoded into the URL path so image-style
+    /// references containing `/` and `:` round-trip correctly.
+    pub async fn delete(&self, template_id: &str) -> Result<Traced<()>, SdkError> {
+        let encoded = urlencoding::encode(template_id);
         let path = format!("{}/{}", self.endpoint(), encoded);
         let req = self.client.request(Method::DELETE, &path).build()?;
         self.client
             .execute_traced(req)
             .await
             .map(|traced| traced.map(|_| ()))
+    }
+
+    /// Delete a sandbox template by id; `Ok(false)` only on a clean 404.
+    pub async fn delete_by_id(&self, template_id: &str) -> Result<bool, SdkError> {
+        match self.delete(template_id).await {
+            Ok(_) => Ok(true),
+            Err(SdkError::ServerError { status, .. }) if status == StatusCode::NOT_FOUND => {
+                Ok(false)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Delete the project's sandbox template registered under `name`
+    /// (`DELETE .../sandbox-templates/by-name/{name}`); `Ok(false)` only on a
+    /// clean 404.
+    pub async fn delete_by_name(&self, name: &str) -> Result<bool, SdkError> {
+        let encoded = urlencoding::encode(name);
+        let path = format!("{}/by-name/{}", self.endpoint(), encoded);
+        let req = self.client.request(Method::DELETE, &path).build()?;
+        match self.client.execute_traced(req).await {
+            Ok(_) => Ok(true),
+            Err(SdkError::ServerError { status, .. }) if status == StatusCode::NOT_FOUND => {
+                Ok(false)
+            }
+            Err(err) => Err(err),
+        }
     }
 }
 

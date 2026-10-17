@@ -235,6 +235,66 @@ Rust callers must now supply the additional `Option<String>` argument:
 or `Some(contents)` for explicit configuration. Python and TypeScript callers that
 omit the option continue to work unchanged.
 
+### CAS image build operations
+
+A CAS image (`cas=True` / `--cas`) is built or imported by an Image Service
+*build operation* with a service-generated build ID. The convenience calls
+above still wait to publication; the operation can also be driven directly,
+which is how a build is left running, inspected or cancelled:
+
+```python
+from tensorlake.image import start_import, get_build, cancel_build
+
+handle = start_import("ubuntu:24.04", registered_name="base")   # admitted, not waited
+print(handle.build_id)
+result = get_build(handle.build_id).wait(timeout=1800)           # this build's own result
+cancel_build(handle.build_id)                                    # by build id alone
+```
+
+```ts
+import { startImageBuild, getImageBuild, cancelImageBuild } from "@tensorlakeai/tensorlake";
+
+const handle = await startImageBuild("./Dockerfile", { registeredName: "app" });
+const result = await (await getImageBuild(handle.buildId)).wait({ timeoutMs: 1_800_000 });
+await cancelImageBuild({ buildId: handle.buildId });
+```
+
+```bash
+tl sbx image create --cas --no-wait -n app ./Dockerfile   # prints the build ID
+tl sbx image build get BUILD_ID [--json]
+tl sbx image build wait BUILD_ID [--json] [--timeout SECS]
+tl sbx image build cancel BUILD_ID
+```
+
+Behavior shared by every language:
+
+- **CAS only.** These operations address the Image Service. Legacy images
+  (create/import without `--cas`, `sandbox_template_` ids, `.tlsnap` snapshots)
+  have no build operation; passing a legacy reference fails locally before any
+  request, and the legacy create/import/describe/ls/rm/register/snapshot flows
+  keep their existing requests, output, errors and interrupt behavior.
+- **The build ID is the record.** Admission returns it and the CLI prints it
+  (`Build ID: ...`) before any upload or wait. `wait` returns that build's own
+  published result even after the image was rebuilt or deleted; an image name
+  or `image_` id names the *current* image, which a rebuild replaces.
+- **Cancel by build ID.** `cancel` takes only the build ID. The admission's
+  client request ID (`Idempotency-Key`) is kept as a recovery aid for an
+  admission whose response was lost (`tl sbx image build cancel --request-id`);
+  its `not_admitted` answer is an observation, not a cancellation. One
+  unfinished build or import per image name: a second one is refused with
+  `image_build_in_progress` naming the active build to cancel first; nothing is
+  cancelled automatically. `rm` removes published images and never cancels a
+  build.
+- **Interrupts cancel, timeouts do not.** Ctrl+C in the CLI, `KeyboardInterrupt`
+  in Python and an `AbortSignal` in TypeScript request remote cancellation
+  through a bounded (30 s) handshake and report `cancelled`, `already
+  completed`, or an unconfirmed acknowledgement with the build ID. A second
+  Ctrl+C exits at once and says the remote cancellation might not be confirmed.
+  A wait timeout only stops waiting and leaves the build running. Disconnecting,
+  dropping a handle or losing the process never cancels a build. Waits
+  otherwise run until the service-reported operation deadline plus a recovery
+  allowance, reconnecting across transient Image Service failures.
+
 ### Snapshots
 
 Save the state of a sandbox and restore it later:

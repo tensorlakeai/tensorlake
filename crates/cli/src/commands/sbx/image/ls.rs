@@ -1,91 +1,31 @@
 use comfy_table::Cell;
+use tensorlake::sandbox_templates::models::SandboxTemplate;
 
 use crate::auth::context::CliContext;
+use crate::commands::sbx::format_created_at;
 use crate::error::Result;
 use crate::output::table::new_table;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ListedImage {
-    name: String,
-    image_type: String,
-    id: Option<String>,
-    reference: String,
-    snapshot_id: Option<String>,
-    public: bool,
-    source: serde_json::Value,
-}
-
-impl ListedImage {
-    /// Preserve the complete source object for machine consumers and add only
-    /// the source-derived type discriminator. `image ls --json` historically
-    /// returned the raw TLSnap catalog objects, so replacing them with a
-    /// reduced common model would silently remove fields used by scripts.
-    fn json_value(&self) -> serde_json::Value {
-        let mut value = self.source.clone();
-        if let Some(object) = value.as_object_mut() {
-            object.insert(
-                "type".to_string(),
-                serde_json::Value::String(self.image_type.clone()),
-            );
-        }
-        value
-    }
-}
-
-pub async fn run(ctx: &CliContext, output_json: bool, cas_only: bool) -> Result<()> {
-    let client = ctx.client()?;
-    let mut images = if cas_only {
-        super::list_all_cas_images(ctx, &client)
-            .await?
-            .iter()
-            .map(cas_image)
-            .collect::<Vec<_>>()
-    } else {
-        let templates_url = super::templates_base_url(ctx)?;
-        let (tlsnap, cas) = tokio::try_join!(
-            super::list_all_images(ctx, &client, &templates_url),
-            super::list_all_cas_images(ctx, &client),
-        )?;
-        tlsnap
-            .iter()
-            .map(tlsnap_image)
-            .chain(cas.iter().map(cas_image))
-            .collect::<Vec<_>>()
-    };
-    images.sort_by(|left, right| {
-        left.name
-            .cmp(&right.name)
-            .then_with(|| left.image_type.cmp(&right.image_type))
-            .then_with(|| left.reference.cmp(&right.reference))
-    });
+/// `tl sbx image ls`: every image of both families, newest first. `--cas` is
+/// accepted for compatibility and ignored; the merged catalog always lists
+/// CAS and legacy images together, with the Format column telling them apart.
+pub async fn run(ctx: &CliContext, output_json: bool, _cas_only: bool) -> Result<()> {
+    let catalog = super::sandbox_image_catalog(ctx)?;
+    let images = catalog.list().await?;
 
     if output_json {
-        let values = images
-            .iter()
-            .map(ListedImage::json_value)
-            .collect::<Vec<_>>();
-        println!("{}", serde_json::to_string_pretty(&values)?);
+        println!("{}", serde_json::to_string_pretty(&images)?);
         return Ok(());
     }
 
     if images.is_empty() {
-        println!("No {}images found.", if cas_only { "CAS " } else { "" });
+        println!("No images found.");
         return Ok(());
     }
 
-    let mut table = new_table(&["Name", "Type", "ID / Reference", "Snapshot ID"]);
+    let mut table = new_table(&["Name", "Format", "ID", "Snapshot ID", "Created"]);
     for image in &images {
-        let identifier = if image.image_type == "CAS" {
-            image.reference.as_str()
-        } else {
-            image.id.as_deref().unwrap_or(&image.reference)
-        };
-        table.add_row(vec![
-            Cell::new(&image.name),
-            Cell::new(&image.image_type),
-            Cell::new(identifier),
-            Cell::new(image.snapshot_id.as_deref().unwrap_or("-")),
-        ]);
+        table.add_row(table_row(image));
     }
 
     println!("{table}");
@@ -94,112 +34,53 @@ pub async fn run(ctx: &CliContext, output_json: bool, cas_only: bool) -> Result<
     Ok(())
 }
 
-fn tlsnap_image(item: &serde_json::Value) -> ListedImage {
-    let name = string_field(item, &["name"]);
-    ListedImage {
-        reference: name.clone().unwrap_or_else(|| "-".to_string()),
-        name: name.unwrap_or_else(|| "-".to_string()),
-        image_type: "TLSnap".to_string(),
-        id: string_field(item, &["id"]),
-        snapshot_id: string_field(item, &["snapshotId", "snapshot_id"]),
-        public: bool_field(item, &["public"]),
-        source: item.clone(),
-    }
-}
-
-fn cas_image(item: &serde_json::Value) -> ListedImage {
-    let id = string_field(item, &["image_id", "imageId"]);
-    ListedImage {
-        name: string_field(item, &["name"]).unwrap_or_else(|| "-".to_string()),
-        image_type: "CAS".to_string(),
-        reference: string_field(item, &["image"])
-            .or_else(|| id.as_ref().map(|id| format!("cas-v1:{id}")))
-            .unwrap_or_else(|| "-".to_string()),
-        id,
-        snapshot_id: None,
-        public: bool_field(item, &["public"]),
-        source: item.clone(),
-    }
-}
-
-fn string_field(item: &serde_json::Value, keys: &[&str]) -> Option<String> {
-    keys.iter()
-        .find_map(|key| item.get(key).and_then(serde_json::Value::as_str))
-        .map(str::to_string)
-}
-
-fn bool_field(item: &serde_json::Value, keys: &[&str]) -> bool {
-    keys.iter()
-        .find_map(|key| item.get(key).and_then(serde_json::Value::as_bool))
-        .unwrap_or(false)
+fn table_row(image: &SandboxTemplate) -> Vec<Cell> {
+    let created_at = image
+        .created_at
+        .as_deref()
+        .map(|value| serde_json::Value::String(value.to_string()));
+    vec![
+        Cell::new(image.name.as_deref().unwrap_or("-")),
+        Cell::new(super::format_image_family(
+            image.snapshot_format_version.as_deref(),
+        )),
+        Cell::new(image.id.as_deref().unwrap_or("-")),
+        Cell::new(image.snapshot_id.as_deref().unwrap_or("-")),
+        Cell::new(format_created_at(created_at.as_ref())),
+    ]
 }
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
-
-    use super::{cas_image, tlsnap_image};
+    use super::table_row;
+    use tensorlake::sandbox_templates::models::SandboxTemplate;
 
     #[test]
-    fn normalizes_tlsnap_catalog_items() {
-        let image = tlsnap_image(&json!({
-            "id": "template-1",
+    fn rows_show_name_family_ids_and_creation_time() {
+        let image: SandboxTemplate = serde_json::from_value(serde_json::json!({
+            "id": "image_abc",
+            "name": "team/app",
+            "snapshotId": "snap-1",
+            "snapshotFormatVersion": "content_addressed_streaming_v1",
+            "createdAt": "2020-01-01T00:00:00Z",
+        }))
+        .unwrap();
+        let cells: Vec<String> = table_row(&image)
+            .into_iter()
+            .map(|cell| cell.content().to_string())
+            .collect();
+        assert_eq!(cells[..4], ["team/app", "CAS", "image_abc", "snap-1"]);
+        assert_eq!(cells[4], "2020-01-01 00:00");
+
+        let bare: SandboxTemplate = serde_json::from_value(serde_json::json!({
+            "id": "sandbox_template_1",
             "name": "python",
-            "snapshotId": "snapshot-1",
-            "public": true,
-        }));
-        assert_eq!(image.image_type, "TLSnap");
-        assert_eq!(image.reference, "python");
-        assert_eq!(image.id.as_deref(), Some("template-1"));
-        assert_eq!(image.snapshot_id.as_deref(), Some("snapshot-1"));
-        assert!(image.public);
-    }
-
-    #[test]
-    fn json_output_preserves_tlsnap_catalog_fields_and_adds_type() {
-        let source = json!({
-            "id": "template-1",
-            "name": "python",
-            "snapshotId": "snapshot-1",
-            "snapshotSandboxId": "sandbox-1",
-            "snapshotUri": "s3://snapshots/snapshot-1",
-            "snapshotFormatVersion": "durable_archive_v1",
-            "rootfsDiskBytes": 10_737_418_240_u64,
-            "public": true,
-        });
-        let output = tlsnap_image(&source).json_value();
-
-        assert_eq!(output["type"], "TLSnap");
-        for field in [
-            "id",
-            "name",
-            "snapshotId",
-            "snapshotSandboxId",
-            "snapshotUri",
-            "snapshotFormatVersion",
-            "rootfsDiskBytes",
-            "public",
-        ] {
-            assert_eq!(output[field], source[field], "field {field} changed");
-        }
-    }
-
-    #[test]
-    fn normalizes_cas_catalog_items() {
-        let image = cas_image(&json!({
-            "name": "gpu-python",
-            "image_id": "abc123",
-            "image": "cas-v1:abc123",
-            "public": false,
-        }));
-        assert_eq!(image.image_type, "CAS");
-        assert_eq!(image.reference, "cas-v1:abc123");
-        assert_eq!(image.id.as_deref(), Some("abc123"));
-        assert_eq!(image.snapshot_id, None);
-        assert!(!image.public);
-        let output = image.json_value();
-        assert_eq!(output["type"], "CAS");
-        assert_eq!(output["image_id"], "abc123");
-        assert_eq!(output["image"], "cas-v1:abc123");
+        }))
+        .unwrap();
+        let cells: Vec<String> = table_row(&bare)
+            .into_iter()
+            .map(|cell| cell.content().to_string())
+            .collect();
+        assert_eq!(cells, ["python", "-", "sandbox_template_1", "-", "-"]);
     }
 }

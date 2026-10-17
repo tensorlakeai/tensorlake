@@ -2,11 +2,11 @@ import path from "node:path";
 import os from "node:os";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { parseArgs } from "node:util";
-import { CloudClient } from "./cloud-client.js";
 import type { SandboxTemplate } from "./cloud-models.js";
 import { Image, ImageBuildOperationType, dockerfileContent } from "./image.js";
 import type { ImageBuildOperation } from "./image.js";
 import { loadNative } from "./native-binding.js";
+import { __runWithInterrupt } from "./image-builds.js";
 
 /**
  * Sandbox-image build engine.
@@ -49,6 +49,25 @@ export interface CreateSandboxImageOptions {
    */
   dockerCompat?: boolean;
   /**
+   * Build a CAS (content-addressed streaming) image through the Image
+   * Service instead of a legacy template. Off by default.
+   */
+  cas?: boolean;
+  /**
+   * Dockerfile build args (`--build-arg KEY=VALUE`), forwarded to BuildKit
+   * and expanded in `FROM` references. CAS builds only; a legacy build with
+   * build args is rejected.
+   */
+  buildArgs?: Record<string, string>;
+  /**
+   * CAS builds only (`cas: true`): aborting requests *remote cancellation*
+   * of the Image Service build through a bounded handshake, and the call
+   * rejects with `ImageBuildInterruptedError` carrying the outcome. It is
+   * rejected for legacy builds, which have no build operation to cancel.
+   * Abandoning the promise alone never cancels anything.
+   */
+  signal?: AbortSignal;
+  /**
    * Print build progress to stderr. Ignored when an explicit `emit` is
    * passed via `deps`. Defaults to false — `createSandboxImage` is silent
    * by default when invoked programmatically (e.g. `Image.build()`).
@@ -80,6 +99,16 @@ export interface ImportSandboxImageOptions {
    * memory and disk space on builder sandbox).
    */
   dockerCompat?: boolean;
+  /**
+   * Import as a CAS (content-addressed streaming) image through the Image
+   * Service instead of a legacy template. Off by default.
+   */
+  cas?: boolean;
+  /**
+   * CAS imports only (`cas: true`): aborting requests remote cancellation of
+   * the Image Service import; see `CreateSandboxImageOptions.signal`.
+   */
+  signal?: AbortSignal;
   /**
    * Print build progress to stderr. Ignored when an explicit `emit` is
    * passed via `deps`. Defaults to false.
@@ -120,28 +149,105 @@ interface NativeBindingOptions extends NativeBindingCommonOptions {
   dockerfilePath: string;
   dockerfileText?: string | undefined | null;
   contextDir?: string | undefined | null;
+  cas?: boolean | undefined | null;
+  buildArgs?: Record<string, string> | undefined | null;
 }
 
 interface NativeBindingImportOptions extends NativeBindingCommonOptions {
   imageReference: string;
+  cas?: boolean | undefined | null;
+}
+
+/** Credentials and scope for the merged image catalog. */
+interface NativeBindingCatalogOptions {
+  apiUrl: string;
+  bearerToken: string;
+  organizationId?: string | undefined | null;
+  projectId?: string | undefined | null;
+  useScopeHeaders?: boolean | undefined | null;
+  userAgent?: string | undefined | null;
 }
 
 interface NativeBindingEvent {
   eventType: string;
   stream?: string | undefined | null;
   message: string;
+  /** CAS build events (`build_accepted`, `build_progress`, `build_terminal`, `interrupted`). */
+  buildId?: string | undefined | null;
+  clientRequestId?: string | undefined | null;
+  status?: string | undefined | null;
+  phase?: string | undefined | null;
+  attempt?: number | undefined | null;
+  outcome?: string | undefined | null;
+  confirmed?: boolean | undefined | null;
+}
+
+/** Credentials and scope for build lookups, waits and cancellations. */
+interface NativeBindingBuildClientOptions {
+  apiUrl: string;
+  bearerToken: string;
+  organizationId?: string | undefined | null;
+  projectId?: string | undefined | null;
+  namespace?: string | undefined | null;
+  useScopeHeaders?: boolean | undefined | null;
+  userAgent?: string | undefined | null;
 }
 
 interface NativeBinding {
   loadDockerConfigJson(): string;
+  /** `interruptId` is honored for CAS builds only; legacy builds ignore it. */
   buildSandboxImage(
     options: NativeBindingOptions,
     emit?: ((event: NativeBindingEvent) => void) | null | undefined,
+    interruptId?: number | undefined | null,
   ): Promise<string>;
   importSandboxImage(
     options: NativeBindingImportOptions,
     emit?: ((event: NativeBindingEvent) => void) | null | undefined,
+    interruptId?: number | undefined | null,
   ): Promise<string>;
+  // --- Image Service build operations (CAS only) ---
+  createImageBuildInterrupt(): number;
+  triggerImageBuildInterrupt(id: number): void;
+  releaseImageBuildInterrupt(id: number): void;
+  /** JSON `{build, client_request_id}` after admission (and context seal). */
+  startImageBuild(
+    options: Omit<NativeBindingOptions, "builderDiskMb" | "dockerCompat">,
+    emit?: ((event: NativeBindingEvent) => void) | null | undefined,
+    interruptId?: number | undefined | null,
+  ): Promise<string>;
+  startImageImport(
+    options: Omit<NativeBindingImportOptions, "builderDiskMb" | "dockerCompat">,
+    emit?: ((event: NativeBindingEvent) => void) | null | undefined,
+    interruptId?: number | undefined | null,
+  ): Promise<string>;
+  /** BuildInfo JSON. */
+  getImageBuild(options: NativeBindingBuildClientOptions, buildId: string): Promise<string>;
+  /** The build's immutable result JSON. */
+  waitImageBuild(
+    options: NativeBindingBuildClientOptions,
+    buildId: string,
+    wait: { timeoutMs?: number | undefined | null; followLogs?: boolean | undefined | null },
+    emit?: ((event: NativeBindingEvent) => void) | null | undefined,
+    interruptId?: number | undefined | null,
+  ): Promise<string>;
+  /** JSON `{outcome, build}`. */
+  cancelImageBuild(
+    options: NativeBindingBuildClientOptions,
+    selector: { buildId?: string | undefined | null; clientRequestId?: string | undefined | null },
+  ): Promise<string>;
+  /** JSON array of every image of both families, newest first. */
+  listSandboxImages(options: NativeBindingCatalogOptions): Promise<string>;
+  /** JSON record of one image by name or id, or null when unknown. */
+  findSandboxImage(
+    options: NativeBindingCatalogOptions,
+    reference: string,
+  ): Promise<string | null>;
+  /** Delete one image by name or id; unknown in both catalogs rejects. */
+  deleteSandboxImage(
+    options: NativeBindingCatalogOptions,
+    reference: string,
+  ): Promise<void>;
 }
 
 let cachedNativeBinding: NativeBinding | undefined;
@@ -251,8 +357,35 @@ function eventToEmitDict(event: NativeBindingEvent): Record<string, unknown> {
     message: event.message,
   };
   if (event.stream != null) out.stream = event.stream;
+  // CAS build events carry structured state beside the message.
+  if (event.buildId != null) out.build_id = event.buildId;
+  if (event.clientRequestId !== undefined && event.eventType !== "status") {
+    out.client_request_id = event.clientRequestId;
+  }
+  if (event.status != null) out.status = event.status;
+  if (event.phase !== undefined && event.eventType.startsWith("build_")) out.phase = event.phase;
+  if (event.attempt != null) out.attempt = event.attempt;
+  if (event.outcome != null) out.outcome = event.outcome;
+  if (event.confirmed != null) out.confirmed = event.confirmed;
   return out;
 }
+
+/**
+ * @internal Shared with `image-builds.ts`, which implements the Image
+ * Service build operations on top of the same native binding and
+ * environment context.
+ */
+export const __imageBuildInternals = {
+  loadNativeBinding: () => loadNativeBinding(),
+  buildContextFromEnv: () => buildContextFromEnv(),
+  stderrEmit: (event: Record<string, unknown>) => stderrEmit(event),
+  noopEmit: (event: Record<string, unknown>) => noopEmit(event),
+  eventToEmitDict: (event: NativeBindingEvent) => eventToEmitDict(event),
+  imageRequiresContext: (image: Image) => imageRequiresContext(image),
+  defaultRegisteredName: (dockerfilePath: string) => defaultRegisteredName(dockerfilePath),
+  defaultRegisteredNameFromImage: (reference: string) =>
+    defaultRegisteredNameFromImage(reference),
+};
 
 /**
  * True when a `RUN` op bind-mounts the build context (reads host files).
@@ -407,39 +540,54 @@ export async function createSandboxImage(
       );
     }
 
+    if (options.signal !== undefined && !options.cas) {
+      throw new Error(
+        "signal is only supported for CAS image builds (cas: true); a legacy build has no " +
+          "Image Service build operation to cancel",
+      );
+    }
+
     emit({ type: "status", message: `Building image '${effectiveName}'...` });
 
     const binding = loadNativeBinding();
     let emitError: unknown;
-    const resultJson = await binding.buildSandboxImage(
-      {
-        apiUrl: context.apiUrl,
-        bearerToken,
-        dockerfilePath,
-        registeredName: effectiveName,
-        diskMb: options.diskMb,
-        builderDiskMb: options.builderDiskMb,
-        cpus: options.cpus,
-        memoryMb: options.memoryMb,
-        isPublic: options.isPublic ?? false,
-        organizationId: usePat ? context.organizationId : undefined,
-        projectId: usePat ? context.projectId : undefined,
-        namespace: context.namespace,
-        useScopeHeaders: usePat,
-        userAgent: undefined,
-        dockerCompat: options.dockerCompat ?? false,
-        dockerConfigJson: options.dockerConfigJson,
-        dockerfileText,
-        contextDir: nativeContextDir,
-      },
-      (event) => {
-        try {
-          emit(eventToEmitDict(event));
-        } catch (error) {
-          emitError ??= error;
-        }
-      },
-    );
+    const nativeOptions = {
+      apiUrl: context.apiUrl,
+      bearerToken,
+      dockerfilePath,
+      registeredName: effectiveName,
+      diskMb: options.diskMb,
+      builderDiskMb: options.builderDiskMb,
+      cpus: options.cpus,
+      memoryMb: options.memoryMb,
+      isPublic: options.isPublic ?? false,
+      organizationId: usePat ? context.organizationId : undefined,
+      projectId: usePat ? context.projectId : undefined,
+      namespace: context.namespace,
+      useScopeHeaders: usePat,
+      userAgent: undefined,
+      dockerCompat: options.dockerCompat ?? false,
+      dockerConfigJson: options.dockerConfigJson,
+      dockerfileText,
+      contextDir: nativeContextDir,
+      cas: options.cas ?? false,
+      buildArgs: options.buildArgs,
+    };
+    const forward = (event: NativeBindingEvent) => {
+      try {
+        emit(eventToEmitDict(event));
+      } catch (error) {
+        emitError ??= error;
+      }
+    };
+    // CAS builds run through the interrupt-aware bridge so an AbortSignal
+    // reaches the Rust cancellation handshake and typed build errors are
+    // decoded. Legacy builds keep the plain call and its error path.
+    const resultJson = options.cas
+      ? await __runWithInterrupt(options.signal, (interruptId) =>
+          binding.buildSandboxImage(nativeOptions, forward, interruptId),
+        )
+      : await binding.buildSandboxImage(nativeOptions, forward);
 
     if (emitError != null) {
       throw emitError;
@@ -516,6 +664,13 @@ export async function importSandboxImage(
     );
   }
 
+  if (options.signal !== undefined && !options.cas) {
+    throw new Error(
+      "signal is only supported for CAS image imports (cas: true); a legacy import has no " +
+        "Image Service build operation to cancel",
+    );
+  }
+
   emit({
     type: "status",
     message: `Importing image '${reference}' as '${effectiveName}'...`,
@@ -523,33 +678,37 @@ export async function importSandboxImage(
 
   const binding = loadNativeBinding();
   let emitError: unknown;
-  const resultJson = await binding.importSandboxImage(
-    {
-      apiUrl: context.apiUrl,
-      bearerToken,
-      imageReference: reference,
-      registeredName: effectiveName,
-      diskMb: options.diskMb,
-      builderDiskMb: options.builderDiskMb,
-      cpus: options.cpus,
-      memoryMb: options.memoryMb,
-      isPublic: options.isPublic ?? false,
-      organizationId: usePat ? context.organizationId : undefined,
-      projectId: usePat ? context.projectId : undefined,
-      namespace: context.namespace,
-      useScopeHeaders: usePat,
-      userAgent: undefined,
-      dockerCompat: options.dockerCompat ?? false,
-      dockerConfigJson: options.dockerConfigJson,
-    },
-    (event) => {
-      try {
-        emit(eventToEmitDict(event));
-      } catch (error) {
-        emitError ??= error;
-      }
-    },
-  );
+  const nativeOptions = {
+    apiUrl: context.apiUrl,
+    bearerToken,
+    imageReference: reference,
+    registeredName: effectiveName,
+    diskMb: options.diskMb,
+    builderDiskMb: options.builderDiskMb,
+    cpus: options.cpus,
+    memoryMb: options.memoryMb,
+    isPublic: options.isPublic ?? false,
+    organizationId: usePat ? context.organizationId : undefined,
+    projectId: usePat ? context.projectId : undefined,
+    namespace: context.namespace,
+    useScopeHeaders: usePat,
+    userAgent: undefined,
+    dockerCompat: options.dockerCompat ?? false,
+    dockerConfigJson: options.dockerConfigJson,
+    cas: options.cas ?? false,
+  };
+  const forward = (event: NativeBindingEvent) => {
+    try {
+      emit(eventToEmitDict(event));
+    } catch (error) {
+      emitError ??= error;
+    }
+  };
+  const resultJson = options.cas
+    ? await __runWithInterrupt(options.signal, (interruptId) =>
+        binding.importSandboxImage(nativeOptions, forward, interruptId),
+      )
+    : await binding.importSandboxImage(nativeOptions, forward);
 
   if (emitError != null) {
     throw emitError;
@@ -571,11 +730,15 @@ export async function importSandboxImage(
   return result;
 }
 
-export async function deleteSandboxImage(imageName: string): Promise<void> {
-  if (typeof imageName !== "string" || imageName.length === 0) {
-    throw new TypeError("imageName must be a non-empty string");
-  }
+/** Credentials the merged-catalog operations run with. */
+export interface SandboxImageCatalogCredentials {
+  apiUrl?: string;
+  apiKey?: string;
+  organizationId?: string;
+  projectId?: string;
+}
 
+function catalogOptionsFromEnv(): NativeBindingCatalogOptions {
   const context = buildContextFromEnv();
   const bearerToken = context.apiKey;
   if (!bearerToken) {
@@ -586,25 +749,99 @@ export async function deleteSandboxImage(imageName: string): Promise<void> {
     }
     throw new Error("Missing TENSORLAKE_API_KEY credentials.");
   }
+  return { apiUrl: context.apiUrl, bearerToken, useScopeHeaders: false };
+}
 
-  const client = new CloudClient({
-    apiUrl: context.apiUrl,
-    apiKey: bearerToken,
-    namespace: context.namespace,
-  });
-  try {
-    await client.deleteSandboxImage(imageName);
-  } finally {
-    client.close();
+// An explicit organization/project pair addresses that project's routes
+// directly (and sends the scope headers), as the clients' explicit-scope
+// options always did; without one the key's own scope applies. The Rust core
+// reads the pair only when `useScopeHeaders` is set, so the flag follows the
+// pair. Half a pair is a caller error rather than a silent fallback.
+function catalogOptionsFromCredentials(
+  credentials: SandboxImageCatalogCredentials,
+): NativeBindingCatalogOptions {
+  const context = buildContextFromEnv();
+  const bearerToken = credentials.apiKey ?? context.apiKey;
+  if (!bearerToken) {
+    throw new Error("Missing TENSORLAKE_API_KEY credentials.");
   }
+  const { organizationId, projectId } = credentials;
+  if ((organizationId === undefined) !== (projectId === undefined)) {
+    throw new TypeError("organizationId and projectId must be given together");
+  }
+  return {
+    apiUrl: credentials.apiUrl ?? context.apiUrl,
+    bearerToken,
+    organizationId,
+    projectId,
+    useScopeHeaders: organizationId !== undefined,
+  };
+}
+
+function parseTemplate(json: string): SandboxTemplate {
+  return JSON.parse(json) as SandboxTemplate;
 }
 
 /**
- * Look up a registered sandbox image by its registered name.
+ * Delete a registered sandbox image by name or id. Both families are
+ * covered: an `image_` id or a name registered in the Image Service deletes
+ * a CAS image, a `sandbox_template_` id or a name registered only in the
+ * platform registry deletes a legacy image. Rejects when neither catalog
+ * knows the reference.
  *
- * Returns the registered sandbox template, or `null` if no image with that
- * name exists. Uses the same environment-based Tensorlake auth as
- * `createSandboxImage`. Ingress derives project scope from the API key.
+ * Deleting removes a *published* image. An unfinished CAS build is cancelled
+ * with `cancelImageBuild({ buildId })` (or `tl sbx image build cancel
+ * BUILD_ID`), never by deleting its name: a name whose only state is an
+ * unfinished first build has no image, so the Image Service answers 404 and
+ * the lookup falls through to the platform registry as usual. A 202
+ * (deletion in progress) counts as success; a 409 `image_build_in_progress`,
+ * a 5xx or a transport failure rejects as is and never falls through.
+ *
+ * Accepted merged-catalog differences from the released SDKs, for legacy
+ * images: this deletes the platform-api template itself (the released SDKs
+ * only removed the engine registration and left the template listed), and
+ * an unknown name rejects instead of succeeding silently.
+ */
+export async function deleteSandboxImage(imageName: string): Promise<void> {
+  if (typeof imageName !== "string" || imageName.length === 0) {
+    throw new TypeError("imageName must be a non-empty string");
+  }
+  await loadNativeBinding().deleteSandboxImage(catalogOptionsFromEnv(), imageName);
+}
+
+/** @internal `APIClient.deleteSandboxImage` with the client's credentials. */
+export async function deleteSandboxImageWithCredentials(
+  credentials: SandboxImageCatalogCredentials,
+  imageName: string,
+): Promise<void> {
+  if (typeof imageName !== "string" || imageName.length === 0) {
+    throw new TypeError("imageName must be a non-empty string");
+  }
+  await loadNativeBinding().deleteSandboxImage(
+    catalogOptionsFromCredentials(credentials),
+    imageName,
+  );
+}
+
+/**
+ * Look up a registered sandbox image by its registered name or id.
+ *
+ * Returns the image in the sandbox-template shape (CAS images carry
+ * `snapshotFormatVersion === "content_addressed_streaming_v1"`; the shape is
+ * derived from the Image Service's trimmed record, so no content digest or
+ * build provenance rides on it), or `null` if neither the Image Service nor
+ * the platform registry knows the reference. Uses the same environment-based Tensorlake
+ * auth as `createSandboxImage`. Ingress derives project scope from the API key.
+ *
+ * An `image_` id names the *current* image under its name; a rebuild
+ * replaces it. A build's own immutable result is read with `getImageBuild`.
+ *
+ * Accepted merged-catalog difference from the released SDKs, for legacy
+ * images: a name that fits the Image Service grammar is looked up there first
+ * and only a clean 404 falls through to the platform registry, so Image
+ * Service unavailability (or a deploy 5xx) rejects the lookup of a legacy name
+ * where the released SDKs touched only platform-api. A `sandbox_template_` id
+ * never consults the Image Service.
  */
 export async function findSandboxImageByName(
   imageName: string,
@@ -612,59 +849,47 @@ export async function findSandboxImageByName(
   if (typeof imageName !== "string" || imageName.length === 0) {
     throw new TypeError("imageName must be a non-empty string");
   }
+  const json = await loadNativeBinding().findSandboxImage(
+    catalogOptionsFromEnv(),
+    imageName,
+  );
+  return json == null ? null : parseTemplate(json);
+}
 
-  const context = buildContextFromEnv();
-  const bearerToken = context.apiKey;
-  if (!bearerToken) {
-    if (context.personalAccessToken) {
-      throw new Error(
-        "Sandbox image SDKs require TENSORLAKE_API_KEY. Personal access tokens are CLI-only.",
-      );
-    }
-    throw new Error("Missing TENSORLAKE_API_KEY credentials.");
+/** @internal `CloudClient.findSandboxImageByName` with the client's credentials. */
+export async function findSandboxImageByNameWithCredentials(
+  credentials: SandboxImageCatalogCredentials,
+  imageName: string,
+): Promise<SandboxTemplate | null> {
+  if (typeof imageName !== "string" || imageName.length === 0) {
+    throw new TypeError("imageName must be a non-empty string");
   }
-
-  const client = new CloudClient({
-    apiUrl: context.apiUrl,
-    apiKey: bearerToken,
-    namespace: context.namespace,
-  });
-  try {
-    return await client.findSandboxImageByName(imageName);
-  } finally {
-    client.close();
-  }
+  const json = await loadNativeBinding().findSandboxImage(
+    catalogOptionsFromCredentials(credentials),
+    imageName,
+  );
+  return json == null ? null : parseTemplate(json);
 }
 
 /**
- * List all registered sandbox images for the current project.
- *
- * Returns the registered sandbox templates (each with `id`, `name`,
- * `snapshotId`, `public`, etc.). Uses the same environment-based Tensorlake
- * auth as `createSandboxImage`. Ingress derives project scope from the API key.
+ * List all registered sandbox images for the current project: every CAS and
+ * legacy image in the sandbox-template shape, newest first. Uses the same
+ * environment-based Tensorlake auth as `createSandboxImage`. Ingress derives
+ * project scope from the API key.
  */
 export async function listSandboxImages(): Promise<SandboxTemplate[]> {
-  const context = buildContextFromEnv();
-  const bearerToken = context.apiKey;
-  if (!bearerToken) {
-    if (context.personalAccessToken) {
-      throw new Error(
-        "Sandbox image SDKs require TENSORLAKE_API_KEY. Personal access tokens are CLI-only.",
-      );
-    }
-    throw new Error("Missing TENSORLAKE_API_KEY credentials.");
-  }
+  const json = await loadNativeBinding().listSandboxImages(catalogOptionsFromEnv());
+  return JSON.parse(json) as SandboxTemplate[];
+}
 
-  const client = new CloudClient({
-    apiUrl: context.apiUrl,
-    apiKey: bearerToken,
-    namespace: context.namespace,
-  });
-  try {
-    return await client.listSandboxImages();
-  } finally {
-    client.close();
-  }
+/** @internal `CloudClient.listSandboxImages` with the client's credentials. */
+export async function listSandboxImagesWithCredentials(
+  credentials: SandboxImageCatalogCredentials,
+): Promise<SandboxTemplate[]> {
+  const json = await loadNativeBinding().listSandboxImages(
+    catalogOptionsFromCredentials(credentials),
+  );
+  return JSON.parse(json) as SandboxTemplate[];
 }
 
 export async function runCreateSandboxImageCli(argv = process.argv.slice(2)) {

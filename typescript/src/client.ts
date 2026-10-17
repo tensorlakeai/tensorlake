@@ -629,9 +629,9 @@ export class SandboxClient {
   }
 
   /**
-   * Update properties or resize a running sandbox. CPU-only CAS sandboxes support
-   * CPU, memory, and root-disk resize; GPU CAS sandboxes support only root-disk
-   * growth. Non-CAS sandboxes do not support live resize.
+   * Update properties or resize a running sandbox. Which runtimes and
+   * dimensions support a live resize is decided by the server, whose policy
+   * error is thrown unchanged.
    * Resource names match create. Resize waits by default; wait=false returns
    * admission. Timeout leaves the resize running and reports its generation.
    * Wait, timeout, and pollInterval are ignored on non-resource updates.
@@ -1025,6 +1025,11 @@ export class SandboxClient {
       if (info.status === SnapshotStatus.FAILED) {
         throw new SandboxError(
           `Snapshot ${result.snapshotId} failed: ${info.error}`,
+        );
+      }
+      if (info.status === SnapshotStatus.DELETING) {
+        throw new SandboxError(
+          `Snapshot ${result.snapshotId} is being deleted`,
         );
       }
       await sleep(pollInterval * 1000);

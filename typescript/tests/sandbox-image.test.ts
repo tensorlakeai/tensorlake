@@ -6,11 +6,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   __setNativeBindingForTest,
   createSandboxImage,
+  deleteSandboxImage,
+  findSandboxImageByName,
   importSandboxImage,
+  listSandboxImages,
   runCreateSandboxImageCli,
   runImportSandboxImageCli,
 } from "../src/sandbox-image.js";
 import { Image, dockerfileContent } from "../src/image.js";
+import { CloudClient } from "../src/cloud-client.js";
+import { API_URL } from "../src/defaults.js";
 
 interface CapturedCall {
   options: Record<string, unknown>;
@@ -23,6 +28,8 @@ interface CapturedCall {
 function makeFakeBinding(opts: {
   resultJson?: string;
   events?: Array<{ eventType: string; stream?: string | null; message: string }>;
+  listJson?: string;
+  findJson?: string | null;
 } = {}) {
   const captured: CapturedCall = { options: {} };
   const handler = async (
@@ -55,6 +62,9 @@ function makeFakeBinding(opts: {
     loadDockerConfigJson: vi.fn(() => "{}"),
     buildSandboxImage: vi.fn(handler),
     importSandboxImage: vi.fn(handler),
+    listSandboxImages: vi.fn(async () => opts.listJson ?? "[]"),
+    findSandboxImage: vi.fn(async () => opts.findJson ?? null),
+    deleteSandboxImage: vi.fn(async () => {}),
   };
   __setNativeBindingForTest(binding);
   return { binding, captured };
@@ -280,6 +290,31 @@ describe("createSandboxImage", () => {
     await createSandboxImage(dockerfilePath, { dockerCompat: true });
 
     expect(captured.options.dockerCompat).toBe(true);
+  });
+
+  it("forwards cas and buildArgs to the native build binding and defaults them off", async () => {
+    const tempDir = await mkdir(
+      path.join(os.tmpdir(), `tensorlake-images-${Date.now()}-cas`),
+      { recursive: true },
+    );
+    const dockerfilePath = path.join(tempDir, "Dockerfile");
+    await writeFile(
+      dockerfilePath,
+      "ARG PY_TAG=3.12-slim\nFROM python:${PY_TAG}\n",
+      "utf8",
+    );
+
+    const { captured } = makeFakeBinding();
+    await createSandboxImage(dockerfilePath, {
+      cas: true,
+      buildArgs: { PY_TAG: "3.13" },
+    });
+    expect(captured.options.cas).toBe(true);
+    expect(captured.options.buildArgs).toEqual({ PY_TAG: "3.13" });
+
+    await createSandboxImage(dockerfilePath);
+    expect(captured.options.cas).toBe(false);
+    expect(captured.options.buildArgs).toBeUndefined();
   });
 
   it("forwards native events back through the user emit callback", async () => {
@@ -566,6 +601,14 @@ describe("importSandboxImage", () => {
     expect(result).toEqual({ id: "tpl-1", snapshot_id: "snap-1" });
   });
 
+  it("forwards cas to the native import binding and defaults it off", async () => {
+    const { captured } = makeFakeBinding();
+    await importSandboxImage("ubuntu:24.04", { cas: true });
+    expect(captured.options.cas).toBe(true);
+    await importSandboxImage("ubuntu:24.04");
+    expect(captured.options.cas).toBe(false);
+  });
+
   it("derives the registered name from the reference, stripping tag and registry path", async () => {
     const { captured } = makeFakeBinding();
     await importSandboxImage("ghcr.io/org/app@sha256:abc123");
@@ -651,6 +694,74 @@ describe("importSandboxImage", () => {
   });
 });
 
+describe("sandbox image catalog", () => {
+  beforeEach(() => {
+    vi.stubEnv("TENSORLAKE_API_URL", "https://api.tensorlake.test");
+    vi.stubEnv("TENSORLAKE_API_KEY", "tl_key_test");
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    __setNativeBindingForTest(undefined);
+    vi.restoreAllMocks();
+  });
+
+  const record = {
+    id: "image_abc",
+    name: "team/app",
+    snapshotId: "snap-1",
+    snapshotFormatVersion: "content_addressed_streaming_v1",
+    rootfsDiskBytes: 1024,
+    public: false,
+    createdAt: "2026-10-15T00:00:00.000Z",
+  };
+
+  it("lists both families through the native catalog", async () => {
+    const { binding } = makeFakeBinding({ listJson: JSON.stringify([record]) });
+    const images = await listSandboxImages();
+    expect(images).toEqual([record]);
+    expect(binding.listSandboxImages).toHaveBeenCalledWith({
+      apiUrl: "https://api.tensorlake.test",
+      bearerToken: "tl_key_test",
+      useScopeHeaders: false,
+    });
+  });
+
+  it("finds one image by name or id and returns null when unknown", async () => {
+    const { binding } = makeFakeBinding({ findJson: JSON.stringify(record) });
+    expect(await findSandboxImageByName("team/app")).toEqual(record);
+    expect(binding.findSandboxImage).toHaveBeenCalledWith(
+      expect.objectContaining({ bearerToken: "tl_key_test" }),
+      "team/app",
+    );
+    makeFakeBinding({ findJson: null });
+    expect(await findSandboxImageByName("missing")).toBeNull();
+    await expect(findSandboxImageByName("")).rejects.toThrow(TypeError);
+  });
+
+  it("deletes through the native catalog and surfaces its errors", async () => {
+    const { binding } = makeFakeBinding();
+    await deleteSandboxImage("team/app");
+    expect(binding.deleteSandboxImage).toHaveBeenCalledWith(
+      expect.objectContaining({ apiUrl: "https://api.tensorlake.test" }),
+      "team/app",
+    );
+    binding.deleteSandboxImage.mockRejectedValueOnce(
+      new Error('{"category":"remote_api","status":404,"message":"image \'missing\' not found"}'),
+    );
+    await expect(deleteSandboxImage("missing")).rejects.toThrow("not found");
+  });
+
+  it("requires an API key", async () => {
+    vi.stubEnv("TENSORLAKE_API_KEY", "");
+    vi.stubEnv("TENSORLAKE_PAT", "tl_pat_test");
+    makeFakeBinding();
+    await expect(listSandboxImages()).rejects.toThrow("Personal access tokens are CLI-only");
+    vi.stubEnv("TENSORLAKE_PAT", "");
+    await expect(findSandboxImageByName("x")).rejects.toThrow("Missing TENSORLAKE_API_KEY");
+  });
+});
+
 describe("dockerfileContent", () => {
   it("renders an Image DSL definition", () => {
     const image = new Image({
@@ -677,5 +788,130 @@ describe("dockerfileContent", () => {
     const image = new Image({ name: "no-base" }).run("echo hi");
     // baseImage is undefined → dockerfileContent emits no FROM line.
     expect(dockerfileContent(image).split("\n")[0]).toBe("RUN echo hi");
+  });
+});
+
+describe("CloudClient sandbox image methods", () => {
+  beforeEach(() => {
+    vi.stubEnv("TENSORLAKE_API_URL", "https://env.tensorlake.test");
+    vi.stubEnv("TENSORLAKE_API_KEY", "tl_key_env");
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    __setNativeBindingForTest(undefined);
+  });
+
+  const record = { id: "image_1", name: "team/app", snapshotId: "snap-1" };
+
+  it("keeps deleteSandboxImage, findSandboxImageByName and listSandboxImages as merged-catalog wrappers with the client's credentials", async () => {
+    const { binding } = makeFakeBinding({
+      listJson: JSON.stringify([record]),
+      findJson: JSON.stringify(record),
+    });
+    const client = new CloudClient({
+      apiUrl: "https://client.tensorlake.test",
+      apiKey: "tl_key_client",
+      organizationId: "org-1",
+      projectId: "proj-1",
+    });
+    // The client's explicit scope addresses the project's routes directly,
+    // as the previous implementation did.
+    const credentials = {
+      apiUrl: "https://client.tensorlake.test",
+      bearerToken: "tl_key_client",
+      organizationId: "org-1",
+      projectId: "proj-1",
+      useScopeHeaders: true,
+    };
+
+    expect(await client.listSandboxImages()).toEqual([record]);
+    expect(binding.listSandboxImages).toHaveBeenCalledWith(credentials);
+
+    expect(await client.findSandboxImageByName("team/app")).toEqual(record);
+    expect(binding.findSandboxImage).toHaveBeenCalledWith(credentials, "team/app");
+    binding.findSandboxImage.mockResolvedValueOnce(null);
+    expect(await client.findSandboxImageByName("missing")).toBeNull();
+    await expect(client.findSandboxImageByName("")).rejects.toThrow(TypeError);
+
+    await client.deleteSandboxImage("team/app");
+    expect(binding.deleteSandboxImage).toHaveBeenCalledWith(credentials, "team/app");
+    await expect(client.deleteSandboxImage("")).rejects.toThrow(TypeError);
+    client.close();
+  });
+
+  it("lets a call override the client's organization and project scope", async () => {
+    const { binding } = makeFakeBinding({ listJson: "[]" });
+    const client = new CloudClient({
+      apiUrl: "https://client.tensorlake.test",
+      apiKey: "tl_key_client",
+      organizationId: "org-1",
+      projectId: "proj-1",
+    });
+    await client.listSandboxImages({ organizationId: "org-2", projectId: "proj-2" });
+    expect(binding.listSandboxImages).toHaveBeenLastCalledWith({
+      apiUrl: "https://client.tensorlake.test",
+      bearerToken: "tl_key_client",
+      organizationId: "org-2",
+      projectId: "proj-2",
+      useScopeHeaders: true,
+    });
+    await client.findSandboxImageByName("team/app", { projectId: "proj-3" });
+    expect(binding.findSandboxImage).toHaveBeenLastCalledWith(
+      {
+        apiUrl: "https://client.tensorlake.test",
+        bearerToken: "tl_key_client",
+        organizationId: "org-1",
+        projectId: "proj-3",
+        useScopeHeaders: true,
+      },
+      "team/app",
+    );
+    client.close();
+  });
+
+  it("scopes an explicit pair given only per call and refuses half a pair", async () => {
+    const { binding } = makeFakeBinding({ listJson: "[]" });
+    const unscoped = new CloudClient({
+      apiUrl: "https://client.tensorlake.test",
+      apiKey: "tl_key_client",
+    });
+    await unscoped.listSandboxImages();
+    expect(binding.listSandboxImages).toHaveBeenLastCalledWith({
+      apiUrl: "https://client.tensorlake.test",
+      bearerToken: "tl_key_client",
+      organizationId: undefined,
+      projectId: undefined,
+      useScopeHeaders: false,
+    });
+    await unscoped.listSandboxImages({ organizationId: "org-9", projectId: "proj-9" });
+    expect(binding.listSandboxImages).toHaveBeenLastCalledWith({
+      apiUrl: "https://client.tensorlake.test",
+      bearerToken: "tl_key_client",
+      organizationId: "org-9",
+      projectId: "proj-9",
+      useScopeHeaders: true,
+    });
+    await expect(unscoped.listSandboxImages({ projectId: "proj-9" })).rejects.toThrow(
+      "organizationId and projectId must be given together",
+    );
+    expect(binding.listSandboxImages).toHaveBeenCalledTimes(2);
+    unscoped.close();
+  });
+
+  it("falls back to the default URL and the environment's key when the client sets none", async () => {
+    const { binding } = makeFakeBinding({ listJson: "[]" });
+    const client = new CloudClient();
+    await client.listSandboxImages();
+    // The URL default is read when the module loads; the key falls back to
+    // the environment through the catalog's credential resolution.
+    expect(binding.listSandboxImages).toHaveBeenCalledWith({
+      apiUrl: API_URL,
+      bearerToken: "tl_key_env",
+      organizationId: undefined,
+      projectId: undefined,
+      useScopeHeaders: false,
+    });
+    client.close();
   });
 });
