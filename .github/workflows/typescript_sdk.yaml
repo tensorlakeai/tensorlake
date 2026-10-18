@@ -219,6 +219,9 @@ jobs:
       - name: Verify native cloud transport and cancellation
         run: npm run test:native-cloud
 
+      - name: Verify shared Rust TCP tunnel through the TypeScript SDK
+        run: npm run test:native-tunnel
+
       - name: Verify cloud decoding preserves Function Agent blob transfers
         run: |
           cargo test -p tensorlake-rust-cloud-sdk-node --lib cloud::tests::

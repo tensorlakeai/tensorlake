@@ -274,12 +274,26 @@ interface NativeSandboxProxyClientCtor {
 }
 
 export interface NativeSandboxBinding {
+  NativeTcpTunnel: new () => NativeTcpTunnel;
   NativeCloudClient?: new (optionsJson: string) => NativeCloudClient;
   NativeSandboxClient: NativeSandboxClientCtor;
   NativeSandboxProxyClient: NativeSandboxProxyClientCtor;
   NativeRepositoryClient?: NativeRepositoryClientCtor;
   /** Validate a managed-process name; throws on failure. Single source-of-truth rule in Rust. */
   validateManagedName: (name: string) => void | Promise<void>;
+}
+
+export interface NativeTcpTunnel {
+  listen(
+    baseUrl: string,
+    headers: Record<string, string>,
+    remotePort: number,
+    localHost: string,
+    localPort: number,
+    timeout: number,
+  ): Promise<number>;
+  close(): Promise<void>;
+  waitClosed(): Promise<void>;
 }
 
 // ---- Binding loader -------------------------------------------------------
