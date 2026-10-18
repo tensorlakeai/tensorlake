@@ -1,6 +1,7 @@
 pub mod desktop;
 pub mod models;
 pub mod resize;
+pub mod tunnel;
 
 use futures::{StreamExt, TryStreamExt};
 use reqwest::Method;

@@ -3,6 +3,7 @@ export type NativeClientKind =
   | "NativeCloudClient"
   | "NativeSandboxClient"
   | "NativeSandboxProxyClient"
+  | "NativeTcpTunnel"
   | "NativeRepositoryClient";
 
 export interface NativeHandle {

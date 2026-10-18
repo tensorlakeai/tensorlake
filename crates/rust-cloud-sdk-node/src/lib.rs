@@ -11,6 +11,7 @@ mod cloud;
 mod function_agent;
 mod repositories;
 mod sandbox;
+mod tunnel;
 
 use std::path::PathBuf;
 

@@ -145,6 +145,12 @@ Cloud, sandbox, repository, and filesystem HTTP operations use the Rust SDK
 through an internal worker. Keep the platform-specific optional native package
 installed. Importing Tensorlake does not replace the application's HTTP dispatcher.
 
+TCP port forwarding also uses this worker and the shared Rust tunnel transport,
+used by the CLI and Python's synchronous and async interfaces. Rust owns the
+listener, WebSocket/TLS connection, backpressure, keepalive, and shutdown. Public
+tunnel APIs and the server protocol are unchanged. The shared regression tests
+are in `crates/cloud-sdk/src/sandboxes/tunnel/tests.rs`.
+
 The worker starts with an empty `execArgv` and a copied environment with
 `NODE_OPTIONS` cleared, so application `--require`, `--import`, and loader hooks
 do not run inside it. Other environment variables are copied when it starts.
@@ -165,3 +171,5 @@ Cloud requests advertise gzip support and decode gzip responses, including live 
 
 After building the SDK and native addon, run `npm run test:native-cloud` to check
 the cloud transport against a local HTTP server.
+Run `npm run test:native-tunnel` to check TCP forwarding through the worker and
+native addon against a local WebSocket server.
