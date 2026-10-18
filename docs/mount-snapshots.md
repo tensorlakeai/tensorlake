@@ -16,13 +16,20 @@ tl fs snapshot /work -m 'build input' --json
 
 Guest commands use the runtime's local socket and existing mount authority. They do
 not need a platform credential or interactive login. The guest user must own the
-mount or be root. The controller command uses normal sandbox authentication.
+mount or be root. Runtime discovery takes priority over the local CLI registry,
+including root's registry. Only an explicit unmanaged-path response falls back to
+an ordinary CLI mount; authorization and connection errors are reported directly.
+The controller command uses normal sandbox authentication.
 
 Use the returned `snapshot_id` as the explicit snapshot argument to your filesystem
 fork. Do not reread head: other writers and background saves can change it. A retained
 snapshot is billed like other permanent snapshots and remains until explicitly deleted.
-The CLI prints its request UUID to stderr. After a lost response or a retryable error,
-rerun with `--request-id UUID` and the same message to recover the same captured tree.
+The CLI prints its request UUID and mount ID to stderr before starting. After a lost
+response or a retryable error, rerun with `--request-id UUID --mount-id ORIGINAL_MOUNT_ID`
+and the same message to recover the same captured tree. Both replay flags are required;
+a replacement mount or copied sandbox rejects the old identity. A fresh operation in a
+copied sandbox has its own identity, even when the caller reuses a request UUID.
+Messages must contain 1–1024 UTF-8 bytes without control characters.
 A failed capture must be started again with a new UUID; it is never silently recaptured
 under the old request. The CLI waits with progress for at most about five minutes.
 
@@ -35,7 +42,7 @@ Controllers can use `POST {sandbox_proxy_url}/api/v1/filesystems/control` direct
 Take `mount_id` from that response, then start:
 
 ```json
-{"operation":"snapshot_start","mount_path":"/work","mount_id":"MOUNT_UUID","request_id":"REQUEST_UUID","message":"build input"}
+{"operation":"snapshot_start","mount_path":"/work","mount_id":"MOUNT_ID","request_id":"REQUEST_UUID","message":"build input"}
 ```
 
 Poll with `operation: "snapshot_status"`, the same mount path, mount ID, and request

@@ -475,8 +475,11 @@ enum FsCommands {
         #[arg(short, long)]
         message: Option<String>,
         /// Retry a sandbox snapshot operation without capturing a new tree
-        #[arg(long)]
+        #[arg(long, requires = "mount_id")]
         request_id: Option<String>,
+        /// Mount identity printed when the original snapshot request was accepted
+        #[arg(long, requires = "request_id")]
+        mount_id: Option<String>,
         /// Print the sandbox snapshot receipt as JSON
         #[arg(long)]
         json: bool,
@@ -1680,8 +1683,11 @@ enum SbxFsCommands {
         path: PathBuf,
         #[arg(short, long)]
         message: Option<String>,
-        #[arg(long)]
+        #[arg(long, requires = "mount_id")]
         request_id: Option<String>,
+        /// Mount identity printed when the original snapshot request was accepted
+        #[arg(long, requires = "request_id")]
+        mount_id: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -2864,11 +2870,18 @@ async fn run_command(
                             path,
                             message,
                             request_id,
+                            mount_id,
                             json,
                         } => {
                             commands::fs_runtime::Connection::remote(ctx, &sandbox_id)
                                 .await?
-                                .snapshot(&path, message.as_deref(), request_id.as_deref(), json)
+                                .snapshot(
+                                    &path,
+                                    message.as_deref(),
+                                    request_id.as_deref(),
+                                    mount_id.as_deref(),
+                                    json,
+                                )
                                 .await
                         }
                         SbxFsCommands::Status {
@@ -3043,18 +3056,25 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
             std::env::current_dir()?.join(path)
         };
         let runtime = commands::fs_runtime::Connection::Guest;
-        // Explicit user mounts retain their local CLI control path, even inside
-        // a sandbox that also has runtime-managed mounts.
-        if !gsvc_fs_client::is_registered_mount(&path).map_err(CliError::from)? {
+        // Root's local registry also contains headless runtime mounts. Ask their owner
+        // first; only an explicit unmanaged-path response permits local fallback.
+        if runtime.probe_status(&path).await?.is_some() {
             return match &subcmd {
                 FsCommands::Snapshot {
                     message,
                     request_id,
+                    mount_id,
                     json,
                     ..
                 } => {
                     runtime
-                        .snapshot(&path, message.as_deref(), request_id.as_deref(), *json)
+                        .snapshot(
+                            &path,
+                            message.as_deref(),
+                            request_id.as_deref(),
+                            mount_id.as_deref(),
+                            *json,
+                        )
                         .await
                 }
                 FsCommands::Status { json, .. } | FsCommands::Doctor { json, .. } => {
@@ -3070,7 +3090,7 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
         && (request_id.is_some() || *json)
     {
         return Err(CliError::usage(
-            "--request-id and --json require a runtime-managed sandbox mount",
+            "--request-id, --mount-id and --json require a runtime-managed sandbox mount",
         ));
     }
     // Setup and the daemon-owned FSKit refresh helper are local operations and do not require
@@ -3582,7 +3602,7 @@ async fn run_git_command(ctx: &CliContext, subcmd: GitCommands) -> error::Result
 #[cfg(test)]
 mod tests {
     #[test]
-    fn runtime_snapshot_commands_accept_replay_identity() {
+    fn mount_snapshot_commands_accept_replay_identity() {
         use clap::Parser;
         let id = "3c82cb31-4afc-4d51-bb61-e546c55566d3";
         for args in [
@@ -3593,6 +3613,8 @@ mod tests {
                 "/work",
                 "--request-id",
                 id,
+                "--mount-id",
+                "original-mount",
                 "--json",
             ],
             vec![
@@ -3605,6 +3627,8 @@ mod tests {
                 "/work",
                 "--request-id",
                 id,
+                "--mount-id",
+                "original-mount",
                 "--json",
             ],
         ] {
@@ -3622,6 +3646,34 @@ mod tests {
                 }
                 _ => panic!("expected snapshot command"),
             }
+        }
+        for args in [
+            vec!["tl", "fs", "snapshot", "/work", "--request-id", id],
+            vec!["tl", "fs", "snapshot", "/work", "--mount-id", "original"],
+            vec![
+                "tl",
+                "sbx",
+                "fs",
+                "snapshot",
+                "sandbox",
+                "--path",
+                "/work",
+                "--request-id",
+                id,
+            ],
+            vec![
+                "tl",
+                "sbx",
+                "fs",
+                "snapshot",
+                "sandbox",
+                "--path",
+                "/work",
+                "--mount-id",
+                "original",
+            ],
+        ] {
+            assert!(super::Cli::try_parse_from(args).is_err());
         }
         assert!(
             super::Cli::try_parse_from([
