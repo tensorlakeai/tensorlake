@@ -896,7 +896,7 @@ class _ParseMixin(_BaseClient):
         Args:
             parse_id: The ID of the parse operation to delete. This is the string returned by the parse method.
         """
-        parse = self.get_parsed_result(parse_id)
+        parse = await self.get_parsed_result_async(parse_id)
 
         if parse.status in {ParseStatus.PENDING, ParseStatus.PROCESSING}:
             raise ValueError(
