@@ -2011,3 +2011,165 @@ async fn resize_zero_timeout_allows_a_response_slower_than_one_second() {
     assert_eq!(info.resources.memory_mb, 1536);
     assert!(server.await.unwrap().starts_with(b"GET "));
 }
+
+async fn write_response_with_headers(
+    socket: &mut tokio::net::TcpStream,
+    status_line: &str,
+    extra_headers: &[(&str, &str)],
+    body: &str,
+) {
+    let mut response = format!(
+        "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
+        body.len()
+    );
+    for (name, value) in extra_headers {
+        response.push_str(&format!("{name}: {value}\r\n"));
+    }
+    response.push_str("\r\n");
+    response.push_str(body);
+    socket
+        .write_all(response.as_bytes())
+        .await
+        .expect("write response");
+}
+
+/// The proxy mints `x-tensorlake-route-hint` on a response when it had to
+/// resolve the route through the server, which is what a stale hint causes.
+/// Every clone of the client must present the refreshed hint from then on.
+#[tokio::test]
+async fn sandbox_proxy_adopts_the_routing_hint_a_response_carries() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("listener address");
+    let process = r#"{"pid":7,"status":"running","command":"bash","args":[],"started_at":0}"#;
+
+    let server = tokio::spawn(async move {
+        // 1: stale hint presented, response refreshes it.
+        let (mut socket, _) = listener.accept().await.expect("accept 1");
+        let first = read_http_request(&mut socket).await;
+        write_response_with_headers(
+            &mut socket,
+            "200 OK",
+            &[("x-tensorlake-route-hint", "route-b")],
+            process,
+        )
+        .await;
+        // 2: a clone made before the refresh must already send the new hint;
+        // a response without the header leaves it alone.
+        let (mut socket, _) = listener.accept().await.expect("accept 2");
+        let second = read_http_request(&mut socket).await;
+        write_json_response(&mut socket, process).await;
+        // 3: an error response that carries a hint still refreshes it.
+        let (mut socket, _) = listener.accept().await.expect("accept 3");
+        let third = read_http_request(&mut socket).await;
+        write_response_with_headers(
+            &mut socket,
+            "503 Service Unavailable",
+            &[("x-tensorlake-route-hint", "route-c"), ("Retry-After", "1")],
+            r#"{"error":"not yet","code":"SANDBOX_PORT_NOT_READY"}"#,
+        )
+        .await;
+        let (mut socket, _) = listener.accept().await.expect("accept 4");
+        let fourth = read_http_request(&mut socket).await;
+        write_json_response(&mut socket, process).await;
+        (first, second, third, fourth)
+    });
+
+    // Derive the proxy client the way the bindings do (`with_base_url` from
+    // the control-plane client), which is the path with the fewest
+    // middlewares; adoption must survive it.
+    let client = ClientBuilder::new("http://127.0.0.1:9")
+        .build()
+        .expect("build client")
+        .with_base_url_and_timeout(
+            &format!("http://{address}"),
+            Some(std::time::Duration::from_secs(5)),
+        )
+        .expect("derive client");
+    let sandbox = SandboxProxyClient::new(client, Some("sandbox-host.test".to_string()))
+        .with_sandbox_id(Some("sbx-1".to_string()))
+        .with_routing_hint(Some("route-a".to_string()));
+    let sibling = sandbox.clone();
+    assert_eq!(sandbox.routing_hint().as_deref(), Some("route-a"));
+
+    sandbox.get_process(7_i64).await.expect("first call");
+    assert_eq!(sandbox.routing_hint().as_deref(), Some("route-b"));
+    assert_eq!(sibling.routing_hint().as_deref(), Some("route-b"));
+
+    sibling.get_process(7_i64).await.expect("second call");
+    assert_eq!(sandbox.routing_hint().as_deref(), Some("route-b"));
+
+    let error = sandbox
+        .get_process(7_i64)
+        .await
+        .expect_err("third call is a 503");
+    assert!(
+        matches!(&error, tensorlake::error::SdkError::ServerError { status, .. } if status.as_u16() == 503),
+        "{error:?}"
+    );
+    assert_eq!(error.retry_after(), Some(std::time::Duration::from_secs(1)));
+    assert_eq!(sandbox.routing_hint().as_deref(), Some("route-c"));
+
+    sibling.get_process(7_i64).await.expect("fourth call");
+
+    let (first, second, third, fourth) = server.await.expect("server join");
+    let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).to_string();
+    assert!(text(&first).contains("\r\nx-tensorlake-route-hint: route-a\r\n"));
+    assert!(text(&second).contains("\r\nx-tensorlake-route-hint: route-b\r\n"));
+    assert!(text(&third).contains("\r\nx-tensorlake-route-hint: route-b\r\n"));
+    assert!(text(&fourth).contains("\r\nx-tensorlake-route-hint: route-c\r\n"));
+}
+
+/// Control-plane requests carry no hint sink, so a stray hint header on one
+/// of their responses is ignored and `Retry-After` is still surfaced.
+#[tokio::test]
+async fn server_error_carries_retry_after_delay() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("listener address");
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept 1");
+        read_http_request(&mut socket).await;
+        write_response_with_headers(
+            &mut socket,
+            "503 Service Unavailable",
+            &[("Retry-After", "2")],
+            r#"{"error":"restarting","code":"SANDBOX_UPSTREAM_ERROR"}"#,
+        )
+        .await;
+        let (mut socket, _) = listener.accept().await.expect("accept 2");
+        read_http_request(&mut socket).await;
+        write_response_with_headers(
+            &mut socket,
+            "503 Service Unavailable",
+            &[("Retry-After", "Wed, 21 Oct 2026 07:28:00 GMT")],
+            r#"{"error":"restarting"}"#,
+        )
+        .await;
+        let (mut socket, _) = listener.accept().await.expect("accept 3");
+        read_http_request(&mut socket).await;
+        write_response_with_headers(
+            &mut socket,
+            "503 Service Unavailable",
+            &[("Retry-After", "86400")],
+            r#"{"error":"go away"}"#,
+        )
+        .await;
+    });
+    let client = ClientBuilder::new(&format!("http://{address}"))
+        .build()
+        .expect("build client");
+    let sandboxes = SandboxesClient::new(client, "default", false);
+    let seconds = sandboxes.get("sbx-1").await.expect_err("503");
+    assert_eq!(
+        seconds.retry_after(),
+        Some(std::time::Duration::from_secs(2))
+    );
+    let http_date = sandboxes.get("sbx-1").await.expect_err("503");
+    assert_eq!(http_date.retry_after(), None);
+    let too_long = sandboxes.get("sbx-1").await.expect_err("503");
+    assert_eq!(too_long.retry_after(), Some(tensorlake::MAX_RETRY_AFTER));
+    server.await.expect("server join");
+}

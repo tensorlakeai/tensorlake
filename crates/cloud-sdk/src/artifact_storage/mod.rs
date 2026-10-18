@@ -1801,6 +1801,7 @@ impl ArtifactStorageClient {
                     Err(SdkError::ServerError {
                         status: response.status(),
                         message: body_message(response).await,
+                        retry_after: None,
                     })
                 }
             });
@@ -2700,6 +2701,7 @@ async fn handle_response(response: reqwest::Response) -> Result<reqwest::Respons
         status if !status.is_success() => Err(SdkError::ServerError {
             status,
             message: body_message(response).await,
+            retry_after: None,
         }),
         _ => Ok(response),
     }

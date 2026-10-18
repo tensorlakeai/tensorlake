@@ -18,6 +18,7 @@
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
+use tensorlake::SharedRoutingHint;
 use tensorlake::sandboxes::resize::ResizeOptions;
 use tokio::sync::OnceCell;
 
@@ -98,9 +99,9 @@ pub(crate) fn into_napi_error(error: SdkError) -> napi::Error {
         ),
         SdkError::Authentication(message) => make_napi_error("sdk_usage", Some(401), message),
         SdkError::Authorization(message) => make_napi_error("sdk_usage", Some(403), message),
-        SdkError::ServerError { status, message } => {
-            make_napi_error("remote_api", Some(status.as_u16()), message)
-        }
+        SdkError::ServerError {
+            status, message, ..
+        } => make_napi_error("remote_api", Some(status.as_u16()), message),
         other => match other.transport_failure() {
             // `detail()` appends the source chain, which is where reqwest keeps
             // the part that names the failure (`tcp connect error`, `dns
@@ -378,7 +379,7 @@ impl NativeSandboxClient {
         Ok(NativeSandboxProxyClient {
             client: self.client.clone(),
             target,
-            routing_hint,
+            routing_hint: SharedRoutingHint::new(routing_hint),
             timeout,
         })
     }
@@ -891,7 +892,9 @@ async fn cancellable_stream(
 pub struct NativeSandboxProxyClient {
     client: DeferredHttpClient,
     target: SandboxProxyTarget,
-    routing_hint: Option<String>,
+    /// Shared across the per-call proxy clients, so a hint a response
+    /// refreshed is the one the next call presents.
+    routing_hint: SharedRoutingHint,
     timeout: Option<Duration>,
 }
 
@@ -927,7 +930,7 @@ impl NativeSandboxProxyClient {
         Ok(
             SandboxProxyClient::new(client, self.target.host_override.clone())
                 .with_sandbox_id(self.target.sandbox_id_header.clone())
-                .with_routing_hint(self.routing_hint.clone()),
+                .with_shared_routing_hint(self.routing_hint.clone()),
         )
     }
 }
@@ -967,7 +970,7 @@ impl NativeSandboxProxyClient {
         Ok(Self {
             client: DeferredHttpClient::new(builder),
             target,
-            routing_hint,
+            routing_hint: SharedRoutingHint::new(routing_hint),
             timeout,
         })
     }
@@ -975,6 +978,13 @@ impl NativeSandboxProxyClient {
     #[napi]
     pub fn base_url(&self) -> String {
         self.target.base_url.clone()
+    }
+
+    /// The routing hint the next request will present: the one this client
+    /// was created with, or the one the Sandbox Proxy last refreshed it to.
+    #[napi]
+    pub fn routing_hint(&self) -> Option<String> {
+        self.routing_hint.get()
     }
 
     // -- Process management --

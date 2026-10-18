@@ -2194,6 +2194,7 @@ impl ArtifactStorageClient {
                 return Err(SdkError::ServerError {
                     status,
                     message: response.text().await.unwrap_or_default(),
+                    retry_after: None,
                 });
             }
             Ok((response.bytes().await?.to_vec(), trace_id))
@@ -2261,6 +2262,7 @@ impl ArtifactStorageClient {
                 return Err(SdkError::ServerError {
                     status,
                     message: response.text().await.unwrap_or_default(),
+                                    retry_after: None,
                 });
             }
             let expected_content_range = format!("bytes {start}-{end_inclusive}/");
@@ -2471,6 +2473,7 @@ impl ArtifactStorageClient {
                             "staged pack PUT: {}",
                             resp.text().await.unwrap_or_default()
                         ),
+                        retry_after: None,
                     });
                 }
                 Ok(())
@@ -2600,7 +2603,11 @@ pub(super) async fn expect_json<T: serde::de::DeserializeOwned>(
     let status = resp.status();
     if !status.is_success() {
         let message = resp.text().await.unwrap_or_default();
-        return Err(SdkError::ServerError { status, message });
+        return Err(SdkError::ServerError {
+            status,
+            message,
+            retry_after: None,
+        });
     }
     resp.json::<T>()
         .await
@@ -2611,7 +2618,11 @@ async fn expect_ok(resp: reqwest::Response) -> Result<(), SdkError> {
     let status = resp.status();
     if !status.is_success() {
         let message = resp.text().await.unwrap_or_default();
-        return Err(SdkError::ServerError { status, message });
+        return Err(SdkError::ServerError {
+            status,
+            message,
+            retry_after: None,
+        });
     }
     Ok(())
 }
@@ -3231,6 +3242,7 @@ mod tests {
                     Err(SdkError::ServerError {
                         status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
                         message: "wobble".into(),
+                        retry_after: None,
                     })
                 } else {
                     Ok(7)
@@ -3252,6 +3264,7 @@ mod tests {
                 Err(SdkError::ServerError {
                     status: reqwest::StatusCode::BAD_REQUEST,
                     message: "no".into(),
+                    retry_after: None,
                 })
             }
         })
@@ -3271,6 +3284,7 @@ mod tests {
                 Err(SdkError::ServerError {
                     status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
                     message: "down".into(),
+                    retry_after: None,
                 })
             }
         })

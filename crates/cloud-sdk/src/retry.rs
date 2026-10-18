@@ -60,6 +60,21 @@ pub fn undelivered_backoff(attempt: usize) -> Duration {
     backoff(attempt, MAX_UNDELIVERED_BACKOFF)
 }
 
+/// The wait to use when the server sent `Retry-After`: never shorter than what
+/// it asked for, never shorter than our own schedule either (a server saying
+/// "1 s" while we are already backing off at 3 s is not a reason to speed up),
+/// and never longer than the transient cap. The Sandbox Proxy sends
+/// `Retry-After: 1` on every 503 it generates — lane restarts, lookups that
+/// could not reach the control plane, a port that is not listening yet — so
+/// honouring it turns the first replays from 150 ms hammering into one wait
+/// that usually outlasts the condition.
+fn honour_retry_after(backoff: Duration, retry_after: Option<Duration>) -> Duration {
+    match retry_after {
+        Some(asked) => backoff.max(asked).min(MAX_TRANSIENT_BACKOFF),
+        None => backoff,
+    }
+}
+
 /// Whether the failure is worth retrying for an operation that can safely run
 /// twice. Excludes timeouts on purpose; see the module docs.
 pub fn is_transient(error: &SdkError) -> bool {
@@ -154,7 +169,10 @@ impl RetryState {
                 return RetryDecision::Stop;
             }
             self.undelivered_replays += 1;
-            let wait = undelivered_backoff(self.undelivered_replays);
+            let wait = honour_retry_after(
+                undelivered_backoff(self.undelivered_replays),
+                error.retry_after(),
+            );
             // Cap the wait at the budget. Callers must recheck after sleeping,
             // since a clipped wait reaches the deadline and any wait can wake late.
             return RetryDecision::Retry(wait.min(UNDELIVERED_REPLAY_BUDGET - elapsed));
@@ -164,7 +182,10 @@ impl RetryState {
             && self.transient_retries < self.policy.max_transient_retries
         {
             self.transient_retries += 1;
-            return RetryDecision::Retry(transient_backoff(self.transient_retries));
+            return RetryDecision::Retry(honour_retry_after(
+                transient_backoff(self.transient_retries),
+                error.retry_after(),
+            ));
         }
         RetryDecision::Stop
     }
@@ -220,7 +241,73 @@ mod tests {
         SdkError::ServerError {
             status: reqwest::StatusCode::from_u16(status).unwrap(),
             message: body.to_string(),
+            retry_after: None,
         }
+    }
+
+    fn server_error_retry_after(status: u16, body: &str, secs: u64) -> SdkError {
+        SdkError::ServerError {
+            status: reqwest::StatusCode::from_u16(status).unwrap(),
+            message: body.to_string(),
+            retry_after: Some(Duration::from_secs(secs)),
+        }
+    }
+
+    #[test]
+    fn retry_after_lengthens_the_first_undelivered_replays() {
+        let mut state = RetryState::new(RetryPolicy::non_idempotent());
+        let error = server_error_retry_after(
+            503,
+            r#"{"error":"lane restarting","code":"SANDBOX_UPSTREAM_ERROR"}"#,
+            1,
+        );
+        assert!(error.never_reached_server());
+        // 150 ms and 300 ms would be hammering; the header asks for 1 s.
+        assert_eq!(
+            state.decide(&error, Duration::ZERO),
+            RetryDecision::Retry(Duration::from_secs(1))
+        );
+        assert_eq!(
+            state.decide(&error, Duration::from_secs(1)),
+            RetryDecision::Retry(Duration::from_secs(1))
+        );
+        // Once our own schedule is slower than the header, the schedule wins.
+        for _ in 0..4 {
+            state.decide(&error, Duration::from_secs(2));
+        }
+        assert_eq!(
+            state.decide(&error, Duration::from_secs(3)),
+            RetryDecision::Retry(undelivered_backoff(7))
+        );
+        // The budget still bounds the wait.
+        assert_eq!(
+            state.decide(
+                &error,
+                UNDELIVERED_REPLAY_BUDGET - Duration::from_millis(300)
+            ),
+            RetryDecision::Retry(Duration::from_millis(300))
+        );
+    }
+
+    #[test]
+    fn retry_after_applies_to_transient_retries_and_is_capped() {
+        let mut state = RetryState::new(RetryPolicy::idempotent(3));
+        let short = server_error_retry_after(503, "busy", 1);
+        assert_eq!(
+            state.decide(&short, Duration::ZERO),
+            RetryDecision::Retry(Duration::from_secs(1))
+        );
+        let long = server_error_retry_after(503, "busy", 3_600);
+        assert_eq!(
+            state.decide(&long, Duration::ZERO),
+            RetryDecision::Retry(MAX_TRANSIENT_BACKOFF)
+        );
+        let none = server_error(503, "busy");
+        assert_eq!(
+            state.decide(&none, Duration::ZERO),
+            RetryDecision::Retry(transient_backoff(3))
+        );
+        assert_eq!(state.decide(&none, Duration::ZERO), RetryDecision::Stop);
     }
 
     fn proxy_unavailable() -> SdkError {

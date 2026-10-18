@@ -1236,7 +1236,9 @@ async fn wait_for_proxy_ready(proxy: &SandboxProxyClient) -> Result<()> {
 
 fn is_transient_proxy_error(error: &SandboxImageBuildError) -> bool {
     match error {
-        SandboxImageBuildError::Sdk(SdkError::ServerError { status, message }) => {
+        SandboxImageBuildError::Sdk(SdkError::ServerError {
+            status, message, ..
+        }) => {
             matches!(
                 *status,
                 StatusCode::BAD_GATEWAY

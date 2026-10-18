@@ -76,6 +76,7 @@ pub mod http_transport;
 mod image_service_builds;
 pub mod images;
 pub mod retry;
+pub mod route_hint;
 pub mod sandbox_images;
 pub mod sandbox_templates;
 pub mod sandboxes;
@@ -91,7 +92,8 @@ use sandboxes::*;
 use secrets::*;
 
 mod client;
-pub use client::{Client, ClientBuilder, Traced};
+pub use client::{Client, ClientBuilder, MAX_RETRY_AFTER, Traced};
+pub use route_hint::SharedRoutingHint;
 
 /// Environment variable that overrides the sandbox API (lifecycle) base URL.
 ///

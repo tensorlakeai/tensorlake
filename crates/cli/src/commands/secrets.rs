@@ -273,7 +273,9 @@ fn map_set_sdk_error(error: SdkError) -> CliError {
         SdkError::Authorization(_) => CliError::auth(
             "permission denied. set TENSORLAKE_API_KEY with required permissions, or run 'tl init'.",
         ),
-        SdkError::ServerError { status, message } => {
+        SdkError::ServerError {
+            status, message, ..
+        } => {
             let code = status.as_u16();
             if (400..500).contains(&code) {
                 CliError::usage(format!(

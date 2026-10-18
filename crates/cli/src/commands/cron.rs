@@ -32,7 +32,9 @@ fn map_sdk_error(error: SdkError) -> CliError {
         SdkError::Authorization(_) => {
             CliError::auth("permission denied. check your API key permissions or run 'tl init'.")
         }
-        SdkError::ServerError { status, message } => {
+        SdkError::ServerError {
+            status, message, ..
+        } => {
             let code = status.as_u16();
             if (400..500).contains(&code) {
                 // Try to extract the `error` field from the JSON body.

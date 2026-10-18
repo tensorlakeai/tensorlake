@@ -2611,6 +2611,13 @@ pub struct CloudSandboxProxyClient {
 
 #[pymethods]
 impl CloudSandboxProxyClient {
+    /// The routing hint the next request will present: the one this client
+    /// was created with, or the one the Sandbox Proxy last refreshed it to.
+    #[getter]
+    fn routing_hint(&self) -> Option<String> {
+        self.client.routing_hint()
+    }
+
     #[new]
     #[pyo3(signature = (proxy_url, sandbox_id, api_key=None, organization_id=None, project_id=None, routing_hint=None, user_agent=None, request_timeout_sec=None))]
     fn new(
@@ -3914,9 +3921,9 @@ fn into_py_error(error: SdkError) -> PyErr {
         SdkError::Authorization(message) => {
             CloudApiClientError::new_err(("sdk_usage", Some(403u16), message))
         }
-        SdkError::ServerError { status, message } => {
-            CloudApiClientError::new_err(("remote_api", Some(status.as_u16()), message))
-        }
+        SdkError::ServerError {
+            status, message, ..
+        } => CloudApiClientError::new_err(("remote_api", Some(status.as_u16()), message)),
         other => {
             let message = other.detail();
             if other.transport_failure().is_some() {
@@ -3941,9 +3948,9 @@ fn into_sandbox_py_error(error: SdkError) -> PyErr {
         SdkError::Authorization(message) => {
             CloudSandboxClientError::new_err(("sdk_usage", Some(403u16), message))
         }
-        SdkError::ServerError { status, message } => {
-            CloudSandboxClientError::new_err(("remote_api", Some(status.as_u16()), message))
-        }
+        SdkError::ServerError {
+            status, message, ..
+        } => CloudSandboxClientError::new_err(("remote_api", Some(status.as_u16()), message)),
         other => {
             let message = other.detail();
             match other.transport_failure() {
@@ -3969,9 +3976,9 @@ fn into_document_ai_py_error(error: SdkError) -> PyErr {
         SdkError::Authorization(message) => {
             CloudDocumentAIClientError::new_err(("sdk_usage", Some(403u16), message))
         }
-        SdkError::ServerError { status, message } => {
-            CloudDocumentAIClientError::new_err(("remote_api", Some(status.as_u16()), message))
-        }
+        SdkError::ServerError {
+            status, message, ..
+        } => CloudDocumentAIClientError::new_err(("remote_api", Some(status.as_u16()), message)),
         other => {
             let message = other.detail();
             match other.transport_failure() {

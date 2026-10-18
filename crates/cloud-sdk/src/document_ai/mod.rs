@@ -108,7 +108,11 @@ impl DocumentAiClient {
                 .text()
                 .await
                 .unwrap_or_else(|_| "request failed".to_string());
-            return Err(SdkError::ServerError { status, message });
+            return Err(SdkError::ServerError {
+                status,
+                message,
+                retry_after: None,
+            });
         }
 
         let stream = event_stream(response, idle_timeout).filter_map(move |event| async move {

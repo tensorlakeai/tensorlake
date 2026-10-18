@@ -10,6 +10,8 @@ homepage = "https://tensorlake.ai"
 documentation = "https://docs.rs/tensorlake"
 
 [dependencies]
+async-trait.workspace = true
+http.workspace = true
 anyhow = { workspace = true }
 blake3 = { workspace = true }
 fastcdc = { workspace = true }

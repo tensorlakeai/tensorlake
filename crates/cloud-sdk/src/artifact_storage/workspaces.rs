@@ -1151,6 +1151,7 @@ impl ArtifactStorageClient {
             return Err(SdkError::ServerError {
                 status,
                 message: body,
+                retry_after: None,
             });
         }
         let bytes = resp.bytes().await?.to_vec();

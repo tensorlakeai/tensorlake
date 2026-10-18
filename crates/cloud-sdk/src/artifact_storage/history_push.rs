@@ -154,8 +154,14 @@ impl ArtifactStorageClient {
             match super::decode_json(request.body(data.clone()).send().await?, trace_id).await {
                 Ok(status) => return Ok(status),
                 // A 4xx is a contract rejection, not flakiness — surface it immediately.
-                Err(SdkError::ServerError { status, message }) if status.is_client_error() => {
-                    return Err(SdkError::ServerError { status, message });
+                Err(SdkError::ServerError {
+                    status, message, ..
+                }) if status.is_client_error() => {
+                    return Err(SdkError::ServerError {
+                        status,
+                        message,
+                        retry_after: None,
+                    });
                 }
                 Err(e) => last = Some(e),
             }

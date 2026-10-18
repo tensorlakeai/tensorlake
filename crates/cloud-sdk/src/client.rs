@@ -85,6 +85,9 @@ pub struct Client {
     user_agent: String,
     /// Total request timeout configured for this client.
     timeout: Option<Duration>,
+    /// Middleware extensions attached to every request this client executes
+    /// (see [`Client::with_request_extension`]).
+    request_extensions: http::Extensions,
 }
 
 /// Builder for creating a [`Client`] with a fluent API.
@@ -221,6 +224,9 @@ impl ClientBuilder {
         for middleware in &self.middlewares {
             builder = builder.with_arc(middleware.clone());
         }
+        // Innermost, so it sees the response every outer middleware sees and
+        // a refreshed routing hint is adopted even when a retry layer replays.
+        builder = builder.with(crate::route_hint::RouteHintAdoption);
 
         let client = builder.build();
 
@@ -231,6 +237,7 @@ impl ClientBuilder {
             default_headers,
             user_agent: ua.to_string(),
             timeout: self.timeout,
+            request_extensions: http::Extensions::new(),
         })
     }
 }
@@ -258,7 +265,12 @@ impl Client {
     /// HTTP/2 connections established for one base URL can be reused (via connection coalescing)
     /// when talking to another host that resolves to the same IP with the same TLS certificate.
     pub fn with_base_url(&self, new_url: &str) -> Self {
-        let client = ReqwestClientBuilder::new(self.base_client.clone()).build();
+        // User middlewares are deliberately not carried over (this is how
+        // proxy clients are derived from the control-plane client), but the
+        // routing-hint adoption is part of the proxy contract, so it is.
+        let client = ReqwestClientBuilder::new(self.base_client.clone())
+            .with(crate::route_hint::RouteHintAdoption)
+            .build();
         Self {
             base_url: new_url.to_string(),
             base_client: self.base_client.clone(),
@@ -266,6 +278,7 @@ impl Client {
             default_headers: self.default_headers.clone(),
             user_agent: self.user_agent.clone(),
             timeout: self.timeout,
+            request_extensions: self.request_extensions.clone(),
         }
     }
 
@@ -326,7 +339,7 @@ impl Client {
     /// `trace_id` returned to the caller.
     pub async fn execute(&self, mut request: Request) -> Result<Response, SdkError> {
         self.prepare_request(&mut request);
-        let response = self.client.execute(request).await?;
+        let response = self.execute_inner(request).await?;
         self.handle_response(response).await
     }
 
@@ -334,8 +347,28 @@ impl Client {
     /// Injects a W3C `traceparent` header for server-side correlation.
     pub async fn execute_raw(&self, mut request: Request) -> Result<Response, SdkError> {
         self.prepare_request(&mut request);
-        let response = self.client.execute(request).await?;
+        let response = self.execute_inner(request).await?;
         Ok(response)
+    }
+
+    /// A clone of this client that attaches `value` as a middleware extension
+    /// to every request it executes. Middlewares that look for that type (the
+    /// routing-hint adoption in `route_hint`) act only on such requests.
+    pub fn with_request_extension<T>(&self, value: T) -> Self
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        let mut client = self.clone();
+        client.request_extensions.insert(value);
+        client
+    }
+
+    async fn execute_inner(&self, request: Request) -> Result<Response, SdkError> {
+        let mut extensions = self.request_extensions.clone();
+        Ok(self
+            .client
+            .execute_with_extensions(request, &mut extensions)
+            .await?)
     }
 
     /// Execute a traced request while leaving status handling to the binding.
@@ -345,7 +378,7 @@ impl Client {
         mut request: Request,
     ) -> Result<Traced<Response>, SdkError> {
         let trace_id = self.prepare_traced_request(&mut request);
-        let response = self.client.execute(request).await?;
+        let response = self.execute_inner(request).await?;
         Ok(Traced::new(trace_id, response))
     }
 
@@ -354,7 +387,7 @@ impl Client {
     /// `trace_id` but want to handle the response body yourself.
     pub async fn execute_traced(&self, mut request: Request) -> Result<Traced<Response>, SdkError> {
         let trace_id = self.prepare_traced_request(&mut request);
-        let response = self.client.execute(request).await?;
+        let response = self.execute_inner(request).await?;
         let response = self.handle_response(response).await?;
         Ok(Traced::new(trace_id, response))
     }
@@ -389,7 +422,7 @@ impl Client {
         // header for the server and enforce the deadline here instead.
         let timeout = request.timeout_mut().take();
         let response = within_timeout(timeout, WAITING_FOR_RESPONSE_HEADERS, async {
-            let response = self.client.execute(request).await?;
+            let response = self.execute_inner(request).await?;
             if map_status {
                 self.handle_response(response).await
             } else {
@@ -422,7 +455,7 @@ impl Client {
         allowed_statuses: &[StatusCode],
     ) -> Result<Traced<T>, SdkError> {
         let trace_id = self.prepare_traced_request(&mut request);
-        let response = self.client.execute(request).await?;
+        let response = self.execute_inner(request).await?;
         let response =
             if response.status().is_success() || allowed_statuses.contains(&response.status()) {
                 response
@@ -555,16 +588,43 @@ impl Client {
                 Err(SdkError::Authorization(message))
             }
             status if status.is_server_error() => {
+                let retry_after = retry_after_delay(response.headers());
                 let message = body_message_or_default(response, "Server error").await;
-                Err(SdkError::ServerError { status, message })
+                Err(SdkError::ServerError {
+                    status,
+                    message,
+                    retry_after,
+                })
             }
             status if !status.is_success() => {
+                let retry_after = retry_after_delay(response.headers());
                 let message = body_message_or_default(response, "Request failed").await;
-                Err(SdkError::ServerError { status, message })
+                Err(SdkError::ServerError {
+                    status,
+                    message,
+                    retry_after,
+                })
             }
             _ => Ok(response),
         }
     }
+}
+
+/// Longest `Retry-After` the SDK will honour. A server asking for more than
+/// this is asking the caller to give up, not to wait.
+pub const MAX_RETRY_AFTER: Duration = Duration::from_secs(30);
+
+/// The delay a `Retry-After` header asks for, in the delta-seconds form.
+/// HTTP-date values and unparsable values are ignored; the retry policy then
+/// falls back to its own schedule.
+pub(crate) fn retry_after_delay(headers: &HeaderMap) -> Option<Duration> {
+    let value = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
+    let seconds: u64 = value.parse().ok()?;
+    Some(Duration::from_secs(seconds).min(MAX_RETRY_AFTER))
 }
 
 async fn within_timeout<T>(

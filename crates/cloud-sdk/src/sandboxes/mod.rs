@@ -19,6 +19,7 @@ use crate::{
     },
     error::{SdkError, TransportFailure},
     retry::{RetryDecision, RetryPolicy, RetryState, is_transient},
+    route_hint::{RouteHintSink, SharedRoutingHint},
     sse::event_stream,
 };
 pub use desktop::SandboxDesktopClient;
@@ -959,11 +960,16 @@ impl SandboxesClient {
 }
 
 /// A client for interacting with a running sandbox proxy (process/file/PTY APIs).
+///
+/// The routing hint it presents lives in a [`SharedRoutingHint`] cell: every
+/// clone sends the current hint, and a response that carries a refreshed
+/// `x-tensorlake-route-hint` (the proxy mints one after a live lookup, which
+/// is what a stale hint triggers) updates the cell for all of them.
 #[derive(Clone)]
 pub struct SandboxProxyClient {
     client: Client,
     host_override: Option<String>,
-    routing_hint: Option<String>,
+    routing_hint: SharedRoutingHint,
     sandbox_id: Option<String>,
 }
 
@@ -972,14 +978,44 @@ impl SandboxProxyClient {
         Self {
             client,
             host_override,
-            routing_hint: None,
+            routing_hint: SharedRoutingHint::default(),
             sandbox_id: None,
         }
+        .with_hint_sink()
     }
 
+    /// Start from `hint` (typically the `routing_hint` of a create, get or
+    /// resume response) in a fresh cell.
     pub fn with_routing_hint(mut self, hint: Option<String>) -> Self {
+        self.routing_hint = SharedRoutingHint::new(hint);
+        self.with_hint_sink()
+    }
+
+    /// Share an existing hint cell, so a holder that rebuilds its proxy client
+    /// per call still keeps the hints adopted by earlier calls.
+    pub fn with_shared_routing_hint(mut self, hint: SharedRoutingHint) -> Self {
         self.routing_hint = hint;
+        self.with_hint_sink()
+    }
+
+    /// Point the HTTP client's response handling at this client's hint cell,
+    /// so every execution path (JSON, raw, streams) adopts a refreshed hint.
+    fn with_hint_sink(mut self) -> Self {
+        self.client = self
+            .client
+            .with_request_extension(RouteHintSink(self.routing_hint.clone()));
         self
+    }
+
+    /// The hint the next request will present: the one this client started
+    /// with, or the last one a response refreshed it to.
+    pub fn routing_hint(&self) -> Option<String> {
+        self.routing_hint.get()
+    }
+
+    /// The shared cell behind [`Self::routing_hint`].
+    pub fn shared_routing_hint(&self) -> &SharedRoutingHint {
+        &self.routing_hint
     }
 
     pub fn with_sandbox_id(mut self, id: Option<String>) -> Self {
@@ -1007,7 +1043,7 @@ impl SandboxProxyClient {
         if let Some(id) = self.sandbox_id.as_deref() {
             request_builder = request_builder.header("X-Tensorlake-Sandbox-Id", id);
         }
-        if let Some(hint) = self.routing_hint.as_deref() {
+        if let Some(hint) = self.routing_hint.get() {
             request_builder = request_builder.header("X-Tensorlake-Route-Hint", hint);
         }
         request_builder

@@ -829,14 +829,20 @@ pub(crate) fn map_sdk_error(error: tensorlake::error::SdkError) -> CliError {
         tensorlake::error::SdkError::Authorization(_) => CliError::auth(
             "permission denied. set TENSORLAKE_API_KEY with required permissions, or run 'tl init'.",
         ),
-        tensorlake::error::SdkError::ServerError { status, message } => {
+        tensorlake::error::SdkError::ServerError {
+            status, message, ..
+        } => {
             if matches!(
                 status,
                 reqwest::StatusCode::CONFLICT | reqwest::StatusCode::NOT_FOUND
             ) {
                 CliError::usage(parse_remote_message(&message))
             } else {
-                CliError::from(tensorlake::error::SdkError::ServerError { status, message })
+                CliError::from(tensorlake::error::SdkError::ServerError {
+                    status,
+                    message,
+                    retry_after: None,
+                })
             }
         }
         other => CliError::from(other),

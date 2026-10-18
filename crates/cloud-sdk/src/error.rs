@@ -73,6 +73,9 @@ pub enum SdkError {
     ServerError {
         status: reqwest::StatusCode,
         message: String,
+        /// The server's `Retry-After` delay, when it sent one. The Sandbox
+        /// Proxy sets `Retry-After: 1` on every 503 it generates itself.
+        retry_after: Option<std::time::Duration>,
     },
 
     /// EventSource (SSE) stream error
@@ -203,6 +206,14 @@ impl SdkError {
     /// were not forwarded either. A 4xx with one of these codes is a definitive
     /// answer the proxy passed through (a 403, a 409) and is not replayed. A
     /// timeout, or a 5xx without such a code, gives no guarantee at all.
+    /// The `Retry-After` delay the server attached to a `ServerError`, if any.
+    pub fn retry_after(&self) -> Option<std::time::Duration> {
+        match self {
+            Self::ServerError { retry_after, .. } => *retry_after,
+            _ => None,
+        }
+    }
+
     pub fn never_reached_server(&self) -> bool {
         if matches!(self.transport_failure(), Some(TransportFailure::Connect)) {
             return true;
@@ -336,6 +347,7 @@ mod undelivered_tests {
         SdkError::ServerError {
             status: reqwest::StatusCode::from_u16(status).unwrap(),
             message: body.to_string(),
+            retry_after: None,
         }
     }
 

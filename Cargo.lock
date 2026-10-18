@@ -5936,6 +5936,7 @@ name = "tensorlake"
 version = "0.5.151"
 dependencies = [
  "anyhow",
+ "async-trait",
  "base64",
  "blake3",
  "bollard",
@@ -5952,6 +5953,7 @@ dependencies = [
  "flate2",
  "futures",
  "hex",
+ "http",
  "ignore",
  "libc",
  "nanoid",

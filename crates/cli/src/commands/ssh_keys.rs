@@ -187,7 +187,9 @@ fn map_sdk_error(error: SdkError) -> CliError {
         SdkError::Authorization(_) => {
             CliError::auth("permission denied; run 'tl login' or check your account permissions")
         }
-        SdkError::ServerError { status, message } => {
+        SdkError::ServerError {
+            status, message, ..
+        } => {
             let code = status.as_u16();
             if (400..500).contains(&code) {
                 CliError::usage(format!(
@@ -205,7 +207,9 @@ fn map_sdk_error(error: SdkError) -> CliError {
 }
 
 fn map_create_sdk_error(error: SdkError) -> CliError {
-    if let SdkError::ServerError { status, message } = &error
+    if let SdkError::ServerError {
+        status, message, ..
+    } = &error
         && status.as_u16() == 409
     {
         return CliError::usage(format!(

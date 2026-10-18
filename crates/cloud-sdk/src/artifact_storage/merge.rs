@@ -156,11 +156,19 @@ where
         if let Ok(report) = serde_json::from_str::<R>(&message) {
             return Ok(Err(report));
         }
-        return Err(SdkError::ServerError { status, message });
+        return Err(SdkError::ServerError {
+            status,
+            message,
+            retry_after: None,
+        });
     }
     if !status.is_success() {
         let message = resp.text().await.unwrap_or_default();
-        return Err(SdkError::ServerError { status, message });
+        return Err(SdkError::ServerError {
+            status,
+            message,
+            retry_after: None,
+        });
     }
     resp.json::<T>()
         .await

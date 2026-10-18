@@ -143,7 +143,9 @@ fn is_transient_cloud_error(error: &SdkError) -> bool {
 
 fn into_cloud_error(error: SdkError) -> napi::Error {
     match error {
-        SdkError::ServerError { status, message } => {
+        SdkError::ServerError {
+            status, message, ..
+        } => {
             let message = serde_json::from_str::<serde_json::Value>(&message)
                 .ok()
                 .and_then(|body| {
@@ -153,7 +155,11 @@ fn into_cloud_error(error: SdkError) -> napi::Error {
                         .map(str::to_owned)
                 })
                 .unwrap_or(message);
-            into_napi_error(SdkError::ServerError { status, message })
+            into_napi_error(SdkError::ServerError {
+                status,
+                message,
+                retry_after: None,
+            })
         }
         error @ (SdkError::Http(_)
         | SdkError::Middleware(_)
@@ -418,6 +424,7 @@ impl NativeCloudClient {
                 message:
                     "redirects are disabled for cloud mutations to prevent duplicate execution"
                         .into(),
+                retry_after: None,
             });
         }
         if status.is_success() || spec.status_only_codes.contains(&u32::from(status.as_u16())) {
@@ -436,7 +443,11 @@ impl NativeCloudClient {
                     error.detail()
                 )
             });
-        Err(SdkError::ServerError { status, message })
+        Err(SdkError::ServerError {
+            status,
+            message,
+            retry_after: None,
+        })
     }
 
     async fn buffered_request(&self, spec: CloudRequest) -> napi::Result<NativeCloudResponse> {
