@@ -912,29 +912,29 @@ async fn push_history(
     // --expect-oid is that statement (force-with-lease). Without it, a server tip we have
     // locally must be an ancestor of what we're pushing; one we DON'T have locally means our
     // view is stale in a way we can't verify — fetch first, or force with the lease.
-    if expect_oid.is_none() {
-        if let Some(server_tip) = server_tip.as_deref() {
-            let have_server_tip = run_git(
-                root,
-                &["cat-file", "-e", &format!("{server_tip}^{{commit}}")],
-            )
-            .is_ok();
-            if !have_server_tip {
-                return Err(CliError::usage(format!(
-                    "the server's {ref_name} ({server_tip}) is not in your local repo. Either your view \
-                     is stale (`git fetch` the repo, then rebase or merge) or the server branch \
-                     has unrelated history — e.g. it was seeded by a snapshot push — in which \
-                     case fetching cannot help and pushing means REPLACING it. Force-with-lease \
-                     via --expect-oid {server_tip} states that intent."
-                )));
-            }
-            if run_git(root, &["merge-base", "--is-ancestor", server_tip, &tip]).is_err() {
-                return Err(CliError::usage(format!(
-                    "non-fast-forward: the server's {ref_name} ({server_tip}) is not an ancestor of \
-                     your {branch} ({tip}). Rebase or merge first, or force-with-lease via \
-                     --expect-oid {server_tip}."
-                )));
-            }
+    if expect_oid.is_none()
+        && let Some(server_tip) = server_tip.as_deref()
+    {
+        let have_server_tip = run_git(
+            root,
+            &["cat-file", "-e", &format!("{server_tip}^{{commit}}")],
+        )
+        .is_ok();
+        if !have_server_tip {
+            return Err(CliError::usage(format!(
+                "the server's {ref_name} ({server_tip}) is not in your local repo. Either your view \
+                 is stale (`git fetch` the repo, then rebase or merge) or the server branch \
+                 has unrelated history — e.g. it was seeded by a snapshot push — in which \
+                 case fetching cannot help and pushing means REPLACING it. Force-with-lease \
+                 via --expect-oid {server_tip} states that intent."
+            )));
+        }
+        if run_git(root, &["merge-base", "--is-ancestor", server_tip, &tip]).is_err() {
+            return Err(CliError::usage(format!(
+                "non-fast-forward: the server's {ref_name} ({server_tip}) is not an ancestor of \
+                 your {branch} ({tip}). Rebase or merge first, or force-with-lease via \
+                 --expect-oid {server_tip}."
+            )));
         }
     }
     // Force-with-lease wins over the advertised tip; otherwise CAS on what the server showed.

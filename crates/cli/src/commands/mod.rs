@@ -7,6 +7,7 @@ pub mod deploy;
 // `--features mount` release builds. See crates/cli/Cargo.toml.
 #[cfg(feature = "mount")]
 pub mod fs;
+pub mod fs_runtime;
 pub mod git;
 pub mod init;
 pub mod login;

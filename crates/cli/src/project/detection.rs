@@ -66,9 +66,6 @@ fn search_upward(start: &Path, predicate: impl Fn(&Path) -> bool) -> Option<Path
         if predicate(dir) {
             return Some(dir.to_path_buf());
         }
-        match dir.parent() {
-            Some(parent) => dir = parent,
-            None => return None,
-        }
+        dir = dir.parent()?;
     }
 }

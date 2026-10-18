@@ -554,6 +554,8 @@ pub trait RequestEventMetadata {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+// Keep the existing public event constructors; boxing a variant changes the SDK API.
+#[allow(clippy::large_enum_variant)]
 pub enum RequestStateChangeEvent {
     RequestStarted(RequestStartedEvent),
     FunctionRunCreated(FunctionRunCreated),
