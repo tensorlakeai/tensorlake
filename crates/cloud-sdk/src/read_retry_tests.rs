@@ -18,6 +18,8 @@ enum Behavior {
     Truncated,
     Status(u16),
     RetryAfter,
+    UndeliveredOnce,
+    UndeliveredAlways,
 }
 
 struct Pki {
@@ -65,7 +67,11 @@ impl Drop for Server {
 }
 
 async fn server(pki: &Pki, behavior: Behavior) -> Server {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    server_on(pki, behavior, "127.0.0.1:0").await
+}
+
+async fn server_on(pki: &Pki, behavior: Behavior, bind: &str) -> Server {
+    let listener = TcpListener::bind(bind).await.unwrap();
     let address = listener.local_addr().unwrap();
     let requests = Arc::new(AtomicUsize::new(0));
     let connections = Arc::new(AtomicUsize::new(0));
@@ -92,7 +98,7 @@ async fn server(pki: &Pki, behavior: Behavior) -> Server {
                             async move {
                                 let n = count.fetch_add(1, Ordering::SeqCst);
                                 let authority = request.uri().authority().map(|a| a.as_str()).or_else(|| request.headers().get("host").and_then(|h| h.to_str().ok()));
-                                assert_eq!(authority, Some("metadata.test"));
+                                assert_eq!(authority.and_then(|a| a.split(':').next()), Some("metadata.test"));
                                 assert!(request.headers().contains_key("traceparent"));
                                 if matches!(behavior, Behavior::Stall) {
                                     std::future::pending::<()>().await;
@@ -101,8 +107,12 @@ async fn server(pki: &Pki, behavior: Behavior) -> Server {
                                     notify.notify_one();
                                     std::future::pending::<()>().await;
                                 }
-                                let status = match behavior { Behavior::Status(s) => s, Behavior::RetryAfter => 503, _ => 200 };
-                                let body = Bytes::from_static(br#"{"ok":true}"#);
+                                let undelivered = matches!(behavior, Behavior::UndeliveredAlways)
+                                    || matches!(behavior, Behavior::UndeliveredOnce) && n == 0;
+                                let status = if undelivered { 500 } else { match behavior { Behavior::Status(s) => s, Behavior::RetryAfter => 503, _ => 200 } };
+                                let body = Bytes::from_static(if undelivered {
+                                    br#"{"error":"route lookup unavailable","code":"SANDBOX_UPSTREAM_ERROR"}"#
+                                } else { br#"{"ok":true}"# });
                                 let mut response = HyperResponse::builder().status(status);
                                 if matches!(behavior, Behavior::Truncated) {
                                     response = response.header("content-length", 1000);
@@ -568,10 +578,22 @@ async fn benchmark_healthy_read_transport() {
     );
     client.reads.test_options.lock().unwrap().addresses = None;
     let local = url::Url::parse("https://localhost").unwrap();
-    assert!(!client.reads.addresses(&local).await.is_empty());
+    assert!(
+        !client
+            .reads
+            .addresses(&local, Duration::from_secs(3))
+            .await
+            .is_empty()
+    );
     let started = Instant::now();
     for _ in 0..N {
-        assert!(!client.reads.addresses(&local).await.is_empty());
+        assert!(
+            !client
+                .reads
+                .addresses(&local, Duration::from_secs(3))
+                .await
+                .is_empty()
+        );
     }
     println!(
         "cached_resolver_localhost requests={N} total_ms={:.3}",
@@ -591,7 +613,7 @@ async fn dns_answers_are_cached_until_their_ttl_and_then_refreshed() {
         name_server::TokioConnectionProvider,
         proto::{
             op::{Message, MessageType},
-            rr::{RData, Record, rdata::A},
+            rr::{RData, Record, RecordType, rdata::A},
         },
     };
     let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -604,19 +626,21 @@ async fn dns_answers_are_cached_until_their_ttl_and_then_refreshed() {
             let (n, peer) = socket.recv_from(&mut buf).await.unwrap();
             let request = Message::from_vec(&buf[..n]).unwrap();
             let query = request.queries()[0].clone();
-            let n = count.fetch_add(1, Ordering::SeqCst);
             let mut response = Message::new();
             response
                 .set_id(request.id())
                 .set_message_type(MessageType::Response)
                 .set_recursion_desired(true)
                 .set_recursion_available(true)
-                .add_query(query.clone())
-                .add_answer(Record::from_rdata(
+                .add_query(query.clone());
+            if query.query_type() == RecordType::A {
+                let n = count.fetch_add(1, Ordering::SeqCst);
+                response.add_answer(Record::from_rdata(
                     query.name().clone(),
                     1,
                     RData::A(A::new(127, 0, 0, if n == 0 { 1 } else { 2 })),
                 ));
+            }
             socket
                 .send_to(&response.to_vec().unwrap(), peer)
                 .await
@@ -630,15 +654,22 @@ async fn dns_answers_are_cached_until_their_ttl_and_then_refreshed() {
     );
     builder.options_mut().ip_strategy = LookupIpStrategy::Ipv4Only;
     let client = ClientBuilder::new("https://metadata.test").build().unwrap();
-    client.reads.resolver.set(Some(builder.build())).unwrap();
+    client
+        .reads
+        .resolver
+        .set(Some(ReadResolvers::new(builder)))
+        .unwrap();
     let url = url::Url::parse("https://metadata.test").unwrap();
-    let first = client.reads.addresses(&url).await;
+    let first = client.reads.addresses(&url, Duration::from_secs(3)).await;
     assert_eq!(first, vec!["127.0.0.1:443".parse::<SocketAddr>().unwrap()]);
-    assert_eq!(client.reads.addresses(&url).await, first);
+    assert_eq!(
+        client.reads.addresses(&url, Duration::from_secs(3)).await,
+        first
+    );
     assert_eq!(queries.load(Ordering::SeqCst), 1);
     tokio::time::sleep(Duration::from_millis(1100)).await;
     assert_eq!(
-        client.reads.addresses(&url).await,
+        client.reads.addresses(&url, Duration::from_secs(3)).await,
         vec!["127.0.0.2:443".parse::<SocketAddr>().unwrap()]
     );
     assert_eq!(queries.load(Ordering::SeqCst), 2);
@@ -749,4 +780,259 @@ async fn definitive_status_with_a_stalled_body_is_not_retried() {
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     server.abort();
+}
+
+#[tokio::test]
+async fn known_undelivered_500_retries_are_bounded_but_generic_500_is_terminal() {
+    for (behavior, expected_requests, succeeds) in [
+        (Behavior::UndeliveredOnce, 2, true),
+        (Behavior::UndeliveredAlways, 3, false),
+        (Behavior::Status(500), 1, false),
+    ] {
+        let pki = Pki::new(true);
+        let target = server(&pki, behavior).await;
+        let client = client(&pki, vec![target.address]);
+        let result = crate::retry::retry(
+            client,
+            crate::retry::RetryPolicy::idempotent(5),
+            |c| async move { read(&c).await },
+        )
+        .await;
+        assert_eq!(result.is_ok(), succeeds, "{result:?}");
+        assert_eq!(target.requests.load(Ordering::SeqCst), expected_requests);
+        if !succeeds {
+            assert!(matches!(
+                result.unwrap_err().into_original(),
+                SdkError::ServerError {
+                    status: StatusCode::INTERNAL_SERVER_ERROR,
+                    ..
+                }
+            ));
+        }
+    }
+}
+
+#[tokio::test]
+async fn unreachable_addresses_use_the_other_family_in_the_same_http_attempt() {
+    for ipv6_first in [true, false] {
+        let pki = Pki::new(true);
+        let healthy = server_on(
+            &pki,
+            Behavior::Healthy,
+            if ipv6_first { "127.0.0.1:0" } else { "[::1]:0" },
+        )
+        .await;
+        let closed = (0..3)
+            .map(|_| {
+                std::net::TcpListener::bind(if ipv6_first { "[::1]:0" } else { "127.0.0.1:0" })
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let mut addresses = closed
+            .iter()
+            .map(|l| l.local_addr().unwrap())
+            .collect::<Vec<_>>();
+        addresses.push(healthy.address);
+        drop(closed);
+        let mut client = client(&pki, addresses);
+        Arc::get_mut(&mut client.reads).unwrap().config.max_attempts = 1;
+        assert!(read(&client).await.unwrap().ok);
+        assert_eq!(healthy.requests.load(Ordering::SeqCst), 1);
+        let state = client.reads.state.lock().unwrap();
+        assert_eq!(
+            state.suspect.len(),
+            1,
+            "only the first failed connection was tried"
+        );
+        assert_eq!(
+            state.tokens, RETRY_CAPACITY,
+            "family fallback is not an HTTP replay"
+        );
+    }
+}
+
+#[tokio::test]
+async fn tls_policy_failure_does_not_fall_back_to_another_family() {
+    let pki = Pki::new(true);
+    let first = server(&pki, Behavior::Healthy).await;
+    let other = server_on(&pki, Behavior::Healthy, "[::1]:0").await;
+    let client = client(&pki, vec![first.address, other.address]);
+    client.reads.test_options.lock().unwrap().certificate = None;
+    assert!(
+        crate::retry::retry(
+            client,
+            crate::retry::RetryPolicy::idempotent(5),
+            |c| async move { read(&c).await }
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(first.connections.load(Ordering::SeqCst), 1);
+    assert_eq!(other.connections.load(Ordering::SeqCst), 0);
+}
+
+async fn partial_dns(
+    ipv4_answers: bool,
+    ipv6_answers: bool,
+    ipv4_delay: Duration,
+) -> (ReadResolvers, JoinHandle<()>) {
+    use hickory_resolver::{
+        config::{NameServerConfigGroup, ResolverConfig},
+        name_server::TokioConnectionProvider,
+        proto::{
+            op::{Message, MessageType},
+            rr::{
+                RData, Record, RecordType,
+                rdata::{A, AAAA},
+            },
+        },
+    };
+    let socket = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let address = socket.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let mut tasks = tokio::task::JoinSet::new();
+        let mut buf = [0; 2048];
+        loop {
+            let (n, peer) = socket.recv_from(&mut buf).await.unwrap();
+            let request = Message::from_vec(&buf[..n]).unwrap();
+            let query = request.queries()[0].clone();
+            let answer = match query.query_type() {
+                RecordType::A if ipv4_answers => RData::A(A::new(127, 0, 0, 1)),
+                RecordType::AAAA if ipv6_answers => {
+                    RData::AAAA(AAAA(std::net::Ipv6Addr::LOCALHOST))
+                }
+                _ => continue, // silently drop the unhealthy family's queries
+            };
+            let mut response = Message::new();
+            response
+                .set_id(request.id())
+                .set_message_type(MessageType::Response)
+                .set_recursion_desired(true)
+                .set_recursion_available(true)
+                .add_query(query.clone())
+                .add_answer(Record::from_rdata(query.name().clone(), 60, answer));
+            let bytes = response.to_vec().unwrap();
+            let socket = socket.clone();
+            tasks.spawn(async move {
+                if query.query_type() == RecordType::A {
+                    tokio::time::sleep(ipv4_delay).await;
+                }
+                socket.send_to(&bytes, peer).await.unwrap();
+            });
+            while tasks.try_join_next().is_some() {}
+        }
+    });
+    let nameservers = NameServerConfigGroup::from_ips_clear(&[address.ip()], address.port(), true);
+    let builder = hickory_resolver::TokioResolver::builder_with_config(
+        ResolverConfig::from_parts(None, vec![], nameservers),
+        TokioConnectionProvider::default(),
+    );
+    (ReadResolvers::new(builder), server)
+}
+
+#[tokio::test]
+async fn stalled_dns_family_does_not_discard_available_answers() {
+    for (ipv4, ipv6) in [(true, false), (false, true), (true, true)] {
+        let (resolver, dns) = partial_dns(ipv4, ipv6, Duration::ZERO).await;
+        let client = ClientBuilder::new("https://metadata.test").build().unwrap();
+        client.reads.resolver.set(Some(resolver)).unwrap();
+        let url = url::Url::parse("https://metadata.test").unwrap();
+        // Include a caller deadline shorter than the normal 50ms family grace:
+        // the DNS sub-deadline must still return an already received answer.
+        for budget in [Duration::from_secs(3), Duration::from_millis(100)] {
+            let addresses = tokio::time::timeout(
+                Duration::from_millis(500),
+                client.reads.addresses(&url, budget),
+            )
+            .await
+            .unwrap();
+            assert_eq!(addresses.iter().any(SocketAddr::is_ipv4), ipv4);
+            assert_eq!(addresses.iter().any(SocketAddr::is_ipv6), ipv6);
+        }
+        dns.abort();
+    }
+}
+
+#[tokio::test]
+async fn unavailable_dns_leaves_time_for_platform_resolution_and_connection() {
+    let (resolver, dns) = partial_dns(false, false, Duration::ZERO).await;
+    let started = Instant::now();
+    let answers = resolver
+        .lookup("metadata.test", started + Duration::from_millis(50))
+        .await;
+    assert!(answers.is_empty());
+    assert!(started.elapsed() < Duration::from_millis(250));
+    dns.abort();
+}
+
+#[tokio::test]
+async fn metadata_read_reaches_healthy_a_address_while_aaaa_is_stalled() {
+    let pki = Pki::new(true);
+    let target = server(&pki, Behavior::Healthy).await;
+    let (resolver, dns) = partial_dns(true, false, Duration::ZERO).await;
+    let client = ClientBuilder::new(&format!("https://metadata.test:{}", target.address.port()))
+        .read_retry(ReadRetryConfig {
+            max_attempts: 1,
+            ..ReadRetryConfig::default()
+        })
+        .build()
+        .unwrap();
+    client.reads.resolver.set(Some(resolver)).unwrap();
+    client.reads.test_options.lock().unwrap().certificate = Some(pki.certificate);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), read(&client))
+            .await
+            .unwrap()
+            .unwrap()
+            .ok
+    );
+    assert_eq!(target.requests.load(Ordering::SeqCst), 1);
+    dns.abort();
+}
+
+#[tokio::test]
+async fn connect_timeout_leaves_time_for_the_other_family() {
+    let pki = Pki::new(true);
+    let healthy = server(&pki, Behavior::Healthy).await;
+    let listener = TcpListener::bind("[::1]:0").await.unwrap();
+    let stalled = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        let (_socket, _) = listener.accept().await.unwrap();
+        std::future::pending::<()>().await; // TCP succeeds, TLS never completes
+    });
+    let mut client = client(&pki, vec![stalled, healthy.address]);
+    Arc::get_mut(&mut client.reads).unwrap().config = ReadRetryConfig {
+        max_attempts: 1,
+        ..ReadRetryConfig::default()
+    };
+    assert!(read(&client).await.unwrap().ok);
+    assert_eq!(healthy.requests.load(Ordering::SeqCst), 1);
+    task.abort();
+}
+
+#[tokio::test]
+async fn slow_other_family_dns_can_recover_after_a_fast_family_cannot_connect() {
+    let pki = Pki::new(true);
+    let target = server(&pki, Behavior::Healthy).await;
+    // AAAA answers immediately, but there is no IPv6 listener at this port.
+    // A is healthy and arrives after the initial family-resolution grace.
+    let (resolver, dns) = partial_dns(true, true, Duration::from_millis(100)).await;
+    let client = ClientBuilder::new(&format!("https://metadata.test:{}", target.address.port()))
+        .read_retry(ReadRetryConfig {
+            max_attempts: 1,
+            ..ReadRetryConfig::default()
+        })
+        .build()
+        .unwrap();
+    client.reads.resolver.set(Some(resolver)).unwrap();
+    client.reads.test_options.lock().unwrap().certificate = Some(pki.certificate);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), read(&client))
+            .await
+            .unwrap()
+            .unwrap()
+            .ok
+    );
+    assert_eq!(target.requests.load(Ordering::SeqCst), 1);
+    dns.abort();
 }

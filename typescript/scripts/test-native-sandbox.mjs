@@ -14,8 +14,8 @@ import { build } from "esbuild";
 if (!process.argv.includes("--child")) {
   await import("./test-native-stream-lifetime.mjs");
   await import("./test-native-ready-timeout.mjs");
-  if (process.platform !== "linux") {
-    console.log("Forbidden certificate I/O regression requires Linux FIFOs.");
+  if (!["linux", "darwin"].includes(process.platform)) {
+    console.log("Forbidden certificate I/O regression requires Linux or macOS FIFOs.");
   } else {
     const child = spawn(process.execPath, [
       fileURLToPath(import.meta.url), "--child",
@@ -131,9 +131,14 @@ if (!process.argv.includes("--child")) {
     await Promise.all([client.list(), handles[0].listProcesses(), handles[1].listProcesses()]);
     assert.equal(blockedTicks, 3, "Main event loop must advance while addon loading is blocked");
     assert.equal(Atomics.load(nativeLoads, 0), 1, "Concurrent first requests must share addon loading");
-    const initialConnections = connections;
-    for (const handle of handles) await handle.listProcesses();
+    // Metadata reads use address-specific pools; logs/streams retain the
+    // ordinary transport. Warm both before checking that handles reuse them.
     await client.listLogProcesses("sandbox-0");
+    const initialConnections = connections;
+    for (const handle of handles) {
+      await handle.listProcesses();
+      await client.listLogProcesses("sandbox-0");
+    }
     assert.equal(connections, initialConnections, "Proxy handles rebuilt the connection pool");
     assert.ok(authorizations.every((value) => value === "Bearer client-one"));
 

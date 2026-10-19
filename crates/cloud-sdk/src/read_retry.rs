@@ -1,19 +1,21 @@
 //! Bounded retries for finite, explicitly read-only metadata requests.
 //!
-//! Each direct attempt chooses one address from system DNS and a pool scoped to
-//! that origin/address. A timed-out HTTP/2 stream therefore cannot pin every
+//! Direct connections use current DNS answers and pools scoped to each
+//! origin/address, with address-family fallback before request delivery.
+//! A timed-out HTTP/2 stream therefore cannot pin every
 //! retry to the same multiplexed connection. Mutations and streams never enter
 //! this path. System proxy settings remain in force; a forwarding proxy owns
 //! origin DNS/routing, so address selection cannot control its upstream leg.
 
 use super::*;
 use rand::Rng;
-use std::{collections::HashSet, net::SocketAddr, sync::Mutex};
+use std::{collections::HashSet, net::IpAddr, net::SocketAddr, sync::Mutex};
 use tokio::time::Instant;
 
 const MAX_POOLS: usize = 32;
 const POOL_IDLE: Duration = Duration::from_secs(60);
 const RETRY_CAPACITY: f64 = 20.0;
+const DNS_FAMILY_GRACE: Duration = Duration::from_millis(50);
 
 /// Retry limits for sandbox metadata reads. All attempts, DNS lookups, body
 /// reads and backoff share `total_timeout`, further capped by request timeout.
@@ -68,6 +70,63 @@ struct State {
     suspect: Vec<(Endpoint, Instant)>,
 }
 
+#[derive(Debug)]
+struct ReadResolvers {
+    ipv4: hickory_resolver::TokioResolver,
+    ipv6: hickory_resolver::TokioResolver,
+}
+
+impl ReadResolvers {
+    fn new(
+        mut builder: hickory_resolver::ResolverBuilder<
+            hickory_resolver::name_server::TokioConnectionProvider,
+        >,
+    ) -> Self {
+        use hickory_resolver::config::{LookupIpStrategy, ResolveHosts};
+        builder.options_mut().cache_size = 64;
+        builder.options_mut().use_hosts_file = ResolveHosts::Always;
+        builder.options_mut().ip_strategy = LookupIpStrategy::Ipv4Only;
+        let ipv4 = builder.build();
+        let mut options = ipv4.options().clone();
+        options.ip_strategy = LookupIpStrategy::Ipv6Only;
+        let ipv6 = hickory_resolver::TokioResolver::builder_with_config(
+            ipv4.config().clone(),
+            hickory_resolver::name_server::TokioConnectionProvider::default(),
+        )
+        .with_options(options)
+        .build();
+        Self { ipv4, ipv6 }
+    }
+
+    async fn lookup(&self, host: &str, deadline: Instant) -> Vec<IpAddr> {
+        use futures::future::{Either, select};
+        let ipv4 = Box::pin(self.ipv4.lookup_ip(host));
+        let ipv6 = Box::pin(self.ipv6.lookup_ip(host));
+        let Ok(first_completed) = tokio::time::timeout_at(deadline, select(ipv4, ipv6)).await
+        else {
+            return Vec::new();
+        };
+        let (first, remaining) = match first_completed {
+            Either::Left(pair) | Either::Right(pair) => pair,
+        };
+        let mut addresses = first
+            .map(|result| result.iter().collect::<Vec<_>>())
+            .unwrap_or_default();
+        // A missing answer is not a reason to abandon the other query. Once
+        // one family is usable, collect the other only if it arrives promptly.
+        // Hickory's combined strategy instead waits through its DNS timeout.
+        let other_deadline = if addresses.is_empty() {
+            deadline
+        } else {
+            deadline.min(Instant::now() + DNS_FAMILY_GRACE)
+        };
+        if let Ok(Ok(other)) = tokio::time::timeout_at(other_deadline, remaining).await {
+            addresses.extend(other.iter());
+        }
+        addresses
+    }
+}
+
 pub(super) struct ReadTransport {
     config: ReadRetryConfig,
     headers: HeaderMap,
@@ -76,7 +135,7 @@ pub(super) struct ReadTransport {
     follow_redirects: bool,
     system_proxy: hyper_util::client::proxy::matcher::Matcher,
     state: Mutex<State>,
-    resolver: tokio::sync::OnceCell<Option<hickory_resolver::TokioResolver>>,
+    resolver: tokio::sync::OnceCell<Option<ReadResolvers>>,
     #[cfg(test)]
     test_options: Mutex<TestOptions>,
 }
@@ -118,7 +177,7 @@ impl ReadTransport {
     // Hickory caches records only for their DNS TTL and uses the machine's
     // configured nameservers and hosts file. If unavailable, retain the system
     // resolver path (including platform-specific name services).
-    async fn addresses(&self, url: &url::Url) -> Vec<SocketAddr> {
+    async fn addresses(&self, url: &url::Url, timeout: Duration) -> Vec<SocketAddr> {
         #[cfg(test)]
         if let Some(addresses) = self.test_options.lock().unwrap().addresses.clone() {
             return addresses;
@@ -146,24 +205,21 @@ impl ReadTransport {
             .get_or_init(|| async {
                 hickory_resolver::TokioResolver::builder_tokio()
                     .ok()
-                    .map(|mut builder| {
-                        builder.options_mut().cache_size = 64;
-                        builder.options_mut().use_hosts_file =
-                            hickory_resolver::config::ResolveHosts::Always;
-                        builder.options_mut().ip_strategy =
-                            hickory_resolver::config::LookupIpStrategy::Ipv4AndIpv6;
-                        builder.build()
-                    })
+                    .map(ReadResolvers::new)
             })
             .await;
+        // Reserve time for the platform resolver and connection establishment
+        // even when the configured DNS servers never answer either query.
+        let dns_budget = (timeout / 2).min(Duration::from_secs(1));
+        let dns_deadline = Instant::now() + dns_budget;
         let mut addresses = Vec::new();
-        if let Some(resolver) = resolver
-            && let Ok(result) = resolver.lookup_ip(host).await
-        {
-            addresses.extend(result.iter().map(|ip| SocketAddr::new(ip, port)));
+        if let Some(resolver) = resolver {
+            let result = resolver.lookup(host, Instant::now() + dns_budget / 2).await;
+            addresses.extend(result.into_iter().map(|ip| SocketAddr::new(ip, port)));
         }
         if addresses.is_empty()
-            && let Ok(result) = tokio::net::lookup_host((host, port)).await
+            && let Ok(Ok(result)) =
+                tokio::time::timeout_at(dns_deadline, tokio::net::lookup_host((host, port))).await
         {
             addresses.extend(result);
         }
@@ -184,6 +240,9 @@ impl ReadTransport {
         addresses: &[SocketAddr],
         tried: &HashSet<SocketAddr>,
     ) -> Option<SocketAddr> {
+        if addresses.is_empty() {
+            return None;
+        }
         let mut state = self.state.lock().unwrap();
         state.suspect.retain(|(_, until)| *until > Instant::now());
         let healthy = |address: &&SocketAddr| {
@@ -202,6 +261,36 @@ impl ReadTransport {
             .or_else(|| addresses.iter().find(healthy))
             .or(addresses.first())
             .copied()
+    }
+
+    async fn resolve_other_family(
+        &self,
+        url: &url::Url,
+        failed: SocketAddr,
+        remaining: Duration,
+    ) -> Vec<SocketAddr> {
+        let (Some(url::Host::Domain(host)), Some(port), Some(Some(resolvers))) =
+            (url.host(), url.port_or_known_default(), self.resolver.get())
+        else {
+            return Vec::new();
+        };
+        let resolver = if failed.is_ipv4() {
+            &resolvers.ipv6
+        } else {
+            &resolvers.ipv4
+        };
+        // The other family's initial query may have exceeded the short grace
+        // period. If the first family cannot connect, give that answer another
+        // bounded chance instead of repeatedly choosing the fast, broken one.
+        match tokio::time::timeout(
+            (remaining / 2).min(Duration::from_secs(1)),
+            resolver.lookup_ip(host),
+        )
+        .await
+        {
+            Ok(Ok(result)) => result.iter().map(|ip| SocketAddr::new(ip, port)).collect(),
+            _ => Vec::new(),
+        }
     }
 
     fn pool(&self, endpoint: &Endpoint, host: &str) -> Result<ClientWithMiddleware, SdkError> {
@@ -306,7 +395,7 @@ fn retryable_status(status: StatusCode) -> bool {
 
 fn retryable(error: &SdkError) -> bool {
     if let SdkError::ServerError { status, .. } = error {
-        return retryable_status(*status);
+        return retryable_status(*status) || error.never_reached_server();
     }
     if matches!(error, SdkError::StreamTimeout { .. }) {
         return true;
@@ -395,32 +484,78 @@ impl Client {
                 break;
             }
             let timeout = policy.attempt_timeout.min(deadline - now);
+            let attempt_deadline = now + timeout;
             let mut endpoint = None;
             let mut retry_after = None;
             let mut response_status = None;
             let mut stage = "dns";
             let mut trace_id = String::new();
             let result = tokio::time::timeout(timeout, async {
-                let addresses = self.reads.addresses(request.url()).await;
+                let addresses = self.reads.addresses(request.url(), timeout).await;
                 let origin = request.url().origin().ascii_serialization();
                 let address = self.reads.select(&origin, &addresses, &tried);
-                if let Some(address) = address {
-                    tried.insert(address);
+                let other_family: Vec<_> = addresses
+                    .iter()
+                    .copied()
+                    .filter(|a| address.is_some_and(|first| a.is_ipv4() != first.is_ipv4()))
+                    .collect();
+                let mut fallback = self.reads.select(&origin, &other_family, &tried);
+                let mut candidate = address;
+                let mut response = None;
+                for connection_attempt in 0..2 {
+                    if let Some(address) = candidate {
+                        tried.insert(address);
+                    }
+                    let selected = Endpoint {
+                        origin: origin.clone(),
+                        address: candidate,
+                    };
+                    let transport = self
+                        .reads
+                        .pool(&selected, request.url().host_str().unwrap_or(""))?;
+                    endpoint = Some(selected);
+                    let mut current = request.try_clone().expect("bodyless GET is replayable");
+                    trace_id = self.prepare_traced_request(&mut current);
+                    *current.timeout_mut() = Some(timeout);
+                    current.headers_mut().insert(
+                        REQUEST_TIMEOUT_HEADER,
+                        HeaderValue::from(timeout.as_millis() as u64),
+                    );
+                    stage = "response_headers";
+                    match transport.execute(current).await {
+                        Ok(received) => {
+                            response = Some(received);
+                            break;
+                        }
+                        Err(error) => {
+                            let error = SdkError::from(error);
+                            // Like the default connector's family fallback,
+                            // this is still one HTTP attempt: no request was
+                            // delivered. Never fall back on a TLS policy error
+                            // or after HTTP transmission/body failure.
+                            if connection_attempt == 0
+                                && let Some(failed) = candidate
+                                && error.as_reqwest().is_some_and(|e| e.is_connect())
+                                && retryable(&error)
+                            {
+                                if fallback.is_none() {
+                                    let late = self.reads.resolve_other_family(request.url(), failed, attempt_deadline.saturating_duration_since(Instant::now())).await;
+                                    fallback = self.reads.select(&origin, &late, &tried);
+                                }
+                                if fallback.is_some() {
+                                    self.reads.retire(endpoint.as_ref().unwrap());
+                                    tracing::debug!(attempt, %read_id, %trace_id, selected_address = ?candidate, fallback_address = ?fallback, "sandbox metadata connection trying alternate address family");
+                                    candidate = fallback;
+                                    continue;
+                                }
+                            }
+                            return Err(error);
+                        }
+                    }
                 }
-                let selected = Endpoint { origin, address };
-                let transport = self
-                    .reads
-                    .pool(&selected, request.url().host_str().unwrap_or(""))?;
-                endpoint = Some(selected);
-                let mut current = request.try_clone().expect("bodyless GET is replayable");
-                trace_id = self.prepare_traced_request(&mut current);
-                *current.timeout_mut() = Some(timeout);
-                current.headers_mut().insert(
-                    REQUEST_TIMEOUT_HEADER,
-                    HeaderValue::from(timeout.as_millis() as u64),
+                let response = response.expect(
+                    "connection attempts either return an error or receive a response",
                 );
-                stage = "response_headers";
-                let response = transport.execute(current).await?;
                 response_status = Some(response.status());
                 retry_after = response
                     .headers()
@@ -462,7 +597,8 @@ impl Client {
                 Err(error) => {
                     // Once a definitive status arrived, a stalled/truncated
                     // error body must not turn a 401/403/404 into a replay.
-                    if retryable(&error)
+                    if !matches!(error, SdkError::ServerError { .. })
+                        && retryable(&error)
                         && let Some(status) =
                             response_status.filter(|s| !s.is_success() && !retryable_status(*s))
                     {
