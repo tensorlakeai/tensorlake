@@ -51,3 +51,37 @@ is excluded. CPU utilization and peak memory were not measured.
 These results establish local overhead, not production throughput or WAN
 latency. Fault tests separately cover bounded recovery from stalled and
 broken connections over HTTP/1.1 and HTTP/2. No production load test was run.
+
+## DNS and address-family review fixes — 2026-10-19
+
+Measured implementation: `1dd20609127992c1c251229b2c6b9139cf81b331`, with the
+same machine, toolchain, debug profile and `just bench-sdk-resilience` command
+as above. The first run was more variable, so a second run checked repeatability;
+both are retained here. Request timings still exclude DNS.
+
+| Run / round | Baseline, 1,000 reads (ms) | Resilient, 1,000 reads (ms) |
+| --- | ---: | ---: |
+| First / 0 | 160.755 | 174.302 |
+| First / 1 | 132.984 | 182.224 |
+| First / 2 | 158.306 | 165.378 |
+| First / 3 | 134.136 | 154.045 |
+| First / 4 | 132.590 | 167.737 |
+| Repeat / 0 | 137.912 | 148.921 |
+| Repeat / 1 | 130.471 | 145.897 |
+| Repeat / 2 | 128.430 | 145.996 |
+| Repeat / 3 | 129.285 | 145.094 |
+| Repeat / 4 | 130.724 | 147.043 |
+
+The first run averaged 143.754 → 168.737 microseconds/read (+24.983
+microseconds, 17.4%). The repeat averaged 131.364 → 146.590 microseconds/read
+(+15.226 microseconds, 11.6%). Warm local resolution, measured separately,
+averaged 17.520 and 15.077 microseconds per lookup; platform resolution averaged
+123.389 and 113.352 microseconds. Independent family resolution adds some local
+lookup overhead while allowing an available family to proceed when the other
+query stalls. These samples do not establish a production latency percentage.
+
+Each run retained exactly two pooled TCP connections across 10,020 reads.
+Benchmark body wall times were 1.72 and 1.53 seconds. CPU utilization and peak
+memory were not measured. The new fault tests additionally verify stalled
+A/AAAA queries, late family answers, and recovery after a two-second connection
+timeout within one three-second HTTP attempt.
