@@ -4549,7 +4549,7 @@ mod tests {
         assert!(Cli::try_parse_from(["tl", "new", "hello_world"]).is_ok());
         assert!(Cli::try_parse_from(["tl", "deploy", "hello_world.py"]).is_ok());
         assert!(Cli::try_parse_from(["tl", "cron", "ls", "hello_world"]).is_ok());
-        assert!(Cli::try_parse_from(["tl", "parse", "document.pdf"]).is_ok());
+        assert!(Cli::try_parse_from(["tl", "parse", "document.pdf"]).is_err());
         assert!(Cli::try_parse_from(["tl", "ls"]).is_ok());
     }
 
