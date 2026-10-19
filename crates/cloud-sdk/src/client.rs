@@ -16,6 +16,10 @@ use std::{
 
 use crate::{error::SdkError, sse::event_stream};
 
+#[path = "read_retry.rs"]
+mod read_retry;
+pub use read_retry::ReadRetryConfig;
+
 pub const REQUEST_TIMEOUT_HEADER: &str = "X-Tensorlake-Request-Timeout-Ms";
 
 /// Wraps any SDK operation result with the W3C `trace_id` so callers can
@@ -85,6 +89,7 @@ pub struct Client {
     user_agent: String,
     /// Total request timeout configured for this client.
     timeout: Option<Duration>,
+    reads: Arc<read_retry::ReadTransport>,
 }
 
 /// Builder for creating a [`Client`] with a fluent API.
@@ -100,6 +105,7 @@ pub struct ClientBuilder {
     user_agent: Option<String>,
     timeout: Option<Duration>,
     follow_redirects: bool,
+    read_retry: ReadRetryConfig,
 }
 
 impl ClientBuilder {
@@ -122,6 +128,7 @@ impl ClientBuilder {
             user_agent: None,
             timeout: None,
             follow_redirects: true,
+            read_retry: ReadRetryConfig::default(),
         }
     }
 
@@ -144,6 +151,13 @@ impl ClientBuilder {
     /// runs until the server closes it.
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
+        self
+    }
+
+    /// Configure bounded retries for explicitly designated sandbox metadata reads.
+    /// The request's timeout, when smaller, also caps the entire retry sequence.
+    pub fn read_retry(mut self, config: ReadRetryConfig) -> Self {
+        self.read_retry = config;
         self
     }
 
@@ -188,6 +202,7 @@ impl ClientBuilder {
     ///
     /// Returns an error if the HTTP client cannot be created or configured.
     pub fn build(self) -> Result<Client, SdkError> {
+        self.read_retry.validate()?;
         let mut default_headers = HeaderMap::new();
 
         // Add bearer token if provided
@@ -224,6 +239,13 @@ impl ClientBuilder {
 
         let client = builder.build();
 
+        let reads = Arc::new(read_retry::ReadTransport::new(
+            self.read_retry,
+            default_headers.clone(),
+            ua.to_string(),
+            self.middlewares,
+            self.follow_redirects,
+        ));
         Ok(Client {
             base_url: self.base_url,
             base_client,
@@ -231,6 +253,7 @@ impl ClientBuilder {
             default_headers,
             user_agent: ua.to_string(),
             timeout: self.timeout,
+            reads,
         })
     }
 }
@@ -266,6 +289,7 @@ impl Client {
             default_headers: self.default_headers.clone(),
             user_agent: self.user_agent.clone(),
             timeout: self.timeout,
+            reads: self.reads.clone(),
         }
     }
 

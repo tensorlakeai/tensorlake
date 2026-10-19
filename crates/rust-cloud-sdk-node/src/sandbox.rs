@@ -90,7 +90,7 @@ fn make_napi_error(category: &str, status: Option<u16>, message: String) -> napi
 /// a string that contains neither "connect" nor "timeout". Classifying it by
 /// substring reported real DNS and TCP failures as opaque internal errors.
 pub(crate) fn into_napi_error(error: SdkError) -> napi::Error {
-    match error {
+    match error.into_original() {
         SdkError::SandboxResize(error) => make_napi_error(
             "resize",
             None,

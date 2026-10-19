@@ -149,6 +149,9 @@ impl RetryState {
         elapsed: Duration,
         transient: bool,
     ) -> RetryDecision {
+        if matches!(error, SdkError::ReadRetryExhausted(_)) {
+            return RetryDecision::Stop;
+        }
         if error.never_reached_server() {
             if elapsed >= UNDELIVERED_REPLAY_BUDGET {
                 return RetryDecision::Stop;

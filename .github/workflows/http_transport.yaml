@@ -24,8 +24,11 @@ jobs:
         with:
           components: clippy
       - uses: taiki-e/install-action@just
+      - uses: taiki-e/install-action@nextest
       - uses: Swatinem/rust-cache@v2
       - name: Deny implicit platform trust in SDK and CLI
         run: just lint-http-transports
       - name: Test socket requests and fail-closed credential handling in certless children
         run: just test-artifact-storage
+      - name: Test bounded metadata retries and address failover
+        run: just test-sdk-resilience
