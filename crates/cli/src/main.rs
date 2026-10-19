@@ -204,21 +204,6 @@ enum Commands {
         build_envs: Vec<String>,
     },
 
-    /// Parse a document and print markdown
-    #[command(hide = true)]
-    Parse {
-        /// Local file path or HTTP/HTTPS URL
-        path_or_url: String,
-
-        /// Pages to parse, e.g. '1', '1-5', or '1,2,10'. Default: all pages.
-        #[arg(short, long)]
-        pages: Option<String>,
-
-        /// Ignore local cache and re-parse the document
-        #[arg(short = 'I', long)]
-        ignore_cache: bool,
-    },
-
     /// Manage Orchestrate applications
     #[command(subcommand, name = "app", alias = "apps", alias = "orchestrate")]
     App(AppCommands),
@@ -2370,11 +2355,6 @@ async fn run_command(
             })
             .await
         }
-        Commands::Parse {
-            path_or_url,
-            pages,
-            ignore_cache,
-        } => commands::parse::run(ctx, &path_or_url, pages.as_deref(), ignore_cache).await,
         Commands::App(subcmd) => run_app_command(ctx, subcmd).await,
         Commands::Cron(subcmd) => run_cron_command(ctx, subcmd).await,
         Commands::Secrets(subcmd) => {

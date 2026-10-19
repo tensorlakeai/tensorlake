@@ -11,14 +11,11 @@ enable_fe_test_suite=false
 enable_applications_test_suite=false
 enable_cli_test_suite=false
 enable_utils_test_suite=false
-enable_document_ai_test_suite=false
 enable_filesystem_test_suite=false
 if [[ "$1" == "--function-executor" ]]; then
   enable_fe_test_suite=true
 elif [ "$1" == "--applications" ]; then
   enable_applications_test_suite=true
-elif [ "$1" == "--document-ai" ]; then
-  enable_document_ai_test_suite=true
 elif [ "$1" == "--filesystem" ]; then
   enable_filesystem_test_suite=true
 else
@@ -68,7 +65,6 @@ function_executor_test_files=$(find ./function_executor -name 'test_*.py')
 applications_test_files=$(find ./applications -name 'test_*.py')
 cli_test_files=$(find ./cli -name 'test_*.py')
 utils_test_files=$(find ./utils -name 'test_*.py')
-document_ai_test_files=$(find ./document_ai -name 'test_*.py')
 filesystem_test_files=$(find ./filesystem -name 'test_*.py')
 
 if [ "$enable_fe_test_suite" = true ]; then
@@ -81,10 +77,6 @@ fi
 
 if [ "$enable_cli_test_suite" = true ]; then
   run_test_suite "$cli_test_files" "CLI"
-fi
-
-if [ "$enable_document_ai_test_suite" = true ]; then
-  run_test_suite "$document_ai_test_files" "Document AI"
 fi
 
 if [ "$enable_filesystem_test_suite" = true ]; then
