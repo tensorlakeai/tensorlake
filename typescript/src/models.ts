@@ -43,6 +43,8 @@ export enum SnapshotStatus {
   LOCAL_READY = "local_ready",
   COMPLETED = "completed",
   FAILED = "failed",
+  DELETING = "deleting",
+  REPLICATING = "replicating",
 }
 
 /**
@@ -369,6 +371,11 @@ export interface CopySandboxResponse {
 }
 
 export interface SandboxInfo {
+  /**
+   * The runtime the server chose for this sandbox: `firecracker`,
+   * `cloud-hypervisor` or `gvisor`. Informational only; it is never sent and
+   * is `firecracker` when the server recorded none.
+   */
   runtime?: string;
   resourceResize?: SandboxResourceResizeInfo | null;
   sandboxId: string;

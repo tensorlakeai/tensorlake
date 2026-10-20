@@ -131,6 +131,8 @@ class SnapshotStatus(str, Enum):
     LOCAL_READY = "local_ready"
     COMPLETED = "completed"
     FAILED = "failed"
+    DELETING = "deleting"
+    REPLICATING = "replicating"
 
 
 class SnapshotWaitCondition(str, Enum):
@@ -724,7 +726,14 @@ class SandboxInfo(BaseModel):
     namespace: str
     status: SandboxStatus
     image: str | None = None
-    runtime: str | None = None
+    runtime: str | None = Field(
+        default=None,
+        description=(
+            "The runtime the server chose for this sandbox: 'firecracker', "
+            "'cloud-hypervisor' or 'gvisor'. Informational only; it is never "
+            "sent and is 'firecracker' when the server recorded none."
+        ),
+    )
     resource_resize: SandboxResourceResizeInfo | None = None
     resources: ContainerResourcesInfo
     timeout_secs: int | None = None
@@ -868,7 +877,7 @@ class CreateSnapshotResponse(BaseModel):
     """Response from creating a snapshot."""
 
     snapshot_id: str
-    status: SnapshotStatus
+    status: SnapshotStatus | str
 
 
 class SnapshotInfo(BaseModel):
@@ -878,7 +887,7 @@ class SnapshotInfo(BaseModel):
     namespace: str
     sandbox_id: str
     base_image: str | None = None
-    status: SnapshotStatus
+    status: SnapshotStatus | str
     snapshot_type: SnapshotType | None = None
     error: str | None = None
     snapshot_uri: str | None = None

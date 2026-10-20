@@ -391,10 +391,10 @@ pub struct DetachFileSystemRequest {
     pub mount_path: String,
 }
 
-/// Resource targets for a running sandbox. CPU-only CAS sandboxes support CPU,
-/// memory, and root-disk resize; GPU CAS sandboxes support only root-disk growth.
-/// Non-CAS sandboxes do not support live resize.
-/// Names and numeric types match create; values are optional for partial updates.
+/// Resource targets for a running sandbox. Which runtimes and dimensions can
+/// be resized live is decided by the server; its policy error is returned
+/// unchanged. Names and numeric types match create; values are optional for
+/// partial updates.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ResizeSandboxResources {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -723,6 +723,9 @@ pub struct SandboxAccepted {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SandboxInfo {
+    /// The runtime the server chose for this sandbox: `firecracker`,
+    /// `cloud-hypervisor` or `gvisor`. Informational only; it is never sent
+    /// and is `firecracker` when the server recorded none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
