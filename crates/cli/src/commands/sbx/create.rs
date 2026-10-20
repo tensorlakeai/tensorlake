@@ -142,7 +142,8 @@ fn format_create_error(status: reqwest::StatusCode, body: &str) -> String {
     if let Ok(error) = serde_json::from_str::<ServerError>(body) {
         if error.code.as_deref() == Some("GPU_REQUIRES_CAS_SNAPSHOT") {
             return format!(
-                "{}\n\nTo see compatible images, run `tl sbx image ls --cas`.",
+                "{}\n\nRebuild the image with `tl sbx image create --cas` or `tl sbx image \
+                 import --cas`.",
                 error.message
             );
         }
@@ -557,7 +558,8 @@ mod tests {
             r#"{"code":"GPU_REQUIRES_CAS_SNAPSHOT","message":"Image 'base' uses TLSnap."}"#,
         );
         assert!(message.contains("Image 'base' uses TLSnap."));
-        assert!(message.contains("tl sbx image ls --cas"));
+        assert!(message.contains("tl sbx image create --cas"));
+        assert!(message.contains("tl sbx image import --cas"));
     }
 
     #[test]

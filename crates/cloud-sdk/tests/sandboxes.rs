@@ -1371,7 +1371,7 @@ fn resize_info(
     error: Option<&str>,
 ) -> serde_json::Value {
     let mut info: serde_json::Value = serde_json::from_str(SANDBOX_INFO_JSON).unwrap();
-    info["runtime"] = "cloud_hypervisor".into();
+    info["runtime"] = "cloud-hypervisor".into();
     info["resources"]["memory_mb"] = memory.into();
     info["resource_resize"] = serde_json::json!({
         "generation": generation, "status": status,
@@ -1512,43 +1512,6 @@ async fn gvisor_resize_only_patches_disk_and_waits_for_confirmed_growth() {
     }
 }
 
-#[tokio::test]
-async fn gvisor_resize_rejects_cpu_and_memory_changes_before_patch() {
-    use tensorlake::sandboxes::models::ResizeSandboxResources;
-
-    for (cpus, memory_mb) in [
-        (Some(3.0), None),
-        (Some(1.0), None),
-        (None, Some(2048)),
-        (None, Some(512)),
-        (Some(3.0), Some(2048)),
-    ] {
-        for disk_mb in [None, Some(2048)] {
-            let mut current: serde_json::Value = serde_json::from_str(SANDBOX_INFO_JSON).unwrap();
-            current["runtime"] = "gvisor".into();
-            current["resources"]["cpus"] = 2.0.into();
-            let (client, task) = resize_server(vec![(200, current)]).await;
-            let error = client
-                .update(
-                    "sb-1",
-                    &resize_request(ResizeSandboxResources {
-                        cpus,
-                        memory_mb,
-                        disk_mb,
-                    }),
-                )
-                .await
-                .unwrap_err();
-            assert!(matches!(error, SdkError::ClientError(_)));
-            assert!(error.to_string().contains("GPU CAS sandboxes"));
-            assert!(error.to_string().contains("CPU and memory"));
-            let requests = task.await.unwrap();
-            assert_eq!(requests.len(), 1);
-            assert!(requests[0].starts_with("GET "));
-        }
-    }
-}
-
 #[test]
 fn gvisor_resize_preserves_disk_and_running_constraints() {
     use tensorlake::sandboxes::models::{ResizeSandboxResources, SandboxInfo};
@@ -1579,15 +1542,23 @@ fn gvisor_resize_preserves_disk_and_running_constraints() {
                 .contains("requires a Running sandbox")
         );
     }
+    // Which runtimes may resize is the server's policy (ADR 0107 D52): the
+    // client never rejects on the runtime token, whatever it is.
     current.status = "running".into();
-    current.runtime = Some("firecracker".into());
-    assert!(
-        request
-            .against(&current)
-            .unwrap_err()
-            .to_string()
-            .contains("non-CAS sandboxes")
-    );
+    for runtime in [
+        Some("firecracker"),
+        Some("gvisor"),
+        Some("cloud-hypervisor"),
+        None,
+    ] {
+        current.runtime = runtime.map(str::to_string);
+        let target = ResizeSandboxResources {
+            cpus: Some(4.0),
+            memory_mb: Some(4096),
+            disk_mb: Some(2048),
+        };
+        assert_eq!(target.against(&current).unwrap(), target, "{runtime:?}");
+    }
 }
 
 #[tokio::test]
@@ -1619,7 +1590,7 @@ async fn resize_admission_only_keeps_the_old_confirmed_allocation() {
 #[tokio::test]
 async fn resize_noop_never_submits_or_waits_on_an_old_failed_generation() {
     use tensorlake::sandboxes::models::ResizeSandboxResources;
-    for runtime in ["cloud_hypervisor", "gvisor"] {
+    for runtime in ["cloud-hypervisor", "gvisor", "firecracker"] {
         let mut current = resize_info(4, "failed", 1024, Some("old failure"));
         current["runtime"] = runtime.into();
         let (client, task) = resize_server(vec![(200, current)]).await;
@@ -1833,11 +1804,10 @@ fn resize_validation_only_enforces_observable_live_constraints() {
         .to_string()
         .contains("current 1024")
     );
-    for runtime in ["firecracker", "gvisor"] {
+    for runtime in ["firecracker", "gvisor", "cloud-hypervisor"] {
         info.runtime = Some(runtime.into());
-        assert!(request.against(&info).is_err());
+        assert_eq!(request.against(&info).unwrap(), request, "{runtime}");
     }
-    info.runtime = Some("cloud_hypervisor".into());
     for status in ["suspended", "paused", "pending", "terminated"] {
         info.status = status.into();
         assert!(request.against(&info).is_err());

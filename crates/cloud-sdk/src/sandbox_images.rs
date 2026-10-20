@@ -6,7 +6,10 @@ use std::{
     time::Duration,
 };
 
-use crate::docker_config::resolve_docker_config_json;
+use crate::{
+    docker_config::resolve_docker_config_json,
+    image_builds::{ImageBuildError, ImageBuildHandle, InterruptSignal},
+};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use reqwest::{Method, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -173,6 +176,11 @@ pub enum SandboxImageBuildError {
     Json(#[from] serde_json::Error),
     #[error("{0}")]
     Sdk(#[from] SdkError),
+    /// A typed Image Service build-operation outcome (CAS paths only):
+    /// conflict, service-reported failure or cancellation, wait timeout, or
+    /// an explicit interruption. Legacy builds never produce it.
+    #[error(transparent)]
+    Build(#[from] crate::image_builds::ImageBuildError),
     #[error("{0}")]
     Other(String),
 }
@@ -266,11 +274,38 @@ pub struct SandboxImageImportOptions {
     pub image_reference: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SandboxImageBuildEvent {
     Status(String),
-    BuildLog { stream: String, message: String },
+    BuildLog {
+        stream: String,
+        message: String,
+    },
     Warning(String),
+    /// A CAS build was admitted. Emitted once, before any upload or wait, so
+    /// the build id is known as early as possible. Legacy builds never emit
+    /// it.
+    Accepted {
+        build_id: String,
+        client_request_id: Option<String>,
+    },
+    /// A CAS build's observed status, phase or attempt changed.
+    Progress {
+        build_id: String,
+        status: crate::image_builds::ImageBuildStatus,
+        phase: Option<crate::image_builds::ImageBuildPhase>,
+        attempt: u64,
+    },
+    /// A CAS build reached a terminal status.
+    Terminal {
+        build_id: String,
+        status: crate::image_builds::ImageBuildStatus,
+        phase: Option<crate::image_builds::ImageBuildPhase>,
+        attempt: u64,
+    },
+    /// An explicit interruption of a CAS operation finished its cancellation
+    /// handshake; the report says whether the remote build is cancelled.
+    Interrupted(crate::image_builds::InterruptionReport),
 }
 
 #[derive(Debug, Clone)]
@@ -320,6 +355,12 @@ pub(crate) struct DockerfileBuildPlan {
     /// never resolved against the template registry (import always pulls from
     /// the registry, producing a fresh base rootfs).
     pub(crate) import_image_reference: Option<String>,
+    /// `ARG NAME[=default]` instructions declared before the first `FROM`,
+    /// in order: the only build args a `FROM` reference may expand. CAS
+    /// builds expand `$VAR` references from the supplied build args, then
+    /// these defaults, before resolving parents (ADR 0107 D31); the legacy
+    /// path forwards the Dockerfile unchanged and never expands.
+    pub(crate) global_build_args: Vec<(String, Option<String>)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -423,6 +464,26 @@ struct CompleteSandboxTemplateBuildRequest {
 pub async fn build_sandbox_image<F>(
     options: SandboxImageBuildOptions,
     docker_config_json: Option<String>,
+    emit: F,
+) -> Result<Value>
+where
+    F: FnMut(SandboxImageBuildEvent),
+{
+    build_sandbox_image_with_interrupt(options, docker_config_json, &InterruptSignal::new(), emit)
+        .await
+}
+
+/// [`build_sandbox_image`] with an explicit interruption signal. The signal
+/// applies to CAS builds only (`options.common.cas`): triggering it cancels
+/// the remote Image Service operation through the bounded handshake and the
+/// call ends with [`SandboxImageBuildError::Build`] carrying the
+/// [`crate::image_builds::InterruptionReport`]. A legacy build ignores it:
+/// the legacy path keeps its own requests, output, errors and interruption
+/// behavior and never sends an Image Service cancellation.
+pub async fn build_sandbox_image_with_interrupt<F>(
+    options: SandboxImageBuildOptions,
+    docker_config_json: Option<String>,
+    interrupt: &InterruptSignal,
     mut emit: F,
 ) -> Result<Value>
 where
@@ -432,19 +493,7 @@ where
     emit(SandboxImageBuildEvent::Status(
         "Loading Dockerfile...".to_string(),
     ));
-    let plan = if let Some(dockerfile_text) = &options.dockerfile_text {
-        load_dockerfile_text_plan(
-            &options.dockerfile_path,
-            options.context_dir.as_deref(),
-            dockerfile_text.clone(),
-            options.common.registered_name.as_deref(),
-        )?
-    } else {
-        load_dockerfile_plan(
-            &options.dockerfile_path,
-            options.common.registered_name.as_deref(),
-        )?
-    };
+    let plan = load_build_plan(&options)?;
     if options.common.cas {
         // CAS images build through the Image Service: the SDK resolves the
         // plan's references and submits them; the service reconciler drives
@@ -457,6 +506,7 @@ where
             options.context_files,
             options.common,
             registry_credentials_json,
+            interrupt,
             emit,
         )
         .await;
@@ -486,6 +536,21 @@ where
 pub async fn import_sandbox_image<F>(
     options: SandboxImageImportOptions,
     docker_config_json: Option<String>,
+    emit: F,
+) -> Result<Value>
+where
+    F: FnMut(SandboxImageBuildEvent),
+{
+    import_sandbox_image_with_interrupt(options, docker_config_json, &InterruptSignal::new(), emit)
+        .await
+}
+
+/// [`import_sandbox_image`] with an explicit interruption signal, honored
+/// for CAS imports only; see [`build_sandbox_image_with_interrupt`].
+pub async fn import_sandbox_image_with_interrupt<F>(
+    options: SandboxImageImportOptions,
+    docker_config_json: Option<String>,
+    interrupt: &InterruptSignal,
     mut emit: F,
 ) -> Result<Value>
 where
@@ -496,10 +561,7 @@ where
         "Importing registry image {}...",
         options.image_reference
     )));
-    let plan = plan_image_import(
-        &options.image_reference,
-        options.common.registered_name.as_deref(),
-    )?;
+    let plan = load_import_plan(&options)?;
     if options.common.cas {
         return crate::image_service_builds::run_image_service_build(
             plan,
@@ -508,6 +570,7 @@ where
             Vec::new(),
             options.common,
             registry_credentials_json,
+            interrupt,
             emit,
         )
         .await;
@@ -522,6 +585,116 @@ where
     .await
 }
 
+/// Parse and validate the Dockerfile plan for a build, shared by the legacy
+/// and CAS entry points.
+fn load_build_plan(options: &SandboxImageBuildOptions) -> Result<DockerfileBuildPlan> {
+    let plan = if let Some(dockerfile_text) = &options.dockerfile_text {
+        load_dockerfile_text_plan(
+            &options.dockerfile_path,
+            options.context_dir.as_deref(),
+            dockerfile_text.clone(),
+            options.common.registered_name.as_deref(),
+        )?
+    } else {
+        load_dockerfile_plan(
+            &options.dockerfile_path,
+            options.common.registered_name.as_deref(),
+        )?
+    };
+    crate::sandbox_image_catalog::validate_registered_name(&plan.registered_name)
+        .map_err(SandboxImageBuildError::usage)?;
+    Ok(plan)
+}
+
+/// Plan and validate a registry import, shared by the legacy and CAS entry
+/// points.
+fn load_import_plan(options: &SandboxImageImportOptions) -> Result<DockerfileBuildPlan> {
+    let plan = plan_image_import(
+        &options.image_reference,
+        options.common.registered_name.as_deref(),
+    )?;
+    crate::sandbox_image_catalog::validate_registered_name(&plan.registered_name)
+        .map_err(SandboxImageBuildError::usage)?;
+    Ok(plan)
+}
+
+/// The Image Service operation behind [`crate::image_builds::start_build`]:
+/// admit a CAS Dockerfile build and upload and seal its context, without
+/// waiting. Refuses legacy options before any request.
+pub(crate) async fn start_cas_build<F>(
+    options: SandboxImageBuildOptions,
+    docker_config_json: Option<String>,
+    interrupt: &InterruptSignal,
+    mut emit: F,
+) -> std::result::Result<ImageBuildHandle, ImageBuildError>
+where
+    F: FnMut(SandboxImageBuildEvent),
+{
+    require_cas(&options.common, "start_build")?;
+    let registry_credentials_json = resolve_docker_config_json(docker_config_json)?;
+    emit(SandboxImageBuildEvent::Status(
+        "Loading Dockerfile...".to_string(),
+    ));
+    let plan = load_build_plan(&options)?;
+    let dockerfile_path = options.dockerfile_path.clone();
+    crate::image_service_builds::start_image_service_build(
+        plan,
+        Some(&dockerfile_path),
+        options.build_args,
+        options.context_files,
+        options.common,
+        registry_credentials_json,
+        interrupt,
+        emit,
+    )
+    .await
+}
+
+/// The Image Service operation behind [`crate::image_builds::start_import`].
+pub(crate) async fn start_cas_import<F>(
+    options: SandboxImageImportOptions,
+    docker_config_json: Option<String>,
+    interrupt: &InterruptSignal,
+    mut emit: F,
+) -> std::result::Result<ImageBuildHandle, ImageBuildError>
+where
+    F: FnMut(SandboxImageBuildEvent),
+{
+    require_cas(&options.common, "start_import")?;
+    let registry_credentials_json = resolve_docker_config_json(docker_config_json)?;
+    emit(SandboxImageBuildEvent::Status(format!(
+        "Importing registry image {}...",
+        options.image_reference
+    )));
+    let plan = load_import_plan(&options)?;
+    crate::image_service_builds::start_image_service_build(
+        plan,
+        None,
+        Vec::new(),
+        Vec::new(),
+        options.common,
+        registry_credentials_json,
+        interrupt,
+        emit,
+    )
+    .await
+}
+
+/// The new build operations exist for CAS images only. Options that
+/// positively select the legacy builder are refused locally, before any
+/// Image Service or platform request.
+fn require_cas(
+    options: &CommonBuildOptions,
+    operation: &str,
+) -> std::result::Result<(), ImageBuildError> {
+    if options.cas {
+        return Ok(());
+    }
+    Err(ImageBuildError::usage(format!(
+        "{operation} is an Image Service operation for CAS images and is unsupported for legacy          images; set cas (--cas) to use it, or build the legacy image with the existing          build/import call"
+    )))
+}
+
 /// Resolve the authenticated Image Service ingress used for CAS catalog
 /// operations. Exposed for CLI catalog listing so builds and lists honor the
 /// same local-development override.
@@ -529,20 +702,14 @@ pub fn cas_image_service_url(api_url: &str) -> String {
     crate::image_service_builds::image_service_url(api_url)
 }
 
-/// Shared build pipeline: provision the rootfs-builder sandbox, materialize the
-/// filesystem from `plan`, and register the resulting snapshot. Both the
-/// Dockerfile build and registry import paths funnel through here once they
-/// have produced a [`DockerfileBuildPlan`].
-async fn run_build_plan<F>(
-    plan: DockerfileBuildPlan,
-    options: CommonBuildOptions,
-    context_files: Vec<SandboxImageContextFile>,
-    registry_credentials_json: Option<String>,
-    mut emit: F,
-) -> Result<Value>
-where
-    F: FnMut(SandboxImageBuildEvent),
-{
+/// The planning summary every build mode prints the same way (ADR 0107
+/// D28): the selected name, the Dockerfile instructions that run at build
+/// time but do not shape a running sandbox, and the references the SDK could
+/// not resolve against a Tensorlake catalog.
+pub(crate) fn emit_plan_warnings(
+    plan: &DockerfileBuildPlan,
+    emit: &mut impl FnMut(SandboxImageBuildEvent),
+) {
     emit(SandboxImageBuildEvent::Status(format!(
         "Selected image name: {}",
         plan.registered_name
@@ -572,6 +739,23 @@ where
             unresolvable.line_number, unresolvable.reference, detail, unresolvable.reference,
         )));
     }
+}
+
+/// Shared build pipeline: provision the rootfs-builder sandbox, materialize the
+/// filesystem from `plan`, and register the resulting snapshot. Both the
+/// Dockerfile build and registry import paths funnel through here once they
+/// have produced a [`DockerfileBuildPlan`].
+async fn run_build_plan<F>(
+    plan: DockerfileBuildPlan,
+    options: CommonBuildOptions,
+    context_files: Vec<SandboxImageContextFile>,
+    registry_credentials_json: Option<String>,
+    mut emit: F,
+) -> Result<Value>
+where
+    F: FnMut(SandboxImageBuildEvent),
+{
+    emit_plan_warnings(&plan, &mut emit);
     if options.docker_compat {
         emit(SandboxImageBuildEvent::Warning(
             "Docker compatibility mode is enabled. This uses Docker/BuildKit export for rootfs \
@@ -835,7 +1019,7 @@ pub(crate) fn resolve_build_context(options: CommonBuildOptions) -> Result<Resol
     })
 }
 
-fn platform_client(ctx: &ResolvedBuildContext) -> Result<Client> {
+pub(crate) fn platform_client(ctx: &ResolvedBuildContext) -> Result<Client> {
     client_builder(
         &ctx.api_url,
         &ctx.bearer_token,
@@ -846,6 +1030,29 @@ fn platform_client(ctx: &ResolvedBuildContext) -> Result<Client> {
     )
     .build()
     .map_err(Into::into)
+}
+
+/// The platform template registry client for a build context: explicitly
+/// addressed for PAT scope, token-scoped for API keys.
+pub(crate) fn sandbox_templates_client_for(
+    ctx: &ResolvedBuildContext,
+    client: Client,
+) -> Result<crate::sandbox_templates::SandboxTemplatesClient> {
+    match (&ctx.organization_id, &ctx.project_id) {
+        (Some(organization_id), Some(project_id)) => {
+            Ok(crate::sandbox_templates::SandboxTemplatesClient::new(
+                client,
+                organization_id.clone(),
+                project_id.clone(),
+            ))
+        }
+        (None, None) => {
+            Ok(crate::sandbox_templates::SandboxTemplatesClient::new_api_key_scoped(client))
+        }
+        _ => Err(SandboxImageBuildError::auth(
+            "Sandbox image build scope is incomplete",
+        )),
+    }
 }
 
 pub(crate) fn sandbox_lifecycle_client(ctx: &ResolvedBuildContext) -> Result<Client> {
@@ -998,23 +1205,7 @@ async fn prepare_rootfs_build(
     // registry. The final-stage FROM is treated separately so its resolution
     // becomes the lineage parent; the additional references (earlier stages,
     // COPY --from, RUN --mount=,from) become preload-only local images.
-    let templates = match (&ctx.organization_id, &ctx.project_id) {
-        (Some(organization_id), Some(project_id)) => {
-            crate::sandbox_templates::SandboxTemplatesClient::new(
-                client.clone(),
-                organization_id.clone(),
-                project_id.clone(),
-            )
-        }
-        (None, None) => {
-            crate::sandbox_templates::SandboxTemplatesClient::new_api_key_scoped(client.clone())
-        }
-        _ => {
-            return Err(SandboxImageBuildError::auth(
-                "Sandbox image build scope is incomplete",
-            ));
-        }
-    };
+    let templates = sandbox_templates_client_for(ctx, client.clone())?;
 
     // Skip the lookup when the final-stage FROM is `FROM <stage-alias>` —
     // the value is an internal reference to an earlier-defined stage, not
@@ -2587,6 +2778,7 @@ fn plan_image_import(
         unresolvable_image_references: Vec::new(),
         ignored_instructions: Vec::new(),
         import_image_reference: Some(image_ref.to_string()),
+        global_build_args: Vec::new(),
     })
 }
 
@@ -2666,9 +2858,16 @@ fn load_dockerfile_text_plan(
         std::collections::HashSet::new();
     let mut unresolvable_image_references: Vec<UnresolvableImageReference> = Vec::new();
     let mut ignored_instructions: Vec<(usize, String)> = Vec::new();
+    let mut global_build_args: Vec<(String, Option<String>)> = Vec::new();
 
     for (line_number, line) in logical_dockerfile_lines(&dockerfile_text) {
         let (keyword, value) = split_instruction(&line, line_number)?;
+        if keyword == "ARG" && final_from_image.is_none() && stage_aliases.is_empty() {
+            // Only ARGs declared before the first FROM are visible to FROM
+            // references (Docker's global build-arg scope).
+            global_build_args.extend(parse_arg_declarations(&value));
+            continue;
+        }
         if keyword == "FROM" {
             let (image, alias) = parse_from_value_with_alias(&value, line_number)?;
             // If a prior FROM had set the "final image" candidate, demote it
@@ -2770,7 +2969,28 @@ fn load_dockerfile_text_plan(
         unresolvable_image_references,
         ignored_instructions,
         import_image_reference: None,
+        global_build_args,
     })
+}
+
+/// Parse the declarations of one `ARG` instruction: `NAME`, `NAME=value`,
+/// `NAME="quoted value"`, several per instruction.
+fn parse_arg_declarations(value: &str) -> Vec<(String, Option<String>)> {
+    let tokens = shlex_split(value).unwrap_or_else(|| {
+        value
+            .split_whitespace()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    });
+    tokens
+        .into_iter()
+        .filter(|token| !token.is_empty())
+        .map(|token| match token.split_once('=') {
+            Some((name, default)) => (name.to_string(), Some(default.to_string())),
+            None => (token, None),
+        })
+        .filter(|(name, _)| !name.is_empty())
+        .collect()
 }
 
 fn default_registered_name(dockerfile_path: &Path) -> String {
@@ -4157,6 +4377,7 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
             unresolvable_image_references: Vec::new(),
             ignored_instructions: Vec::new(),
             import_image_reference: None,
+            global_build_args: Vec::new(),
         };
 
         let spec = build_rootfs_spec(
@@ -4192,6 +4413,7 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
             unresolvable_image_references: Vec::new(),
             ignored_instructions: Vec::new(),
             import_image_reference: None,
+            global_build_args: Vec::new(),
         };
 
         let spec = build_rootfs_spec(&prepared_spec, &prepared, &plan, None, None, false).unwrap();

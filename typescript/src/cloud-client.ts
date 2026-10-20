@@ -3,6 +3,13 @@ import { nanoid } from "nanoid";
 import * as defaults from "./defaults.js";
 import { NativeCloudTransport } from "./native-cloud.js";
 import { fromSnakeKeys } from "./models.js";
+import {
+  deleteSandboxImageWithCredentials,
+  findSandboxImageByNameWithCredentials,
+  listSandboxImagesWithCredentials,
+  type SandboxImageCatalogCredentials,
+} from "./sandbox-image.js";
+import type { SandboxTemplate } from "./cloud-models.js";
 import type {
   ApplicationBuildContext,
   ApplicationBuildResponse,
@@ -17,7 +24,6 @@ import type {
   RequestInput,
   RequestMetadata,
   RequestOutput,
-  SandboxTemplate,
   Secret,
   SecretsList,
   StartImageBuildRequest,
@@ -26,11 +32,15 @@ import type {
 
 export class CloudClient {
   private readonly transport: NativeCloudTransport;
+  private readonly apiUrl: string;
+  private readonly apiKey?: string;
   private readonly organizationId?: string;
   private readonly projectId?: string;
   private readonly namespace: string;
 
   constructor(options?: CloudClientOptions) {
+    this.apiUrl = options?.apiUrl ?? defaults.API_URL;
+    this.apiKey = options?.apiKey ?? defaults.API_KEY;
     this.organizationId = options?.organizationId;
     this.projectId = options?.projectId;
     this.namespace = options?.namespace ?? defaults.NAMESPACE;
@@ -102,69 +112,58 @@ export class CloudClient {
     );
   }
 
+  /**
+   * Delete a registered sandbox image by name or id through the merged
+   * catalog, with this client's credentials: an `image_` id or a name the
+   * Image Service knows deletes a CAS image, a `sandbox_template_` id or a
+   * name registered only in the platform registry deletes a legacy image.
+   * Rejects when neither catalog knows the reference. The same semantics
+   * and accepted differences as the module-level `deleteSandboxImage`.
+   */
   async deleteSandboxImage(imageName: string): Promise<void> {
-    await this.transport.requestResponse(
-      "DELETE",
-      this.namespacePath(`sandbox-images/${encodeURIComponent(imageName)}`),
-    );
+    await deleteSandboxImageWithCredentials(this.catalogCredentials(), imageName);
   }
 
   /**
-   * Look up a registered sandbox image (template) by its registered name.
-   *
-   * Returns the template, or `null` when no image with that name exists.
-   * API-key clients may omit organization/project IDs and use the
-   * token-scoped Platform API route directly. Explicit scope remains
-   * available for PAT callers.
+   * Look up a registered sandbox image by name or id through the merged
+   * catalog, with this client's credentials. Returns the image in the
+   * sandbox-template shape, or `null` when neither the Image Service nor the
+   * platform registry knows the reference. An explicit organization/project
+   * scope (the client's, or the call's override) addresses that project's
+   * routes directly, as before; without one the key's own scope applies.
    */
   async findSandboxImageByName(
     imageName: string,
     options?: { organizationId?: string; projectId?: string },
   ): Promise<SandboxTemplate | null> {
-    const base = this.platformProjectPath(
-      "sandbox-templates",
-      options?.organizationId,
-      options?.projectId,
+    return findSandboxImageByNameWithCredentials(
+      this.catalogCredentials(options),
+      imageName,
     );
-    const response = await this.transport.requestResponse(
-      "GET",
-      `${base}/by-name/${encodeURIComponent(imageName)}`,
-      { statusOnlyCodes: new Set([404]) },
-    );
-    if (response.status === 404) {
-      return null;
-    }
-    const raw = await parseJsonResponse<Record<string, unknown>>(response);
-    return fromSnakeKeys(raw) as SandboxTemplate;
   }
 
   /**
-   * List all registered sandbox images (templates), following pagination to
-   * the end. API-key clients may omit organization/project IDs and use the
-   * token-scoped Platform API route directly.
+   * List every registered sandbox image of the project (CAS and legacy, in
+   * the sandbox-template shape, newest first) through the merged catalog,
+   * with this client's credentials. An explicit organization/project scope
+   * (the client's, or the call's override) addresses that project's routes
+   * directly, as before; without one the key's own scope applies.
    */
   async listSandboxImages(
     options?: { organizationId?: string; projectId?: string },
   ): Promise<SandboxTemplate[]> {
-    const base = this.platformProjectPath(
-      "sandbox-templates",
-      options?.organizationId,
-      options?.projectId,
-    );
-    let path: string | null = `${base}?pageSize=100`;
-    const templates: SandboxTemplate[] = [];
-    while (path !== null) {
-      const page: SandboxTemplatesPage = await this.transport.requestJson<SandboxTemplatesPage>(
-        "GET",
-        path,
-      );
-      for (const item of page.items ?? []) {
-        templates.push(fromSnakeKeys(item) as SandboxTemplate);
-      }
-      const next = page.pagination?.next;
-      path = next ? nextRequestPath(next) : null;
-    }
-    return templates;
+    return listSandboxImagesWithCredentials(this.catalogCredentials(options));
+  }
+
+  private catalogCredentials(
+    options?: { organizationId?: string; projectId?: string },
+  ): SandboxImageCatalogCredentials {
+    return {
+      apiUrl: this.apiUrl,
+      apiKey: this.apiKey,
+      organizationId: options?.organizationId ?? this.organizationId,
+      projectId: options?.projectId ?? this.projectId,
+    };
   }
 
   async applications(): Promise<ApplicationSummary[]> {
@@ -497,24 +496,6 @@ export class CloudClient {
     return publicEndpointIdFromManifest(application);
   }
 
-  private platformProjectPath(
-    resource: "sandbox-templates",
-    organizationId?: string,
-    projectId?: string,
-  ): string {
-    const resolvedOrganizationId = organizationId ?? this.organizationId;
-    const resolvedProjectId = projectId ?? this.projectId;
-    if (!resolvedOrganizationId && !resolvedProjectId) {
-      return `/platform/v1/${resource}`;
-    }
-    if (!resolvedOrganizationId || !resolvedProjectId) {
-      throw new Error(
-        "organizationId and projectId must be provided together",
-      );
-    }
-    return `/platform/v1/organizations/${encodeURIComponent(resolvedOrganizationId)}/projects/${encodeURIComponent(resolvedProjectId)}/${resource}`;
-  }
-
   private secretCollectionPath(
     organizationId?: string,
     projectId?: string,
@@ -620,28 +601,6 @@ function createApplicationBuildForm(
 
 function trimTrailingSlashes(value: string): string {
   return value.endsWith("/") ? value.slice(0, -1) : value;
-}
-
-/** One page of the paginated sandbox-templates list response. */
-interface SandboxTemplatesPage {
-  items?: Record<string, unknown>[];
-  pagination?: { next?: string };
-}
-
-/**
- * Reduce a `pagination.next` link to a base-URL-relative request path. The
- * server may return either an absolute URL or an absolute path; the HTTP
- * client always prepends its base URL, so absolute URLs must be reduced to
- * their path+query first.
- */
-function nextRequestPath(next: string): string {
-  const schemeIndex = next.indexOf("://");
-  if (schemeIndex !== -1) {
-    const afterScheme = next.slice(schemeIndex + 3);
-    const slashIndex = afterScheme.indexOf("/");
-    return slashIndex === -1 ? "/" : afterScheme.slice(slashIndex);
-  }
-  return next.startsWith("/") ? next : `/${next}`;
 }
 
 function toBlobPart(data: BinaryPayload): string | Blob | ArrayBuffer {

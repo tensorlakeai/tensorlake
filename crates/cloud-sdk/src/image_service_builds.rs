@@ -7,11 +7,14 @@
 //! project and its reconciler drives the builder sandbox, mounting one
 //! read-only parent volume per pin beside the writable target and disposable
 //! scratch volumes, and snapshotting the target through the CAS filesystem
-//! daemon. The client
-//! creates the build, uploads and seals the context, and polls it to
-//! completion. While an active attempt exposes its ephemeral builder sandbox,
-//! the client may also follow `tl-image-builder` output through the existing
-//! project-scoped sandbox APIs; Image Service status remains authoritative.
+//! daemon. The client admits the build under an opaque client request id
+//! (`Idempotency-Key`), uploads and seals the context, and polls the build to
+//! a terminal status, reconnecting across transient failures and honoring the
+//! service-reported operation deadline. While an active attempt exposes its
+//! ephemeral builder sandbox, the client may also follow `tl-image-builder`
+//! output through the existing project-scoped sandbox APIs; Image Service
+//! status remains authoritative. The public surface is
+//! [`crate::image_builds`]; this module holds the mechanics.
 
 use std::{
     collections::HashSet,
@@ -21,25 +24,42 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use reqwest::{Method, StatusCode, header::CONTENT_LENGTH};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use tokio::time::Instant;
 
 use crate::{
     Client,
-    sandbox_images::{
-        CommonBuildOptions, DockerfileBuildPlan, SandboxImageBuildError, SandboxImageBuildEvent,
-        SandboxImageContextFile, client_builder, collect_dir_files, follow_started_process_output,
-        is_localhost, normalize_context_file_path, open_context_file, resolve_build_context,
-        sandbox_lifecycle_client, sandbox_proxy_client,
+    error::SdkError,
+    image_builds::{
+        CANCEL_HANDSHAKE_BUDGET, CancelBuildOutcome, CancelBuildResponse, CancelBuildSelector,
+        ContextUploadCapability, DEFAULT_WAIT_LIMIT, IDEMPOTENCY_KEY_HEADER, ImageBuildClient,
+        ImageBuildClientOptions, ImageBuildConflict, ImageBuildError, ImageBuildHandle,
+        ImageBuildInfo, ImageBuildPhase, ImageBuildResult, ImageBuildStatus, ImageBuildWaitOptions,
+        InterruptSignal, InterruptionOutcome, InterruptionReport, new_client_request_id,
     },
+    sandbox_image_catalog::{
+        IMAGE_SERVICE_ID_PREFIX, ImageServiceImage, RegistrationWait, is_image_service_id,
+    },
+    sandbox_images::{
+        CommonBuildOptions, DockerfileBuildPlan, ResolvedBuildContext, SandboxImageBuildError,
+        SandboxImageBuildEvent, SandboxImageContextFile, UnresolvableImageReferenceReason,
+        client_builder, collect_dir_files, emit_plan_warnings, follow_started_process_output,
+        is_localhost, normalize_context_file_path, open_context_file, platform_client,
+        resolve_build_context, sandbox_lifecycle_client, sandbox_proxy_client,
+        sandbox_templates_client_for,
+    },
+    sandbox_templates::SandboxTemplatesClient,
     sandboxes::{SandboxesClient, models::ProcessInfo},
 };
 
 type Result<T> = std::result::Result<T, SandboxImageBuildError>;
+type BuildResult<T> = std::result::Result<T, ImageBuildError>;
 
 /// Base URL of the Image Service. Until the platform gateway routes to the
 /// service, CAS builds require this to be set explicitly.
@@ -51,10 +71,10 @@ pub const IMAGE_SERVICE_URL_ENV: &str = "TENSORLAKE_IMAGE_SERVICE_URL";
 /// prefix-relative (`/builds`, not `/v1/builds`).
 const IMAGE_SERVICE_INGRESS_PATH: &str = "/images/v4";
 
-/// Immutable image reference prefix (`cas-v1:<64 hex sha256>`). A Dockerfile
-/// reference written in this form pins the image id directly, with no
-/// catalog name lookup.
-const CAS_IMAGE_REF_PREFIX: &str = "cas-v1:";
+/// The retired immutable reference scheme. A Dockerfile reference written in
+/// this form is refused: parents are pinned by name or `image_` id (ADR 0107
+/// D16, D32).
+const CAS_V1_REFERENCE_PREFIX: &str = "cas-v1:";
 
 /// Where the Dockerfile text is injected into the context tar when the
 /// Dockerfile does not live inside the context directory (`-f` outside the
@@ -71,18 +91,36 @@ const MAX_PINNED_PARENTS: usize = 3;
 const DEFAULT_CAS_IMAGE_DISK_MB: u64 = 10 * 1024;
 const BYTES_PER_MIB: u64 = 1024 * 1024;
 
-const BUILD_POLL_INTERVAL: Duration = Duration::from_secs(3);
-const BUILD_POLL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+pub(crate) const BUILD_POLL_INTERVAL: Duration = Duration::from_secs(3);
 const BUILDER_LOG_CHANNEL_CAPACITY: usize = 256;
 const BUILDER_LOG_DRAIN_GRACE: Duration = Duration::from_secs(2);
 const BUILDER_PROCESS_DISCOVERY_ATTEMPTS: usize = 10;
 const BUILDER_PROCESS_DISCOVERY_INTERVAL: Duration = Duration::from_secs(1);
 const IMAGE_BUILDER_COMMAND: &str = "tl-image-builder";
 
-/// Run a build plan through the Image Service. `dockerfile_path` is the
-/// local Dockerfile path for Dockerfile builds (used only to decide whether
-/// the file already lives inside the context directory); import plans carry
-/// no Dockerfile.
+/// How long an admission, seal or lookup keeps reconnecting across transient
+/// failures. Admission replays carry the same `Idempotency-Key`, so a replay
+/// joins the operation the first attempt may already have created.
+const ADMISSION_RETRY_BUDGET: Duration = Duration::from_secs(120);
+/// How long a single build lookup keeps reconnecting.
+const LOOKUP_RETRY_BUDGET: Duration = Duration::from_secs(30);
+/// Upper bound on one Image Service request. The clients set no transport
+/// timeout, so without it a stalled connection would hang a caller past
+/// every budget above; a request that hits it is a retryable failure and
+/// the reconnect loop decides whether its deadline still allows another.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+/// Reconnect backoff: `0.5 s × 2^n`, capped here, with ±25% jitter.
+const MAX_RECONNECT_BACKOFF: Duration = Duration::from_secs(15);
+/// Cap on a `Retry-After` the service asks for.
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
+
+/// Run a build plan through the Image Service to publication: admit, upload
+/// and seal where required, then wait. `dockerfile_path` is the local
+/// Dockerfile path for Dockerfile builds (used only to decide whether the
+/// file already lives inside the context directory); import plans carry no
+/// Dockerfile. The result is the published image in the platform template
+/// shape, as before.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_image_service_build<F>(
     plan: DockerfileBuildPlan,
     dockerfile_path: Option<&Path>,
@@ -90,11 +128,68 @@ pub(crate) async fn run_image_service_build<F>(
     context_files: Vec<SandboxImageContextFile>,
     options: CommonBuildOptions,
     registry_credentials_json: Option<String>,
+    interrupt: &InterruptSignal,
     mut emit: F,
 ) -> Result<Value>
 where
     F: FnMut(SandboxImageBuildEvent),
 {
+    let registered_name = plan.registered_name.clone();
+    let mut handle = start_image_service_build(
+        plan,
+        dockerfile_path,
+        build_args,
+        context_files,
+        options,
+        registry_credentials_json,
+        interrupt,
+        &mut emit,
+    )
+    .await?;
+    let result = handle
+        .wait(
+            ImageBuildWaitOptions {
+                timeout: None,
+                follow_logs: true,
+            },
+            interrupt,
+            &mut emit,
+        )
+        .await?;
+    // The record is returned in the platform template shape so callers of
+    // both build paths receive one record kind (ADR 0107 D18, D28).
+    emit(SandboxImageBuildEvent::Status(format!(
+        "Image '{registered_name}' registered ({})",
+        result.id.as_deref().unwrap_or("-")
+    )));
+    Ok(serde_json::to_value(result)?)
+}
+
+/// Admit a build plan without waiting: resolve parents, admit under a fresh
+/// client request id, and for Dockerfile builds upload and seal the context.
+/// Triggering `interrupt` at any point runs the cancellation handshake —
+/// by client request id while the admission is unresolved, by build id once
+/// admitted — and ends with [`ImageBuildError::Interrupted`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn start_image_service_build<F>(
+    plan: DockerfileBuildPlan,
+    dockerfile_path: Option<&Path>,
+    build_args: Vec<(String, String)>,
+    context_files: Vec<SandboxImageContextFile>,
+    options: CommonBuildOptions,
+    registry_credentials_json: Option<String>,
+    interrupt: &InterruptSignal,
+    mut emit: F,
+) -> BuildResult<ImageBuildHandle>
+where
+    F: FnMut(SandboxImageBuildEvent),
+{
+    // Build args expand `FROM` references before parents are resolved, so a
+    // `FROM python:${PY_TAG}` with a supplied or defaulted PY_TAG pins the
+    // registered image it names; only references left with an unexpanded
+    // variable remain unresolvable and are warned about.
+    let plan = expand_build_arg_references(plan, &build_args);
+    emit_plan_warnings(&plan, &mut emit);
     warn_ignored_options(&options, &mut emit);
     let disk_mb = cas_target_disk_mb(options.disk_mb)?;
     let is_public = options.is_public;
@@ -111,21 +206,17 @@ where
     // Ingress authenticates the bearer credential and injects the canonical project header.
     // Image Service deliberately accepts no project selector in bodies or query strings.
     let ctx = resolve_build_context(options)?;
-    let image_service_url = image_service_url(&ctx.api_url);
-    let client = client_builder(
-        &image_service_url,
-        &ctx.bearer_token,
-        ctx.use_scope_headers,
-        ctx.organization_id.as_deref(),
-        ctx.project_id.as_deref(),
-        ctx.user_agent.as_deref(),
-    )
-    .build()?;
+    let client = image_service_client(&ctx)?;
+    // Generated once, before the first admission attempt, and retained across
+    // every retry of it: a replay joins the operation rather than admitting a
+    // second one.
+    let request_id = new_client_request_id();
 
-    if let Some(import_reference) = plan.import_image_reference.clone() {
-        let created = create_build(
+    let created = if let Some(import_reference) = plan.import_image_reference.clone() {
+        admit_build(
             &client,
-            build_request(
+            "/builds",
+            &build_request(
                 json!({
                     "kind": "import",
                     "image_ref": import_reference,
@@ -136,54 +227,118 @@ where
                 builder_resources,
                 registry_credentials_json,
             ),
+            &request_id,
+            interrupt,
+            &mut emit,
+        )
+        .await?
+        .info
+    } else {
+        // A legacy template named like a Dockerfile reference cannot be a CAS
+        // parent; the platform registry is consulted only to say so (D32).
+        let templates = sandbox_templates_client_for(&ctx, platform_client(&ctx)?)?;
+        let parents = resolve_parents(&client, &templates, &plan, &mut emit).await?;
+        let (dockerfile_in_context, injected_dockerfile) =
+            context_dockerfile(&plan, dockerfile_path)?;
+        let created = admit_build(
+            &client,
+            "/builds",
+            &build_request(
+                json!({
+                    "kind": "dockerfile",
+                    "dockerfile_path": dockerfile_in_context,
+                    "parents": parents,
+                    "build_args": build_args
+                        .iter()
+                        .cloned()
+                        .collect::<std::collections::BTreeMap<String, String>>(),
+                    "name": plan.registered_name,
+                }),
+                is_public,
+                disk_mb,
+                builder_resources,
+                registry_credentials_json,
+            ),
+            &request_id,
+            interrupt,
             &mut emit,
         )
         .await?;
-        return wait_for_publication(&client, &ctx, &created, &plan.registered_name, emit).await;
-    }
+        let upload = created.context_upload.clone().ok_or_else(|| {
+            ImageBuildError::other(
+                "Image Service build creation returned no context upload capability",
+            )
+        })?;
+        let sealed = tokio::select! {
+            biased;
+            _ = interrupt.triggered() => None,
+            sealed = upload_and_seal_context(
+                &client,
+                &created.info.build_id,
+                &upload,
+                &plan,
+                injected_dockerfile.as_deref(),
+                &context_files,
+                &mut emit,
+            ) => Some(sealed),
+        };
+        match sealed {
+            Some(sealed) => sealed?,
+            None => {
+                let report =
+                    interruption_for_build(&client, &created.info.build_id, Some(&request_id))
+                        .await;
+                emit(SandboxImageBuildEvent::Interrupted(report.clone()));
+                return Err(ImageBuildError::Interrupted(report));
+            }
+        }
+        created.info
+    };
 
-    let parents = resolve_parents(&client, &plan, &mut emit).await?;
-    let (dockerfile_in_context, injected_dockerfile) = context_dockerfile(&plan, dockerfile_path)?;
-    let created = create_build(
-        &client,
-        build_request(
-            json!({
-                "kind": "dockerfile",
-                "dockerfile_path": dockerfile_in_context,
-                "parents": parents,
-                "build_args": build_args
-                    .iter()
-                    .cloned()
-                    .collect::<std::collections::BTreeMap<String, String>>(),
-                "name": plan.registered_name,
-            }),
-            is_public,
-            disk_mb,
-            builder_resources,
-            registry_credentials_json,
-        ),
-        &mut emit,
-    )
-    .await?;
-    let build_id = build_id_of(&created)?;
+    Ok(ImageBuildHandle {
+        client: ImageBuildClient { client, ctx },
+        build_id: created.build_id.clone(),
+        client_request_id: Some(request_id),
+        info: created,
+    })
+}
 
-    let upload = created.get("context_upload").cloned().ok_or_else(|| {
-        SandboxImageBuildError::other(
-            "Image Service build creation returned no context upload capability",
-        )
+/// Build the lookup/cancel client behind [`ImageBuildClient::new`].
+pub(crate) fn image_build_client(
+    options: ImageBuildClientOptions,
+) -> BuildResult<ImageBuildClient> {
+    let ctx = resolve_build_context(CommonBuildOptions {
+        api_url: options.api_url,
+        bearer_token: options.bearer_token,
+        use_scope_headers: options.use_scope_headers,
+        organization_id: options.organization_id,
+        project_id: options.project_id,
+        namespace: options.namespace,
+        registered_name: None,
+        disk_mb: None,
+        builder_disk_mb: None,
+        cpus: None,
+        memory_mb: None,
+        is_public: false,
+        cas: true,
+        user_agent: options.user_agent,
+        docker_compat: false,
     })?;
-    upload_and_seal_context(
-        &client,
-        &build_id,
-        &upload,
-        &plan,
-        injected_dockerfile.as_deref(),
-        &context_files,
-        &mut emit,
-    )
-    .await?;
+    let client = image_service_client(&ctx)?;
+    Ok(ImageBuildClient { client, ctx })
+}
 
-    wait_for_publication(&client, &ctx, &created, &plan.registered_name, emit).await
+fn image_service_client(ctx: &ResolvedBuildContext) -> BuildResult<Client> {
+    let image_service_url = image_service_url(&ctx.api_url);
+    Ok(client_builder(
+        &image_service_url,
+        &ctx.bearer_token,
+        ctx.use_scope_headers,
+        ctx.organization_id.as_deref(),
+        ctx.project_id.as_deref(),
+        ctx.user_agent.as_deref(),
+    )
+    .build()?)
 }
 
 /// Base URL for the Image Service.
@@ -288,36 +443,135 @@ fn builder_resource_overrides(options: &CommonBuildOptions) -> Result<Option<Val
     Ok((!resources.is_empty()).then_some(Value::Object(resources)))
 }
 
-/// Builder-rootfs sizing and compatibility mode belong to the legacy
-/// platform-api rootfs builder. `disk_mb` is supported by Image Service and
-/// sizes the final published target; `builder_disk_mb` remains legacy-only.
+/// Builder-rootfs sizing belongs to the legacy platform-api rootfs builder:
+/// the Image Service sizes the builder's scratch space from `disk_mb`, which
+/// also sizes the published target. Docker compatibility mode needs no
+/// warning: CAS builds always run BuildKit (ADR 0107 D29).
 fn warn_ignored_options(
     options: &CommonBuildOptions,
     emit: &mut impl FnMut(SandboxImageBuildEvent),
 ) {
-    let mut ignored = Vec::new();
     if options.builder_disk_mb.is_some() {
-        ignored.push("builder_disk_mb");
-    }
-    if options.docker_compat {
-        ignored.push("docker_compat");
-    }
-    if !ignored.is_empty() {
-        emit(SandboxImageBuildEvent::Warning(format!(
-            "Image Service builds ignore: {}.",
-            ignored.join(", ")
-        )));
+        emit(SandboxImageBuildEvent::Warning(
+            "builder_disk_mb is ignored for CAS builds: the builder's disk is sized from \
+             disk_mb, the size of the published image."
+                .to_string(),
+        ));
     }
 }
 
+/// Expand `$VAR`, `${VAR}`, `${VAR:-default}` and `${VAR-default}` in the
+/// plan's `FROM` references from the supplied build args, then the
+/// Dockerfile's global `ARG` defaults (ADR 0107 D31). References that still
+/// carry a variable afterwards stay unresolvable; references that expanded
+/// completely become ordinary catalog candidates. The Dockerfile text itself
+/// is untouched: BuildKit performs the same expansion in the builder.
+pub(crate) fn expand_build_arg_references(
+    mut plan: DockerfileBuildPlan,
+    build_args: &[(String, String)],
+) -> DockerfileBuildPlan {
+    let lookup = |name: &str| -> Option<String> {
+        build_args
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.clone())
+            .or_else(|| {
+                plan.global_build_args
+                    .iter()
+                    .find(|(key, _)| key == name)
+                    .and_then(|(_, default)| default.clone())
+            })
+    };
+    let expanded_base = expand_reference(&plan.base_image, &lookup);
+    let expanded_additional: Vec<String> = plan
+        .unresolvable_image_references
+        .iter()
+        .filter(|unresolvable| {
+            unresolvable.reason == UnresolvableImageReferenceReason::BuildArgExpansion
+                && unresolvable.reference != plan.base_image
+        })
+        .filter_map(|unresolvable| {
+            let expanded = expand_reference(&unresolvable.reference, &lookup);
+            (!expanded.contains('$')).then_some(expanded)
+        })
+        .collect();
+    let base_expanded = expanded_base != plan.base_image && !expanded_base.contains('$');
+    plan.unresolvable_image_references.retain(|unresolvable| {
+        if unresolvable.reason != UnresolvableImageReferenceReason::BuildArgExpansion {
+            return true;
+        }
+        expand_reference(&unresolvable.reference, &lookup).contains('$')
+    });
+    for reference in expanded_additional {
+        if reference != expanded_base
+            && !reference.eq_ignore_ascii_case("scratch")
+            && !plan.additional_image_references.contains(&reference)
+        {
+            plan.additional_image_references.push(reference);
+        }
+    }
+    if base_expanded {
+        plan.base_image = expanded_base;
+    }
+    plan
+}
+
+/// Substitute Dockerfile-style variable references in one image reference.
+fn expand_reference(reference: &str, lookup: &dyn Fn(&str) -> Option<String>) -> String {
+    let mut out = String::with_capacity(reference.len());
+    let mut rest = reference;
+    while let Some(index) = rest.find('$') {
+        out.push_str(&rest[..index]);
+        let after = &rest[index + 1..];
+        if let Some(inner) = after.strip_prefix('{') {
+            let Some(close) = inner.find('}') else {
+                out.push_str(&rest[index..]);
+                return out;
+            };
+            let expression = &inner[..close];
+            let (name, default) = match expression.split_once(":-") {
+                Some((name, default)) => (name, Some(default)),
+                None => match expression.split_once('-') {
+                    Some((name, default)) => (name, Some(default)),
+                    None => (expression, None),
+                },
+            };
+            match lookup(name) {
+                Some(value) if !value.is_empty() || default.is_none() => out.push_str(&value),
+                _ => match default {
+                    Some(default) => out.push_str(default),
+                    None => out.push_str(&rest[index..index + 2 + close + 1]),
+                },
+            }
+            rest = &inner[close + 1..];
+        } else {
+            let end = after
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .unwrap_or(after.len());
+            let name = &after[..end];
+            match lookup(name) {
+                Some(value) if !name.is_empty() => out.push_str(&value),
+                _ => out.push_str(&rest[index..index + 1 + end]),
+            }
+            rest = &after[end..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Resolve the plan's external references against the Image Service catalog
-/// and return the resolved parents the build request submits. A
-/// `cas-v1:<64 hex>` reference pins the image id directly; every other
-/// plain reference is looked up as a catalog name, and a miss means the
-/// guest pulls the reference from a registry. References the plan already
-/// marked unresolvable (`$` expansions, `@` digest pins) never reach here.
+/// and return the resolved parents the build request submits, each pinned
+/// by the registered image's `image_` id. An `image_` reference pins the id
+/// directly; every other plain reference is looked up as a catalog name. A
+/// miss that names a legacy platform template is an error (a CAS build
+/// cannot be layered on a legacy image); any other miss means the guest
+/// pulls the reference from a registry. References the plan still marks
+/// unresolvable (`$` expansions left after build-arg expansion, `@` digest
+/// pins) never reach here.
 async fn resolve_parents(
     client: &Client,
+    templates: &SandboxTemplatesClient,
     plan: &DockerfileBuildPlan,
     emit: &mut impl FnMut(SandboxImageBuildEvent),
 ) -> Result<Vec<Value>> {
@@ -335,33 +589,38 @@ async fn resolve_parents(
     let mut pinned_references = Vec::new();
     for reference in candidates {
         let catalog_reference = cas_catalog_reference(reference);
-        let image_id = match direct_pin_image_id(reference)? {
-            Some(image_id) => Some(image_id),
+        let public_id = match direct_pin_public_id(reference)? {
+            Some(public_id) => Some(public_id),
             None => lookup_catalog_name(client, catalog_reference.as_ref()).await?,
         };
-        if image_id.is_none() && catalog_reference.as_ref() != reference {
+        if public_id.is_none() && catalog_reference.as_ref() != reference {
             return Err(SandboxImageBuildError::usage(format!(
                 "CAS base image '{}' was not found while resolving Dockerfile reference \
                  '{}'. Publish the CAS base first or use an existing tensorlake/cas image.",
                 catalog_reference, reference
             )));
         }
-        let Some(image_id) = image_id else {
+        let Some(public_id) = public_id else {
+            if templates.find_by_name(reference).await?.is_some() {
+                return Err(SandboxImageBuildError::usage(format!(
+                    "'{reference}' is a legacy image; a CAS build can use CAS images or \
+                     registry references as a base; rebuild '{reference}' with --cas first"
+                )));
+            }
             continue; // external registry reference, pulled by the guest
         };
         if catalog_reference.as_ref() == reference {
             emit(SandboxImageBuildEvent::Status(format!(
-                "Resolved '{reference}' to registered image {CAS_IMAGE_REF_PREFIX}{image_id}"
+                "Resolved '{reference}' to registered image {public_id}"
             )));
         } else {
             emit(SandboxImageBuildEvent::Status(format!(
-                "Resolved '{reference}' through CAS image '{}' to \
-                 {CAS_IMAGE_REF_PREFIX}{image_id}",
+                "Resolved '{reference}' through CAS image '{}' to {public_id}",
                 catalog_reference
             )));
         }
         pinned_references.push(reference.to_string());
-        parents.push(json!({ "reference": reference, "image_id": image_id }));
+        parents.push(json!({ "reference": reference, "public_id": public_id }));
     }
     if parents.len() > MAX_PINNED_PARENTS {
         return Err(SandboxImageBuildError::usage(format!(
@@ -388,46 +647,44 @@ fn cas_catalog_reference(reference: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Owned(format!("tensorlake/cas/{remainder}"))
 }
 
-/// `cas-v1:<64 lowercase hex>` pins an image id directly. The prefix with a
-/// malformed id is an error rather than a registry fallthrough: no registry
-/// image can live under the reserved scheme.
-fn direct_pin_image_id(reference: &str) -> Result<Option<String>> {
-    let Some(image_id) = reference.strip_prefix(CAS_IMAGE_REF_PREFIX) else {
-        return Ok(None);
-    };
-    if image_id.len() != 64
-        || !image_id
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    {
+/// An `image_<id>` reference pins the registered image directly, with no
+/// name lookup; the service validates the pin against the caller's project.
+/// The retired `cas-v1:` scheme is an error rather than a registry
+/// fallthrough: no registry image can live under it, and digests are no
+/// longer addresses.
+fn direct_pin_public_id(reference: &str) -> Result<Option<String>> {
+    if reference.starts_with(CAS_V1_REFERENCE_PREFIX) {
         return Err(SandboxImageBuildError::usage(format!(
-            "reference '{reference}' uses the reserved {CAS_IMAGE_REF_PREFIX} scheme but is not \
-             a 64-lowercase-hex image id"
+            "reference '{reference}' pins a content digest, which is no longer supported; pin \
+             the image by name or its image_ id"
         )));
     }
-    Ok(Some(image_id.to_string()))
+    if !reference.starts_with(IMAGE_SERVICE_ID_PREFIX) {
+        return Ok(None);
+    }
+    if !is_image_service_id(reference) {
+        return Err(SandboxImageBuildError::usage(format!(
+            "reference '{reference}' uses the reserved {IMAGE_SERVICE_ID_PREFIX} prefix but is \
+             not an image id"
+        )));
+    }
+    Ok(Some(reference.to_string()))
 }
 
-/// Look up a reference as a catalog name in the caller's project. `404` and
-/// `400` both mean "not a registered image" (absent, or a reference shape
-/// the name grammar rejects) and fall through to a registry pull, matching
-/// how the legacy path treats template-registry misses.
+/// Look up a reference as a catalog name in the caller's project and return
+/// the registered image's `image_` id. `404` and `400` both mean "not a
+/// registered image" (absent, or a reference shape the name grammar
+/// rejects) and fall through to a registry pull, matching how the legacy
+/// path treats template-registry misses.
 async fn lookup_catalog_name(client: &Client, reference: &str) -> Result<Option<String>> {
-    let path = format!("/names/{reference}");
+    let path = format!("/images/name/{reference}");
     let request = client.request(Method::GET, &path).build()?;
     let response = client.execute_raw(request).await?;
     match response.status() {
         StatusCode::NOT_FOUND | StatusCode::BAD_REQUEST => Ok(None),
         status if status.is_success() => {
-            let body: Value = response.json().await?;
-            body.get("image_id")
-                .and_then(Value::as_str)
-                .map(|image_id| Some(image_id.to_string()))
-                .ok_or_else(|| {
-                    SandboxImageBuildError::other(format!(
-                        "Image Service name lookup for '{reference}' returned no image_id"
-                    ))
-                })
+            let image: ImageServiceImage = response.json().await?;
+            Ok(Some(image.id))
         }
         status => {
             let body = response.text().await.unwrap_or_default();
@@ -468,59 +725,676 @@ fn context_dockerfile(
     ))
 }
 
-fn build_id_of(build: &Value) -> Result<String> {
-    build
-        .get("build_id")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .ok_or_else(|| {
-            SandboxImageBuildError::other("Image Service build response carries no build_id")
-        })
+// ---------------------------------------------------------------------------
+// Requests, reconnects and error classification
+// ---------------------------------------------------------------------------
+
+/// A response read to completion, with the one header the reconnect policy
+/// honors.
+struct RawResponse {
+    status: StatusCode,
+    retry_after: Option<Duration>,
+    body: String,
 }
 
-async fn create_build(
+/// A failed attempt: the classified error plus the service's `Retry-After`,
+/// which only the reconnect loop needs. Boxed so the `Err` arm stays small
+/// on the hot request path.
+struct RequestFailure {
+    error: Box<ImageBuildError>,
+    retry_after: Option<Duration>,
+}
+
+impl RequestFailure {
+    fn new(error: ImageBuildError, retry_after: Option<Duration>) -> Self {
+        Self {
+            error: Box::new(error),
+            retry_after,
+        }
+    }
+}
+
+impl From<ImageBuildError> for RequestFailure {
+    fn from(error: ImageBuildError) -> Self {
+        Self::new(error, None)
+    }
+}
+
+impl From<SdkError> for RequestFailure {
+    fn from(error: SdkError) -> Self {
+        ImageBuildError::Sdk(error).into()
+    }
+}
+
+/// The Image Service error body: `{"error": ...}` plus the typed conflict
+/// fields of `409 image_build_in_progress`.
+#[derive(Debug, Default, Deserialize)]
+struct ImageServiceErrorBody {
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    code: Option<String>,
+    /// The build an error concerns (`build_failed`, `build_cancelled`,
+    /// `client_request_id_mismatch`, `publication_pending`), flattened into
+    /// the envelope by the service.
+    #[serde(default)]
+    build_id: Option<String>,
+    #[serde(default)]
+    image_name: Option<String>,
+    #[serde(default)]
+    active_build_id: Option<String>,
+    #[serde(default)]
+    active_kind: Option<String>,
+    #[serde(default)]
+    active_status: Option<String>,
+}
+
+async fn send_raw(
     client: &Client,
-    body: Value,
+    request: reqwest::Request,
+) -> std::result::Result<RawResponse, RequestFailure> {
+    let response = client.execute_raw(request).await?;
+    let status = response.status();
+    let retry_after = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_secs);
+    let body = response
+        .text()
+        .await
+        .map_err(|error| RequestFailure::from(SdkError::Http(error)))?;
+    Ok(RawResponse {
+        status,
+        retry_after,
+        body,
+    })
+}
+
+/// Map a non-success response onto the typed error model. 5xx keep the
+/// [`SdkError::ServerError`] shape so the shared transport classification
+/// (`retry::is_transient`, `never_reached_server`) still applies to them.
+fn service_error(status: StatusCode, body: &str, request_id: Option<&str>) -> ImageBuildError {
+    let parsed: ImageServiceErrorBody = serde_json::from_str(body).unwrap_or_default();
+    let message = parsed
+        .error
+        .clone()
+        .or_else(|| parsed.message.clone())
+        .map(|message| message.trim().to_string())
+        .filter(|message| !message.is_empty())
+        .unwrap_or_else(|| {
+            let text = body.trim();
+            if text.is_empty() {
+                status
+                    .canonical_reason()
+                    .unwrap_or("unexpected response")
+                    .to_string()
+            } else {
+                text.to_string()
+            }
+        });
+    match status {
+        StatusCode::BAD_REQUEST => ImageBuildError::Usage(message),
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => ImageBuildError::Auth(message),
+        StatusCode::CONFLICT => match parsed.code.as_deref() {
+            Some("image_build_in_progress") => ImageBuildError::InProgress(ImageBuildConflict {
+                image_name: parsed.image_name,
+                active_build_id: parsed.active_build_id,
+                active_kind: parsed.active_kind.map(Into::into),
+                active_status: parsed.active_status.map(Into::into),
+                message,
+            }),
+            Some("client_request_id_mismatch") => ImageBuildError::IdempotencyKeyReused {
+                client_request_id: request_id.unwrap_or("-").to_string(),
+                message,
+            },
+            _ => ImageBuildError::Service {
+                status: status.as_u16(),
+                message,
+            },
+        },
+        status if status.is_server_error() => {
+            ImageBuildError::Sdk(SdkError::ServerError { status, message })
+        }
+        status => ImageBuildError::Service {
+            status: status.as_u16(),
+            message,
+        },
+    }
+}
+
+/// Whether an attempt is worth repeating with the same request: transport
+/// failures (including timeouts: every retried request here is idempotent or
+/// keyed), 5xx, 408 and 429. Authorization, validation, not-found and
+/// conflicts are answers, not outages.
+fn is_retryable(error: &ImageBuildError) -> bool {
+    match error {
+        ImageBuildError::Sdk(error) => {
+            error.transport_failure().is_some()
+                || crate::retry::is_transient(error)
+                || matches!(error, SdkError::ServerError { status, .. } if status.is_server_error())
+                // A connection dropped before or during the response
+                // (reset, incomplete message); every request here is
+                // idempotent or keyed, so sending it again is safe.
+                || error
+                    .as_reqwest()
+                    .is_some_and(|error| error.is_request() || error.is_body())
+        }
+        ImageBuildError::Service { status, .. } => {
+            *status == StatusCode::REQUEST_TIMEOUT.as_u16()
+                || *status == StatusCode::TOO_MANY_REQUESTS.as_u16()
+        }
+        _ => false,
+    }
+}
+
+/// Wait before the `attempt`-th reconnect: `0.5 s × 2^(attempt-1)` capped
+/// at [`MAX_RECONNECT_BACKOFF`] with ±25% jitter, or the service's
+/// `Retry-After` (capped) when it sent one.
+fn reconnect_delay(attempt: usize, retry_after: Option<Duration>) -> Duration {
+    if let Some(retry_after) = retry_after {
+        return retry_after.min(MAX_RETRY_AFTER);
+    }
+    let exponent = attempt.saturating_sub(1).min(8) as u32;
+    let base = Duration::from_millis(500).saturating_mul(1 << exponent);
+    let capped = base.min(MAX_RECONNECT_BACKOFF);
+    capped.mul_f64(0.75 + rand::random::<f64>() * 0.5)
+}
+
+/// How a reconnecting request loop ended.
+enum Attempted<T> {
+    Done(T),
+    /// A definitive answer that is not worth retrying.
+    Failed(ImageBuildError),
+    /// The interrupt signal fired; the last request, if any, was abandoned.
+    Interrupted,
+    /// The budget or deadline ran out while still failing transiently.
+    Expired(ImageBuildError),
+}
+
+/// The failure a request that outlived its bound is reported as: a 408,
+/// which is retryable, so the loop reconnects while the deadline allows and
+/// reports expiry (not a definitive failure) once it does not.
+fn request_timed_out(label: &str, bound: Duration) -> RequestFailure {
+    RequestFailure::new(
+        ImageBuildError::Service {
+            status: StatusCode::REQUEST_TIMEOUT.as_u16(),
+            message: format!("{label} did not answer within {:.1}s", bound.as_secs_f64()),
+        },
+        None,
+    )
+}
+
+/// Repeat `attempt` across retryable failures until `deadline`, with
+/// backoff, jitter and `Retry-After`, reporting each reconnect through
+/// `emit`. An `interrupt` cuts the loop (and an in-flight request) short.
+/// The deadline bounds the requests themselves, not only the retries and
+/// sleeps between them: an attempt still in flight at the deadline (or
+/// after [`REQUEST_TIMEOUT`]) is abandoned, so a stalled connection never
+/// holds a caller past its budget.
+async fn with_reconnects<T, F, Fut>(
+    label: &str,
+    deadline: Instant,
+    interrupt: Option<&InterruptSignal>,
     emit: &mut impl FnMut(SandboxImageBuildEvent),
-) -> Result<Value> {
+    mut attempt: F,
+) -> Attempted<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = std::result::Result<T, RequestFailure>>,
+{
+    let mut reconnects = 0usize;
+    loop {
+        if interrupt.is_some_and(InterruptSignal::is_triggered) {
+            return Attempted::Interrupted;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Attempted::Expired(*request_timed_out(label, Duration::ZERO).error);
+        }
+        let bound = remaining.min(REQUEST_TIMEOUT);
+        let request = tokio::time::timeout(bound, attempt());
+        let outcome = match interrupt {
+            Some(signal) => tokio::select! {
+                biased;
+                _ = signal.triggered() => return Attempted::Interrupted,
+                outcome = request => outcome,
+            },
+            None => request.await,
+        };
+        let failure = match outcome {
+            Ok(Ok(value)) => return Attempted::Done(value),
+            Ok(Err(failure)) => failure,
+            Err(_elapsed) => request_timed_out(label, bound),
+        };
+        if !is_retryable(&failure.error) {
+            return Attempted::Failed(*failure.error);
+        }
+        reconnects += 1;
+        let now = Instant::now();
+        if now >= deadline {
+            return Attempted::Expired(*failure.error);
+        }
+        let delay = reconnect_delay(reconnects, failure.retry_after).min(deadline - now);
+        emit(SandboxImageBuildEvent::Status(format!(
+            "{label} unavailable ({}); reconnecting in {:.1}s (attempt {reconnects})...",
+            failure.error,
+            delay.as_secs_f64()
+        )));
+        match interrupt {
+            Some(signal) => tokio::select! {
+                biased;
+                _ = signal.triggered() => return Attempted::Interrupted,
+                _ = tokio::time::sleep(delay) => {}
+            },
+            None => tokio::time::sleep(delay).await,
+        }
+    }
+}
+
+fn decode_build(body: &str) -> BuildResult<ImageBuildInfo> {
+    let value: Value = serde_json::from_str(body)?;
+    Ok(ImageBuildInfo::from_json(value)?)
+}
+
+/// An admission response: the build plus, for a dockerfile build whose
+/// context is unsealed, the upload capability. The capability lives only
+/// here, for the upload and seal step; [`ImageBuildInfo`] never carries it.
+#[derive(Debug)]
+pub(crate) struct AdmittedBuild {
+    pub(crate) info: ImageBuildInfo,
+    pub(crate) context_upload: Option<ContextUploadCapability>,
+}
+
+fn decode_admission(body: &str) -> BuildResult<AdmittedBuild> {
+    let mut value: Value = serde_json::from_str(body)?;
+    let context_upload = match value
+        .as_object_mut()
+        .and_then(|object| object.remove("context_upload"))
+    {
+        Some(Value::Null) | None => None,
+        Some(capability) => Some(serde_json::from_value(capability)?),
+    };
+    Ok(AdmittedBuild {
+        info: ImageBuildInfo::from_json(value)?,
+        context_upload,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Admission
+// ---------------------------------------------------------------------------
+
+/// Admit an operation (`POST /builds`, `POST /images/from-snapshot`) under
+/// `request_id`, reconnecting across transient failures with the same key.
+/// An interruption while the admission is unresolved stops the retries and
+/// resolves the outcome through the cancel route's request-id selector; it
+/// never replays the admission to discover an abandoned build.
+pub(crate) async fn admit_build(
+    client: &Client,
+    path: &str,
+    body: &Value,
+    request_id: &str,
+    interrupt: &InterruptSignal,
+    emit: &mut impl FnMut(SandboxImageBuildEvent),
+) -> BuildResult<AdmittedBuild> {
     emit(SandboxImageBuildEvent::Status(
         "Creating Image Service build...".to_string(),
     ));
-    let request = client
-        .request(Method::POST, "/builds")
-        .json(&body)
-        .build()?;
-    let response = client.execute_raw(request).await?;
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        return Err(SandboxImageBuildError::other(format!(
-            "Image Service rejected the build (HTTP {status}): {body}"
-        )));
-    }
-    let created: Value = response.json().await?;
+    let deadline = Instant::now() + ADMISSION_RETRY_BUDGET;
+    let attempted = with_reconnects("Image Service", deadline, Some(interrupt), emit, || async {
+        let request = client
+            .request(Method::POST, path)
+            .header(IDEMPOTENCY_KEY_HEADER, request_id)
+            .json(body)
+            .build()
+            .map_err(SdkError::Http)?;
+        let response = send_raw(client, request).await?;
+        match response.status {
+            StatusCode::OK | StatusCode::CREATED | StatusCode::ACCEPTED => {
+                decode_admission(&response.body).map_err(RequestFailure::from)
+            }
+            status => Err(RequestFailure::new(
+                service_error(status, &response.body, Some(request_id)),
+                response.retry_after,
+            )),
+        }
+    })
+    .await;
+    let created = match attempted {
+        Attempted::Done(created) => created,
+        Attempted::Failed(error) | Attempted::Expired(error) => return Err(error),
+        Attempted::Interrupted => {
+            let report = interruption_for_unresolved_admission(client, request_id).await;
+            emit(SandboxImageBuildEvent::Interrupted(report.clone()));
+            return Err(ImageBuildError::Interrupted(report));
+        }
+    };
+    emit(SandboxImageBuildEvent::Accepted {
+        build_id: created.info.build_id.clone(),
+        client_request_id: Some(request_id.to_string()),
+    });
     emit(SandboxImageBuildEvent::Status(accepted_build_message(
-        &created,
+        &created.info,
     )));
     Ok(created)
 }
 
-fn accepted_build_message(created: &Value) -> String {
-    let build_id = created
-        .get("build_id")
-        .and_then(Value::as_str)
-        .unwrap_or("-");
-    let resources = created.get("builder_resources");
-    match resources.and_then(|resources| {
-        Some((
-            resources.get("cpus")?.as_f64()?,
-            resources.get("memory_mb")?.as_u64()?,
-        ))
-    }) {
-        Some((cpus, memory_mb)) => {
-            format!("Build {build_id} accepted (builder: {cpus} CPU, {memory_mb} MiB)")
+/// Admit a direct publication (`POST /images/from-snapshot`) under
+/// `request_id`: 201 is the published image, `503 publication_pending` the
+/// operation to keep retrying under the same key. Conflicts and validation
+/// answers are typed like build admission; an interruption while unresolved
+/// resolves through the request id. Every request is bounded by `wait`'s
+/// absolute registration deadline: the reconnect budget is clamped to it, so
+/// a request still in flight at the deadline is abandoned and reported as
+/// the registration timeout.
+pub(crate) async fn admit_direct(
+    client: &Client,
+    path: &str,
+    body: &Value,
+    request_id: &str,
+    wait: &RegistrationWait,
+    interrupt: &InterruptSignal,
+) -> BuildResult<crate::sandbox_image_catalog::SnapshotAdoption> {
+    use crate::sandbox_image_catalog::SnapshotAdoption;
+    let deadline = (Instant::now() + ADMISSION_RETRY_BUDGET).min(wait.deadline);
+    let mut silent = |_event| {};
+    let attempted = with_reconnects(
+        "Image Service",
+        deadline,
+        Some(interrupt),
+        &mut silent,
+        || async {
+            let request = client
+                .request(Method::POST, path)
+                .header(IDEMPOTENCY_KEY_HEADER, request_id)
+                .json(body)
+                .build()
+                .map_err(SdkError::Http)?;
+            // The reconnect loop abandons a request still in flight at the
+            // registration deadline (its deadline is clamped to it).
+            let response = send_raw(client, request).await?;
+            match response.status {
+                StatusCode::SERVICE_UNAVAILABLE => {
+                    let parsed: ImageServiceErrorBody =
+                        serde_json::from_str(&response.body).unwrap_or_default();
+                    match (parsed.code.as_deref(), parsed.build_id) {
+                        (Some("publication_pending"), Some(build_id)) => {
+                            Ok(SnapshotAdoption::Pending { build_id })
+                        }
+                        _ => Err(RequestFailure::new(
+                            service_error(response.status, &response.body, Some(request_id)),
+                            response.retry_after,
+                        )),
+                    }
+                }
+                status if status.is_success() => {
+                    let image: ImageServiceImage =
+                        serde_json::from_str(&response.body).map_err(ImageBuildError::Json)?;
+                    Ok(SnapshotAdoption::Published(Box::new(image)))
+                }
+                status => Err(RequestFailure::new(
+                    service_error(status, &response.body, Some(request_id)),
+                    response.retry_after,
+                )),
+            }
+        },
+    )
+    .await;
+    match attempted {
+        Attempted::Done(adoption) => Ok(adoption),
+        Attempted::Failed(error) => Err(error),
+        Attempted::Expired(error) => {
+            if Instant::now() >= wait.deadline {
+                Err(wait.timeout(request_id))
+            } else {
+                Err(error)
+            }
         }
-        None => format!("Build {build_id} accepted"),
+        Attempted::Interrupted => Err(ImageBuildError::Interrupted(
+            interruption_for_unresolved_admission(client, request_id).await,
+        )),
+    }
+}
+
+fn accepted_build_message(created: &ImageBuildInfo) -> String {
+    format!("Build {} accepted", created.build_id)
+}
+
+/// Upper bound on a storage error body kept in an upload failure message.
+const MAX_UPLOAD_ERROR_BODY: usize = 2048;
+
+/// Remove every trace of the context-upload capability from `text`: the
+/// URL itself, its query string, every `X-Amz-*` parameter (name and value,
+/// wherever a storage error echoes them) and the signing material an S3
+/// `SignatureDoesNotMatch` body carries. Bounded so a huge body cannot
+/// become the message.
+fn redact_capability(text: &str, capability_url: &str) -> String {
+    let mut text = text.to_string();
+    if !capability_url.is_empty() {
+        text = text.replace(capability_url, "<capability-url>");
+        if let Some((_, query)) = capability_url.split_once('?')
+            && !query.is_empty()
+        {
+            text = text.replace(query, "<capability-query>");
+        }
+    }
+    for element in [
+        "StringToSign",
+        "CanonicalRequest",
+        "AWSAccessKeyId",
+        "SignatureProvided",
+    ] {
+        text = redact_xml_element(&text, element);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text.as_str();
+    while let Some(index) = rest.find("X-Amz-") {
+        out.push_str(&rest[..index]);
+        let after = &rest[index..];
+        let end = after
+            .find(|c: char| {
+                c == '&' || c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | ',' | '}')
+            })
+            .unwrap_or(after.len());
+        out.push_str("<redacted>");
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    if out.len() > MAX_UPLOAD_ERROR_BODY {
+        let mut cut = MAX_UPLOAD_ERROR_BODY;
+        while !out.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        out.truncate(cut);
+        out.push_str("...");
+    }
+    out
+}
+
+/// Replace the content of every `<element>...</element>` with a marker.
+fn redact_xml_element(text: &str, element: &str) -> String {
+    let open = format!("<{element}>");
+    let close = format!("</{element}>");
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(&open) {
+        let content_start = start + open.len();
+        match rest[content_start..].find(&close) {
+            Some(length) => {
+                out.push_str(&rest[..content_start]);
+                out.push_str("<redacted>");
+                rest = &rest[content_start + length..];
+            }
+            None => break,
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Lookup and cancellation
+// ---------------------------------------------------------------------------
+
+/// `GET /builds/{build_id}` with a short reconnect budget. 404 is
+/// [`ImageBuildError::NotFound`] for unknown and foreign builds alike.
+pub(crate) async fn get_build(client: &Client, build_id: &str) -> BuildResult<ImageBuildInfo> {
+    let deadline = Instant::now() + LOOKUP_RETRY_BUDGET;
+    let mut silent = |_event| {};
+    match with_reconnects("Image Service", deadline, None, &mut silent, || {
+        get_build_attempt(client, build_id)
+    })
+    .await
+    {
+        Attempted::Done(info) => Ok(info),
+        Attempted::Failed(error) | Attempted::Expired(error) => Err(error),
+        Attempted::Interrupted => Err(ImageBuildError::other("build lookup interrupted")),
+    }
+}
+
+async fn get_build_attempt(
+    client: &Client,
+    build_id: &str,
+) -> std::result::Result<ImageBuildInfo, RequestFailure> {
+    let request = client
+        .request(Method::GET, &format!("/builds/{build_id}"))
+        .build()
+        .map_err(SdkError::Http)?;
+    let response = send_raw(client, request).await?;
+    match response.status {
+        status if status.is_success() => decode_build(&response.body).map_err(Into::into),
+        StatusCode::NOT_FOUND => Err(ImageBuildError::NotFound {
+            build_id: build_id.to_string(),
+        }
+        .into()),
+        status => Err(RequestFailure::new(
+            service_error(status, &response.body, None),
+            response.retry_after,
+        )),
+    }
+}
+
+/// `POST /builds/cancel` with exactly one selector, repeated across
+/// transient failures for `budget`. The cancel route never admits anything,
+/// so repeating it is safe; a budget that runs out is reported as an error
+/// the caller turns into "acknowledgement unknown".
+pub(crate) async fn cancel_build(
+    client: &Client,
+    selector: &CancelBuildSelector,
+    budget: Duration,
+) -> BuildResult<CancelBuildResponse> {
+    let deadline = Instant::now() + budget;
+    let mut silent = |_event| {};
+    let body = selector.body();
+    let attempted = with_reconnects("Image Service", deadline, None, &mut silent, || async {
+        let request = client
+            .request(Method::POST, "/builds/cancel")
+            .json(&body)
+            .build()
+            .map_err(SdkError::Http)?;
+        let response = send_raw(client, request).await?;
+        match response.status {
+            status if status.is_success() => {
+                let decoded: CancelBuildResponse =
+                    serde_json::from_str(&response.body).map_err(ImageBuildError::Json)?;
+                Ok(decoded)
+            }
+            StatusCode::NOT_FOUND => Err(match selector {
+                CancelBuildSelector::BuildId(build_id) => ImageBuildError::NotFound {
+                    build_id: build_id.clone(),
+                },
+                CancelBuildSelector::ClientRequestId(_) => {
+                    service_error(response.status, &response.body, None)
+                }
+            }
+            .into()),
+            status => Err(RequestFailure::new(
+                service_error(status, &response.body, None),
+                response.retry_after,
+            )),
+        }
+    })
+    .await;
+    match attempted {
+        Attempted::Done(response) => Ok(response),
+        Attempted::Failed(error) => Err(error),
+        Attempted::Expired(error) => Err(ImageBuildError::other(format!(
+            "no cancellation acknowledgement within {}s: {error}",
+            budget.as_secs()
+        ))),
+        Attempted::Interrupted => Err(ImageBuildError::other("cancellation interrupted")),
+    }
+}
+
+fn interruption_outcome(response: CancelBuildResponse) -> InterruptionOutcome {
+    match response.outcome {
+        CancelBuildOutcome::Cancelled => InterruptionOutcome::Cancelled,
+        CancelBuildOutcome::AlreadyCancelled => InterruptionOutcome::AlreadyCancelled,
+        CancelBuildOutcome::AlreadyCompleted => InterruptionOutcome::AlreadyCompleted(
+            response.build.and_then(|build| build.result).map(Box::new),
+        ),
+        CancelBuildOutcome::AlreadyFailed => {
+            InterruptionOutcome::AlreadyFailed(response.build.and_then(|build| build.error))
+        }
+        CancelBuildOutcome::NotAdmitted => InterruptionOutcome::NotAdmitted,
+        CancelBuildOutcome::Unknown(other) => {
+            InterruptionOutcome::Unconfirmed(format!("unknown cancel outcome {other:?}"))
+        }
+    }
+}
+
+/// The handshake for an admitted build: cancel by build id within the
+/// budget and report what the service observed.
+pub(crate) async fn interruption_for_build(
+    client: &Client,
+    build_id: &str,
+    client_request_id: Option<&str>,
+) -> InterruptionReport {
+    let outcome = match cancel_build(
+        client,
+        &CancelBuildSelector::BuildId(build_id.to_string()),
+        CANCEL_HANDSHAKE_BUDGET,
+    )
+    .await
+    {
+        Ok(response) => interruption_outcome(response),
+        Err(error) => InterruptionOutcome::Unconfirmed(error.to_string()),
+    };
+    InterruptionReport {
+        build_id: Some(build_id.to_string()),
+        client_request_id: client_request_id.map(str::to_string),
+        outcome,
+    }
+}
+
+/// The handshake while the admission's answer is unknown: resolve through
+/// the request-id index. `not_admitted` is reported as such, with the
+/// request id, and is not a confirmation.
+async fn interruption_for_unresolved_admission(
+    client: &Client,
+    request_id: &str,
+) -> InterruptionReport {
+    match cancel_build(
+        client,
+        &CancelBuildSelector::ClientRequestId(request_id.to_string()),
+        CANCEL_HANDSHAKE_BUDGET,
+    )
+    .await
+    {
+        Ok(response) => InterruptionReport {
+            build_id: response.build.as_ref().map(|build| build.build_id.clone()),
+            client_request_id: Some(request_id.to_string()),
+            outcome: interruption_outcome(response),
+        },
+        Err(error) => InterruptionReport {
+            build_id: None,
+            client_request_id: Some(request_id.to_string()),
+            outcome: InterruptionOutcome::Unconfirmed(error.to_string()),
+        },
     }
 }
 
@@ -528,16 +1402,17 @@ fn accepted_build_message(created: &Value) -> String {
 /// upload it through the sealed capability, and seal the build with the
 /// tar's sha256. The capability URL is presigned (or the service's direct
 /// dev route); the upload deliberately uses a bare HTTP client so no
-/// Authorization header corrupts a presigned request.
+/// Authorization header corrupts a presigned request. The seal is keyed by
+/// the digest, so it is replayed across transient failures.
 async fn upload_and_seal_context(
     client: &Client,
     build_id: &str,
-    upload: &Value,
+    upload: &ContextUploadCapability,
     plan: &DockerfileBuildPlan,
     injected_dockerfile: Option<&str>,
     context_files: &[SandboxImageContextFile],
     emit: &mut impl FnMut(SandboxImageBuildEvent),
-) -> Result<()> {
+) -> BuildResult<()> {
     emit(SandboxImageBuildEvent::Status(
         "Creating build context archive...".to_string(),
     ));
@@ -552,64 +1427,80 @@ async fn upload_and_seal_context(
         tar_file.path(),
     )?;
 
-    let max_bytes = upload.get("max_bytes").and_then(Value::as_u64);
-    if let Some(max_bytes) = max_bytes
+    if let Some(max_bytes) = upload.max_bytes
         && tar_bytes > max_bytes
     {
-        return Err(SandboxImageBuildError::usage(format!(
+        return Err(ImageBuildError::usage(format!(
             "build context is {tar_bytes} bytes, above the Image Service cap of {max_bytes}"
         )));
     }
 
-    let url = upload
-        .get("url")
-        .and_then(Value::as_str)
-        .ok_or_else(|| SandboxImageBuildError::other("context upload capability carries no url"))?;
-    let method = upload
-        .get("method")
-        .and_then(Value::as_str)
-        .unwrap_or("PUT")
-        .parse::<Method>()
-        .map_err(|_| {
-            SandboxImageBuildError::other("context upload capability method is invalid")
-        })?;
+    // The capability is always a PUT; the service no longer spells it out.
+    let method = Method::PUT;
 
     emit(SandboxImageBuildEvent::Status(format!(
         "Uploading build context ({tar_bytes} bytes)..."
     )));
     let file = tokio::fs::File::open(tar_file.path()).await?;
     let stream = tokio_util::io::ReaderStream::new(file);
+    // The capability URL is a signed credential (presigned `X-Amz-*` query
+    // parameters): no error leaving this function may carry it. A transport
+    // error drops its URL and a storage error body is redacted before either
+    // becomes a message a CLI, a binding or a log can print.
     let response = crate::http_transport::https_builder()
-        .build()?
-        .request(method, url)
+        .build()
+        .map_err(SdkError::Http)?
+        .request(method, &upload.url)
         .header(CONTENT_LENGTH, tar_bytes)
         .body(reqwest::Body::wrap_stream(stream))
         .send()
-        .await?;
+        .await
+        .map_err(|error| {
+            ImageBuildError::other(format!(
+                "context upload failed: {}",
+                redact_capability(&error.without_url().to_string(), &upload.url)
+            ))
+        })?;
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        return Err(SandboxImageBuildError::other(format!(
-            "context upload failed (HTTP {status}): {body}"
+        return Err(ImageBuildError::other(format!(
+            "context upload failed (HTTP {status}): {}",
+            redact_capability(&body, &upload.url)
         )));
     }
 
     emit(SandboxImageBuildEvent::Status(
         "Sealing build context...".to_string(),
     ));
-    let request = client
-        .request(Method::POST, &format!("/builds/{build_id}/context/seal"))
-        .json(&json!({ "digest": digest }))
-        .build()?;
-    let response = client.execute_raw(request).await?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(SandboxImageBuildError::other(format!(
-            "context seal failed (HTTP {status}): {body}"
-        )));
+    let deadline = Instant::now() + ADMISSION_RETRY_BUDGET;
+    let seal_body = json!({ "digest": digest });
+    let path = format!("/builds/{build_id}/context/seal");
+    let attempted = with_reconnects("Image Service", deadline, None, emit, || async {
+        let request = client
+            .request(Method::POST, &path)
+            .json(&seal_body)
+            .build()
+            .map_err(SdkError::Http)?;
+        let response = send_raw(client, request).await?;
+        if response.status.is_success() {
+            return Ok(());
+        }
+        let error = match service_error(response.status, &response.body, None) {
+            ImageBuildError::Service { status, message } => ImageBuildError::Service {
+                status,
+                message: format!("context seal failed: {message}"),
+            },
+            other => other,
+        };
+        Err(RequestFailure::new(error, response.retry_after))
+    })
+    .await;
+    match attempted {
+        Attempted::Done(()) => Ok(()),
+        Attempted::Failed(error) | Attempted::Expired(error) => Err(error),
+        Attempted::Interrupted => Err(ImageBuildError::other("context seal interrupted")),
     }
-    Ok(())
 }
 
 /// Write the plain context tar to `tar_path` and return its byte length and
@@ -689,24 +1580,38 @@ fn synthetic_file_header(size: u64, mode: u32) -> tar::Header {
     header
 }
 
-/// Poll the build to a terminal status, then fetch and return the published
-/// image record.
-async fn wait_for_publication(
+// ---------------------------------------------------------------------------
+// Waiting
+// ---------------------------------------------------------------------------
+
+/// Poll `build_id` to a terminal status and return that terminal record.
+/// `initial` is the last known state (the admission response), used to seed
+/// the deadline. See the `image_builds` module docs for the policy.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn wait_for_terminal<F>(
     client: &Client,
-    ctx: &crate::sandbox_images::ResolvedBuildContext,
-    created: &Value,
-    registered_name: &str,
-    emit: impl FnMut(SandboxImageBuildEvent),
-) -> Result<Value> {
-    wait_for_publication_with_follower(
+    ctx: Option<&ResolvedBuildContext>,
+    build_id: &str,
+    client_request_id: Option<&str>,
+    initial: Option<ImageBuildInfo>,
+    options: &ImageBuildWaitOptions,
+    interrupt: &InterruptSignal,
+    emit: F,
+) -> BuildResult<ImageBuildInfo>
+where
+    F: FnMut(SandboxImageBuildEvent),
+{
+    wait_for_terminal_with_follower(
         client,
         ctx,
-        created,
-        registered_name,
+        build_id,
+        client_request_id,
+        initial,
+        options,
+        interrupt,
         emit,
         BuildWaitTiming {
             poll_interval: BUILD_POLL_INTERVAL,
-            poll_timeout: BUILD_POLL_TIMEOUT,
             log_drain_grace: BUILDER_LOG_DRAIN_GRACE,
         },
         |ctx, sandbox_id, sink| async move {
@@ -717,10 +1622,109 @@ async fn wait_for_publication(
     .await
 }
 
+/// Look `build_id` up and wait for it as one interruptible operation. The
+/// lookup runs under `interrupt` and under the caller's timeout, so a Ctrl+C
+/// during a slow or stalled first request runs the cancellation handshake
+/// (the build id is the sufficient selector) instead of ending the process
+/// without a request, and a short `timeout` bounds the whole wait, lookup
+/// included. Emits nothing about the lookup itself: the caller already
+/// knows the id it passed.
+pub(crate) async fn lookup_and_wait<F>(
+    client: &Client,
+    ctx: Option<&ResolvedBuildContext>,
+    build_id: &str,
+    options: &ImageBuildWaitOptions,
+    interrupt: &InterruptSignal,
+    mut emit: F,
+) -> BuildResult<ImageBuildInfo>
+where
+    F: FnMut(SandboxImageBuildEvent),
+{
+    let started = Instant::now();
+    let caller_deadline = options.timeout.map(|timeout| started + timeout);
+    let lookup_deadline = match caller_deadline {
+        Some(caller) => caller.min(started + LOOKUP_RETRY_BUDGET),
+        None => started + LOOKUP_RETRY_BUDGET,
+    };
+    let attempted = with_reconnects(
+        "Image Service",
+        lookup_deadline,
+        Some(interrupt),
+        &mut emit,
+        || get_build_attempt(client, build_id),
+    )
+    .await;
+    let info = match attempted {
+        Attempted::Done(info) => info,
+        Attempted::Failed(error) => return Err(error),
+        Attempted::Expired(error) => {
+            return Err(match caller_deadline {
+                Some(caller) if Instant::now() >= caller => ImageBuildError::Timeout {
+                    build_id: build_id.to_string(),
+                    waited: started.elapsed(),
+                },
+                _ => error,
+            });
+        }
+        Attempted::Interrupted => {
+            let report = interruption_for_build(client, build_id, None).await;
+            emit(SandboxImageBuildEvent::Interrupted(report.clone()));
+            return Err(ImageBuildError::Interrupted(report));
+        }
+    };
+    // The wait's own clock starts now; what the lookup used is taken off
+    // the caller's timeout so the whole operation honors it.
+    let options = ImageBuildWaitOptions {
+        timeout: options
+            .timeout
+            .map(|timeout| timeout.saturating_sub(started.elapsed())),
+        follow_logs: options.follow_logs,
+    };
+    wait_for_terminal(
+        client,
+        ctx,
+        build_id,
+        None,
+        Some(info),
+        &options,
+        interrupt,
+        emit,
+    )
+    .await
+}
+
+/// The result of a terminal build: the immutable publication record, or the
+/// typed failure/cancellation outcome.
+pub(crate) fn terminal_result(info: &ImageBuildInfo) -> BuildResult<ImageBuildResult> {
+    match &info.status {
+        ImageBuildStatus::Succeeded => info.result.clone().ok_or_else(|| {
+            ImageBuildError::other(format!(
+                "build {} succeeded but reports no result",
+                info.build_id
+            ))
+        }),
+        ImageBuildStatus::Failed => Err(ImageBuildError::Failed {
+            build_id: info.build_id.clone(),
+            error: info
+                .error
+                .clone()
+                .unwrap_or_else(|| "no error recorded".to_string()),
+            info: Box::new(info.clone()),
+        }),
+        ImageBuildStatus::Cancelled => Err(ImageBuildError::Cancelled {
+            build_id: info.build_id.clone(),
+            info: Box::new(info.clone()),
+        }),
+        other => Err(ImageBuildError::other(format!(
+            "build {} ended in unexpected status {other}",
+            info.build_id
+        ))),
+    }
+}
+
 #[derive(Clone, Copy)]
 struct BuildWaitTiming {
     poll_interval: Duration,
-    poll_timeout: Duration,
     log_drain_grace: Duration,
 }
 
@@ -742,124 +1746,204 @@ impl BuilderLogSink {
     }
 }
 
+/// The instant the wait gives up: the service-informed operation deadline
+/// plus the recovery allowance and/or the caller's timeout, whichever comes
+/// first; [`DEFAULT_WAIT_LIMIT`] when neither is known. Recomputed from each
+/// observation so a service that extends the deadline (a new attempt) is
+/// honored.
+fn wait_deadline(
+    info: Option<&ImageBuildInfo>,
+    options: &ImageBuildWaitOptions,
+    started: Instant,
+) -> Instant {
+    let caller = options.timeout.map(|timeout| started + timeout);
+    let server = info
+        .and_then(ImageBuildInfo::operation_deadline)
+        .map(|deadline| {
+            let remaining = deadline
+                .duration_since(SystemTime::now())
+                .unwrap_or(Duration::ZERO);
+            Instant::now() + remaining
+        });
+    match (server, caller) {
+        (Some(server), Some(caller)) => server.min(caller),
+        (Some(server), None) => server,
+        (None, Some(caller)) => caller,
+        (None, None) => started + DEFAULT_WAIT_LIMIT,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-async fn wait_for_publication_with_follower<Follow, FollowFuture>(
+async fn wait_for_terminal_with_follower<F, Follow, FollowFuture>(
     client: &Client,
-    ctx: &crate::sandbox_images::ResolvedBuildContext,
-    created: &Value,
-    registered_name: &str,
-    mut emit: impl FnMut(SandboxImageBuildEvent),
+    ctx: Option<&ResolvedBuildContext>,
+    build_id: &str,
+    client_request_id: Option<&str>,
+    initial: Option<ImageBuildInfo>,
+    options: &ImageBuildWaitOptions,
+    interrupt: &InterruptSignal,
+    mut emit: F,
     timing: BuildWaitTiming,
     follow_builder: Follow,
-) -> Result<Value>
+) -> BuildResult<ImageBuildInfo>
 where
-    Follow: Fn(crate::sandbox_images::ResolvedBuildContext, String, BuilderLogSink) -> FollowFuture
-        + Clone
-        + Send
-        + 'static,
+    F: FnMut(SandboxImageBuildEvent),
+    Follow:
+        Fn(ResolvedBuildContext, String, BuilderLogSink) -> FollowFuture + Clone + Send + 'static,
     FollowFuture: Future<Output = Result<()>> + Send + 'static,
 {
-    let build_id = build_id_of(created)?;
-    let path = format!("/builds/{build_id}");
-    let deadline = tokio::time::Instant::now() + timing.poll_timeout;
-    let mut last_reported = String::new();
+    let started = Instant::now();
+    // A record already known to be terminal needs no poll: report it.
+    if let Some(info) = initial.as_ref().filter(|info| info.status.is_terminal()) {
+        emit(SandboxImageBuildEvent::Progress {
+            build_id: info.build_id.clone(),
+            status: info.status.clone(),
+            phase: info.phase.clone(),
+            attempt: info.attempt_no,
+        });
+        emit(SandboxImageBuildEvent::Status(progress_message(info)));
+        emit(SandboxImageBuildEvent::Terminal {
+            build_id: info.build_id.clone(),
+            status: info.status.clone(),
+            phase: info.phase.clone(),
+            attempt: info.attempt_no,
+        });
+        return Ok(info.clone());
+    }
+    let mut deadline = wait_deadline(initial.as_ref(), options, started);
+    let mut last_progress: Option<(ImageBuildStatus, Option<ImageBuildPhase>, u64)> = None;
     let mut observed_builders = HashSet::new();
     let (log_sender, mut log_receiver) = tokio::sync::mpsc::channel(BUILDER_LOG_CHANNEL_CAPACITY);
     let dropped_logs = Arc::new(AtomicUsize::new(0));
     let mut followers = tokio::task::JoinSet::new();
-    let image_id = loop {
+
+    /// Stop following logs, run the cancellation handshake and report it.
+    async fn interrupted<F: FnMut(SandboxImageBuildEvent)>(
+        client: &Client,
+        build_id: &str,
+        client_request_id: Option<&str>,
+        followers: &mut tokio::task::JoinSet<()>,
+        receiver: &mut tokio::sync::mpsc::Receiver<SandboxImageBuildEvent>,
+        dropped: &AtomicUsize,
+        emit: &mut F,
+    ) -> ImageBuildError {
+        finish_builder_log_followers(followers, receiver, dropped, Duration::ZERO, emit).await;
+        let report = interruption_for_build(client, build_id, client_request_id).await;
+        emit(SandboxImageBuildEvent::Interrupted(report.clone()));
+        ImageBuildError::Interrupted(report)
+    }
+
+    loop {
         drain_ready_builder_logs(&mut log_receiver, &dropped_logs, &mut emit);
-        let request = client.request(Method::GET, &path).build()?;
-        let response = client.execute_raw(request).await?;
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(SandboxImageBuildError::other(format!(
-                "build status poll failed (HTTP {status}): {body}"
-            )));
+        let attempted = with_reconnects(
+            "Image Service",
+            deadline,
+            Some(interrupt),
+            &mut emit,
+            || get_build_attempt(client, build_id),
+        )
+        .await;
+        let info = match attempted {
+            Attempted::Done(info) => info,
+            Attempted::Failed(error) => {
+                finish_builder_log_followers(
+                    &mut followers,
+                    &mut log_receiver,
+                    &dropped_logs,
+                    Duration::ZERO,
+                    &mut emit,
+                )
+                .await;
+                return Err(error);
+            }
+            Attempted::Expired(_) => {
+                finish_builder_log_followers(
+                    &mut followers,
+                    &mut log_receiver,
+                    &dropped_logs,
+                    Duration::ZERO,
+                    &mut emit,
+                )
+                .await;
+                return Err(ImageBuildError::Timeout {
+                    build_id: build_id.to_string(),
+                    waited: started.elapsed(),
+                });
+            }
+            Attempted::Interrupted => {
+                return Err(interrupted(
+                    client,
+                    build_id,
+                    client_request_id,
+                    &mut followers,
+                    &mut log_receiver,
+                    &dropped_logs,
+                    &mut emit,
+                )
+                .await);
+            }
+        };
+        deadline = wait_deadline(Some(&info), options, started);
+
+        let progress = (info.status.clone(), info.phase.clone(), info.attempt_no);
+        if last_progress.as_ref() != Some(&progress) {
+            emit(SandboxImageBuildEvent::Progress {
+                build_id: info.build_id.clone(),
+                status: info.status.clone(),
+                phase: info.phase.clone(),
+                attempt: info.attempt_no,
+            });
+            emit(SandboxImageBuildEvent::Status(progress_message(&info)));
+            last_progress = Some(progress);
         }
-        let build: Value = response.json().await?;
-        let status = build
-            .get("status")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-            .to_string();
-        let attempt = build.get("attempt_no").and_then(Value::as_u64).unwrap_or(0);
-        let progress = format!("{status}/{attempt}");
-        if progress != last_reported {
+
+        if info.status.is_terminal() {
+            finish_builder_log_followers(
+                &mut followers,
+                &mut log_receiver,
+                &dropped_logs,
+                timing.log_drain_grace,
+                &mut emit,
+            )
+            .await;
+            emit(SandboxImageBuildEvent::Terminal {
+                build_id: info.build_id.clone(),
+                status: info.status.clone(),
+                phase: info.phase.clone(),
+                attempt: info.attempt_no,
+            });
+            return Ok(info);
+        }
+
+        if options.follow_logs
+            && let Some(ctx) = ctx
+            && let Some(builder_sandbox_id) = take_unobserved_builder(&info, &mut observed_builders)
+        {
+            let attempt = info.attempt_no;
             emit(SandboxImageBuildEvent::Status(format!(
-                "Build {build_id}: {status} (attempt {attempt})"
+                "Following Image Service builder logs for attempt {attempt}..."
             )));
-            last_reported = progress;
-        }
-        match status.as_str() {
-            "succeeded" => {
-                finish_builder_log_followers(
-                    &mut followers,
-                    &mut log_receiver,
-                    &dropped_logs,
-                    timing.log_drain_grace,
-                    &mut emit,
-                )
-                .await;
-                break build
-                    .get("image_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                    .ok_or_else(|| {
-                        SandboxImageBuildError::other(format!(
-                            "build {build_id} succeeded but reports no image_id"
-                        ))
-                    })?;
-            }
-            "failed" => {
-                finish_builder_log_followers(
-                    &mut followers,
-                    &mut log_receiver,
-                    &dropped_logs,
-                    timing.log_drain_grace,
-                    &mut emit,
-                )
-                .await;
-                let error = build
-                    .get("error")
-                    .and_then(Value::as_str)
-                    .unwrap_or("no error recorded");
-                return Err(SandboxImageBuildError::other(format!(
-                    "build {build_id} failed: {error}"
-                )));
-            }
-            "running" => {
-                if let Some(builder_sandbox_id) =
-                    take_unobserved_builder(&build, &mut observed_builders)
-                {
-                    emit(SandboxImageBuildEvent::Status(format!(
-                        "Following Image Service builder logs for attempt {attempt}..."
-                    )));
-                    let follower = follow_builder.clone();
-                    let follower_ctx = ctx.clone();
-                    let follower_sandbox_id = builder_sandbox_id.clone();
-                    let warning_sender = log_sender.clone();
-                    let sink = BuilderLogSink {
-                        sender: log_sender.clone(),
-                        dropped: dropped_logs.clone(),
-                    };
-                    followers.spawn(async move {
-                        if let Err(error) =
-                            follower(follower_ctx, follower_sandbox_id, sink).await
-                        {
-                            let _ = warning_sender
-                                .send(SandboxImageBuildEvent::Warning(format!(
-                                    "Could not follow builder logs for attempt {attempt} ({builder_sandbox_id}): {error}"
-                                )))
-                                .await;
-                        }
-                    });
+            let follower = follow_builder.clone();
+            let follower_ctx = ctx.clone();
+            let follower_sandbox_id = builder_sandbox_id.clone();
+            let warning_sender = log_sender.clone();
+            let sink = BuilderLogSink {
+                sender: log_sender.clone(),
+                dropped: dropped_logs.clone(),
+            };
+            followers.spawn(async move {
+                if let Err(error) = follower(follower_ctx, follower_sandbox_id, sink).await {
+                    let _ = warning_sender
+                        .send(SandboxImageBuildEvent::Warning(format!(
+                            "Could not follow builder logs for attempt {attempt} ({builder_sandbox_id}): {error}"
+                        )))
+                        .await;
                 }
-            }
-            _ => {}
+            });
         }
-        if tokio::time::Instant::now() >= deadline {
+
+        let now = Instant::now();
+        if now >= deadline {
             finish_builder_log_followers(
                 &mut followers,
                 &mut log_receiver,
@@ -868,44 +1952,46 @@ where
                 &mut emit,
             )
             .await;
-            return Err(build_poll_timeout(&build_id, timing.poll_timeout));
+            return Err(ImageBuildError::Timeout {
+                build_id: build_id.to_string(),
+                waited: started.elapsed(),
+            });
         }
-        stream_builder_logs_until_next_poll(
+        let next_poll = (now + timing.poll_interval).min(deadline);
+        if !stream_builder_logs_until_next_poll(
             &mut log_receiver,
             &dropped_logs,
-            (tokio::time::Instant::now() + timing.poll_interval).min(deadline),
+            next_poll,
+            interrupt,
             &mut emit,
         )
-        .await;
-    };
-
-    let request = client
-        .request(Method::GET, &published_image_path(&image_id))
-        .build()?;
-    let response = client.execute_raw(request).await?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(SandboxImageBuildError::other(format!(
-            "published image lookup failed (HTTP {status}): {body}"
-        )));
+        .await
+        {
+            return Err(interrupted(
+                client,
+                build_id,
+                client_request_id,
+                &mut followers,
+                &mut log_receiver,
+                &dropped_logs,
+                &mut emit,
+            )
+            .await);
+        }
     }
-    let image: Value = response.json().await?;
-    emit(SandboxImageBuildEvent::Status(format!(
-        "Image '{registered_name}' published ({CAS_IMAGE_REF_PREFIX}{image_id})"
-    )));
-    Ok(image)
 }
 
-fn published_image_path(image_id: &str) -> String {
-    format!("/images/{image_id}")
-}
-
-fn build_poll_timeout(build_id: &str, timeout: Duration) -> SandboxImageBuildError {
-    SandboxImageBuildError::other(format!(
-        "build {build_id} did not finish within {}s",
-        timeout.as_secs()
-    ))
+fn progress_message(info: &ImageBuildInfo) -> String {
+    match &info.phase {
+        Some(phase) => format!(
+            "Build {}: {} (attempt {}, phase {phase})",
+            info.build_id, info.status, info.attempt_no
+        ),
+        None => format!(
+            "Build {}: {} (attempt {})",
+            info.build_id, info.status, info.attempt_no
+        ),
+    }
 }
 
 fn drain_ready_builder_logs(
@@ -928,23 +2014,29 @@ fn emit_dropped_builder_logs(dropped: &AtomicUsize, emit: &mut impl FnMut(Sandbo
     }
 }
 
+/// Stream buffered builder logs until `next_poll`. Returns `false` when the
+/// interrupt fired first.
 async fn stream_builder_logs_until_next_poll(
     receiver: &mut tokio::sync::mpsc::Receiver<SandboxImageBuildEvent>,
     dropped: &AtomicUsize,
-    next_poll: tokio::time::Instant,
+    next_poll: Instant,
+    interrupt: &InterruptSignal,
     emit: &mut impl FnMut(SandboxImageBuildEvent),
-) {
-    loop {
+) -> bool {
+    let interrupted = loop {
         tokio::select! {
+            biased;
+            _ = interrupt.triggered() => break true,
             event = receiver.recv() => {
                 if let Some(event) = event {
                     emit(event);
                 }
             }
-            _ = tokio::time::sleep_until(next_poll) => break,
+            _ = tokio::time::sleep_until(next_poll) => break false,
         }
-    }
+    };
     emit_dropped_builder_logs(dropped, emit);
+    !interrupted
 }
 
 async fn finish_builder_log_followers(
@@ -999,14 +2091,16 @@ async fn follow_builder_logs(
     follow_started_process_output(&proxy, process.pid, emit).await
 }
 
-fn take_unobserved_builder(build: &Value, observed: &mut HashSet<(u64, String)>) -> Option<String> {
-    if build.get("status").and_then(Value::as_str) != Some("running") {
+fn take_unobserved_builder(
+    build: &ImageBuildInfo,
+    observed: &mut HashSet<(u64, String)>,
+) -> Option<String> {
+    if build.status != ImageBuildStatus::Running {
         return None;
     }
-    let attempt = build.get("attempt_no")?.as_u64()?;
-    let sandbox_id = build.get("builder_sandbox_id")?.as_str()?.to_string();
+    let sandbox_id = build.builder_sandbox_id.clone()?;
     observed
-        .insert((attempt, sandbox_id.clone()))
+        .insert((build.attempt_no, sandbox_id.clone()))
         .then_some(sandbox_id)
 }
 
@@ -1098,7 +2192,11 @@ mod tests {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     use super::*;
-    use crate::ClientBuilder;
+    use crate::{
+        ClientBuilder,
+        image_builds::ImageBuildKind,
+        sandbox_image_catalog::{ImageServiceCatalog, RegistrationWaitPolicy},
+    };
 
     #[test]
     fn dockerfile_and_import_requests_apply_global_scope_or_private_default() {
@@ -1169,16 +2267,13 @@ mod tests {
     }
 
     #[test]
-    fn accepted_build_message_reports_resolved_resources_when_available() {
+    fn accepted_build_message_names_the_build_only() {
+        // The service no longer echoes the resolved builder resources.
         assert_eq!(
-            accepted_build_message(&serde_json::json!({
+            accepted_build_message(&info_from(serde_json::json!({
                 "build_id": "build-1",
                 "builder_resources": {"cpus": 2.5, "memory_mb": 6144},
-            })),
-            "Build build-1 accepted (builder: 2.5 CPU, 6144 MiB)"
-        );
-        assert_eq!(
-            accepted_build_message(&serde_json::json!({"build_id": "build-1"})),
+            }))),
             "Build build-1 accepted"
         );
     }
@@ -1193,45 +2288,39 @@ mod tests {
         warn_ignored_options(&options, &mut |event| events.push(event));
         assert!(events.is_empty());
 
+        // Docker compatibility mode means nothing for a BuildKit-only path
+        // and is accepted silently (ADR 0107 D29).
+        options.docker_compat = true;
+        warn_ignored_options(&options, &mut |event| events.push(event));
+        assert!(events.is_empty());
+
         options.builder_disk_mb = Some(20_480);
         warn_ignored_options(&options, &mut |event| events.push(event));
-        assert_eq!(
-            events,
-            vec![SandboxImageBuildEvent::Warning(
-                "Image Service builds ignore: builder_disk_mb.".to_string()
-            )]
-        );
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            SandboxImageBuildEvent::Warning(message)
+                if message.contains("builder_disk_mb is ignored for CAS builds")
+        ));
     }
 
     #[test]
     fn each_running_attempt_builder_is_observed_once() {
         let mut observed = HashSet::new();
-        let pending = json!({
-            "status": "pending",
-            "attempt_no": 1,
-            "builder_sandbox_id": "stale-builder",
-        });
+        let pending = info_from(build_json("pending", 1, Some("stale-builder"), None));
         assert_eq!(take_unobserved_builder(&pending, &mut observed), None);
 
-        let pre_create = json!({ "status": "running", "attempt_no": 1 });
+        let pre_create = info_from(build_json("running", 1, None, None));
         assert_eq!(take_unobserved_builder(&pre_create, &mut observed), None);
 
-        let attempt_one = json!({
-            "status": "running",
-            "attempt_no": 1,
-            "builder_sandbox_id": "builder-1",
-        });
+        let attempt_one = info_from(build_json("running", 1, Some("builder-1"), None));
         assert_eq!(
             take_unobserved_builder(&attempt_one, &mut observed).as_deref(),
             Some("builder-1")
         );
         assert_eq!(take_unobserved_builder(&attempt_one, &mut observed), None);
 
-        let attempt_two = json!({
-            "status": "running",
-            "attempt_no": 2,
-            "builder_sandbox_id": "builder-2",
-        });
+        let attempt_two = info_from(build_json("running", 2, Some("builder-2"), None));
         assert_eq!(
             take_unobserved_builder(&attempt_two, &mut observed).as_deref(),
             Some("builder-2")
@@ -1247,21 +2336,148 @@ mod tests {
     }
 
     #[test]
-    fn published_image_path_relies_on_ingress_for_project_scope() {
-        assert_eq!(published_image_path("image-id"), "/images/image-id");
+    fn direct_pins_accept_image_ids_and_refuse_digests() {
+        assert_eq!(
+            direct_pin_public_id("image_abc123").unwrap(),
+            Some("image_abc123".to_string())
+        );
+        assert_eq!(direct_pin_public_id("alpine:3.20").unwrap(), None);
+        assert_eq!(direct_pin_public_id("team/base").unwrap(), None);
+        let hex = "a".repeat(64);
+        let error = direct_pin_public_id(&format!("cas-v1:{hex}"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("pin the image by name or its image_ id"),
+            "{error}"
+        );
+        assert!(direct_pin_public_id("image_NOT-AN-ID").is_err());
     }
 
     #[test]
-    fn direct_pins_accept_only_lowercase_hex_ids() {
-        let hex = "a".repeat(64);
+    fn build_args_expand_from_references_before_resolution() {
+        let mut plan = plan_with_context(std::env::temp_dir());
+        plan.base_image = "python:${PY_TAG}".to_string();
+        plan.global_build_args = vec![
+            ("PY_TAG".to_string(), Some("3.12-slim".to_string())),
+            ("TOOLS".to_string(), None),
+        ];
+        plan.unresolvable_image_references = vec![
+            crate::sandbox_images::UnresolvableImageReference {
+                line_number: 2,
+                reference: "python:${PY_TAG}".to_string(),
+                reason: UnresolvableImageReferenceReason::BuildArgExpansion,
+            },
+            crate::sandbox_images::UnresolvableImageReference {
+                line_number: 3,
+                reference: "$TOOLS".to_string(),
+                reason: UnresolvableImageReferenceReason::BuildArgExpansion,
+            },
+            crate::sandbox_images::UnresolvableImageReference {
+                line_number: 4,
+                reference: "team/${SIDE:-base}:v1".to_string(),
+                reason: UnresolvableImageReferenceReason::BuildArgExpansion,
+            },
+            crate::sandbox_images::UnresolvableImageReference {
+                line_number: 5,
+                reference: "pinned@sha256:abc".to_string(),
+                reason: UnresolvableImageReferenceReason::DigestPin,
+            },
+        ];
+
+        // Defaults alone: the base and the defaulted side reference expand,
+        // the ARG without a default stays unresolvable, the digest pin stays.
+        let expanded = expand_build_arg_references(plan.clone(), &[]);
+        assert_eq!(expanded.base_image, "python:3.12-slim");
         assert_eq!(
-            direct_pin_image_id(&format!("cas-v1:{hex}")).unwrap(),
-            Some(hex)
+            expanded.additional_image_references,
+            vec!["team/base:v1".to_string()]
         );
-        assert_eq!(direct_pin_image_id("alpine:3.20").unwrap(), None);
-        assert_eq!(direct_pin_image_id("team/base").unwrap(), None);
-        assert!(direct_pin_image_id("cas-v1:NOT-HEX").is_err());
-        assert!(direct_pin_image_id(&format!("cas-v1:{}", "a".repeat(63))).is_err());
+        let remaining: Vec<&str> = expanded
+            .unresolvable_image_references
+            .iter()
+            .map(|unresolvable| unresolvable.reference.as_str())
+            .collect();
+        assert_eq!(remaining, vec!["$TOOLS", "pinned@sha256:abc"]);
+
+        // Supplied build args win over the Dockerfile defaults.
+        let expanded = expand_build_arg_references(
+            plan,
+            &[
+                ("PY_TAG".to_string(), "3.13".to_string()),
+                ("TOOLS".to_string(), "team/tools".to_string()),
+            ],
+        );
+        assert_eq!(expanded.base_image, "python:3.13");
+        assert_eq!(
+            expanded.additional_image_references,
+            vec!["team/tools".to_string(), "team/base:v1".to_string()]
+        );
+        assert_eq!(expanded.unresolvable_image_references.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn parents_pin_by_public_id_and_refuse_legacy_templates() {
+        // The Image Service knows `team/base`; `old-base` is unknown there
+        // but registered as a legacy platform template.
+        let (image_service_url, image_service) = scripted_image_service_with_status(vec![
+            (
+                200,
+                published_image_record("image_base1", "team/base", &"c".repeat(64)),
+            ),
+            (404, json!({"error": "name \"old-base\" not found"})),
+        ])
+        .await;
+        let (platform_url, platform) = scripted_image_service_with_status(vec![(
+            200,
+            json!({"id": "sandbox_template_1", "name": "old-base", "snapshotId": "snap-1"}),
+        )])
+        .await;
+        let client = ClientBuilder::new(&image_service_url).build().unwrap();
+        let templates = SandboxTemplatesClient::new_api_key_scoped(
+            ClientBuilder::new(&platform_url).build().unwrap(),
+        );
+        let mut plan = plan_with_context(std::env::temp_dir());
+        plan.base_image = "team/base".to_string();
+        plan.additional_image_references = vec!["old-base".to_string()];
+        let mut events = Vec::new();
+        let error = resolve_parents(&client, &templates, &plan, &mut |event| events.push(event))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("'old-base' is a legacy image"), "{error}");
+        assert!(
+            error.contains("rebuild 'old-base' with --cas first"),
+            "{error}"
+        );
+        assert!(events.contains(&SandboxImageBuildEvent::Status(
+            "Resolved 'team/base' to registered image image_base1".to_string()
+        )));
+        image_service.await.unwrap();
+        platform.await.unwrap();
+
+        // A registry reference nobody registered pins nothing and pulls; an
+        // `image_` reference is pinned directly, with no catalog lookup.
+        let (image_service_url, image_service) =
+            scripted_image_service_with_status(vec![(404, json!({"error": "not found"}))]).await;
+        let (platform_url, platform) =
+            scripted_image_service_with_status(vec![(404, json!({"message": "not found"}))]).await;
+        let client = ClientBuilder::new(&image_service_url).build().unwrap();
+        let templates = SandboxTemplatesClient::new_api_key_scoped(
+            ClientBuilder::new(&platform_url).build().unwrap(),
+        );
+        let mut plan = plan_with_context(std::env::temp_dir());
+        plan.base_image = "alpine:3.20".to_string();
+        plan.additional_image_references = vec!["image_direct".to_string()];
+        let parents = resolve_parents(&client, &templates, &plan, &mut |_| {})
+            .await
+            .unwrap();
+        assert_eq!(
+            parents,
+            vec![json!({"reference": "image_direct", "public_id": "image_direct"})]
+        );
+        image_service.await.unwrap();
+        platform.await.unwrap();
     }
 
     #[test]
@@ -1407,28 +2623,27 @@ mod tests {
     async fn successful_build_wins_over_an_open_log_stream() {
         let image_id = "a".repeat(64);
         let (base_url, server) = scripted_image_service(vec![
-            json!({
-                "status": "running",
-                "attempt_no": 1,
-                "builder_sandbox_id": "builder-1",
-            }),
-            json!({
-                "status": "succeeded",
-                "attempt_no": 1,
-                "image_id": image_id,
-            }),
-            json!({"image_id": image_id}),
+            build_json("running", 1, Some("builder-1"), None),
+            build_json(
+                "succeeded",
+                1,
+                None,
+                Some(published_image_record("image_abc123", "image-1", &image_id)),
+            ),
         ])
         .await;
         let client = ClientBuilder::new(&base_url).build().unwrap();
         let ctx = test_build_context(&base_url);
         let mut events = Vec::new();
 
-        let image = wait_for_publication_with_follower(
+        let info = wait_for_terminal_with_follower(
             &client,
-            &ctx,
-            &json!({"build_id": "build-1"}),
-            "image-1",
+            Some(&ctx),
+            "build-1",
+            None,
+            None,
+            &follow_logs_options(),
+            &InterruptSignal::new(),
             |event| events.push(event),
             test_build_wait_timing(),
             |_ctx, _sandbox_id, sink| async move {
@@ -1443,11 +2658,40 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(image["image_id"], image_id);
+        // The result is the build's own immutable record; the template shape
+        // is derived from it (ADR 0107 D18/D28), never re-read.
+        let result = terminal_result(&info).unwrap();
+        assert_eq!(result.id.as_deref(), Some("image_abc123"));
+        assert_eq!(result.name.as_deref(), Some("image-1"));
+        let image = serde_json::to_value(result).unwrap();
+        assert_eq!(image["snapshotId"], "snap123");
+        assert_eq!(
+            image["snapshotFormatVersion"],
+            "content_addressed_streaming_v1"
+        );
+        assert!(
+            image.get("imageId").is_none(),
+            "no digest extra on the derived record: {image}"
+        );
         assert!(events.contains(&SandboxImageBuildEvent::BuildLog {
             stream: "stdout".to_string(),
             message: "still building".to_string(),
         }));
+        assert!(events.contains(&SandboxImageBuildEvent::Progress {
+            build_id: "build-1".to_string(),
+            status: ImageBuildStatus::Running,
+            phase: None,
+            attempt: 1,
+        }));
+        assert!(events.contains(&SandboxImageBuildEvent::Terminal {
+            build_id: "build-1".to_string(),
+            status: ImageBuildStatus::Succeeded,
+            phase: None,
+            attempt: 1,
+        }));
+        assert!(events.contains(&SandboxImageBuildEvent::Status(
+            "Build build-1: succeeded (attempt 1)".to_string()
+        )));
         server.await.unwrap();
     }
 
@@ -1455,32 +2699,16 @@ mod tests {
     async fn retries_attach_once_warn_once_and_bound_buffered_logs() {
         let image_id = "b".repeat(64);
         let (base_url, server) = scripted_image_service(vec![
-            json!({
-                "status": "running",
-                "attempt_no": 1,
-                "builder_sandbox_id": "builder-1",
-            }),
-            json!({
-                "status": "running",
-                "attempt_no": 1,
-                "builder_sandbox_id": "builder-1",
-            }),
-            json!({
-                "status": "pending",
-                "attempt_no": 1,
-                "builder_sandbox_id": "stale-builder",
-            }),
-            json!({
-                "status": "running",
-                "attempt_no": 2,
-                "builder_sandbox_id": "builder-2",
-            }),
-            json!({
-                "status": "succeeded",
-                "attempt_no": 2,
-                "image_id": image_id,
-            }),
-            json!({"image_id": image_id}),
+            build_json("running", 1, Some("builder-1"), None),
+            build_json("running", 1, Some("builder-1"), None),
+            build_json("pending", 1, Some("stale-builder"), None),
+            build_json("running", 2, Some("builder-2"), None),
+            build_json(
+                "succeeded",
+                2,
+                None,
+                Some(published_image_record("image_def456", "image-1", &image_id)),
+            ),
         ])
         .await;
         let client = ClientBuilder::new(&base_url).build().unwrap();
@@ -1517,11 +2745,14 @@ mod tests {
             }
         };
 
-        let image = wait_for_publication_with_follower(
+        let info = wait_for_terminal_with_follower(
             &client,
-            &ctx,
-            &json!({"build_id": "build-1"}),
-            "image-1",
+            Some(&ctx),
+            "build-1",
+            None,
+            None,
+            &follow_logs_options(),
+            &InterruptSignal::new(),
             |event| events.push(event),
             test_build_wait_timing(),
             follow,
@@ -1529,7 +2760,13 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(image["image_id"], image_id);
+        let result = terminal_result(&info).unwrap();
+        assert_eq!(result.id.as_deref(), Some("image_def456"));
+        assert_eq!(
+            result.snapshot_format_version.as_deref(),
+            Some("content_addressed_streaming_v1"),
+            "the template shape is derived from the trimmed record"
+        );
         assert_eq!(attempt_one_attaches.load(Ordering::Relaxed), 1);
         assert_eq!(attempt_two_attaches.load(Ordering::Relaxed), 1);
         assert_eq!(
@@ -1550,16 +2787,1047 @@ mod tests {
         server.await.unwrap();
     }
 
+    /// Failure and cancellation are distinct typed outcomes, and a service
+    /// that reports neither a result nor a terminal status is an error.
+    #[test]
+    fn terminal_results_are_typed() {
+        let failed = info_from(build_json("failed", 2, None, None));
+        assert!(matches!(
+            terminal_result(&failed),
+            Err(ImageBuildError::Failed { build_id, error, .. })
+                if build_id == "build-1" && error == "no error recorded"
+        ));
+        let cancelled = info_from(build_json("cancelled", 1, None, None));
+        assert!(matches!(
+            terminal_result(&cancelled),
+            Err(ImageBuildError::Cancelled { build_id, .. }) if build_id == "build-1"
+        ));
+        let no_result = info_from(build_json("succeeded", 1, None, None));
+        assert!(
+            terminal_result(&no_result)
+                .unwrap_err()
+                .to_string()
+                .contains("reports no result")
+        );
+    }
+
+    /// The same request is replayed under the same `Idempotency-Key` across
+    /// a transient failure; the key is never re-minted.
+    #[tokio::test]
+    async fn admission_keeps_one_idempotency_key_across_transient_retries() {
+        let (base_url, server) = recording_image_service(vec![
+            Reply::Status(503, json!({"error": "deploying"})),
+            Reply::Reset,
+            Reply::Status(201, build_json("pending", 0, None, None)),
+        ])
+        .await;
+        let client = ClientBuilder::new(&base_url).build().unwrap();
+        let request_id = new_client_request_id();
+        let mut events = Vec::new();
+        let created = admit_build(
+            &client,
+            "/builds",
+            &json!({"kind": "import", "image_ref": "alpine:3.20", "name": "img"}),
+            &request_id,
+            &InterruptSignal::new(),
+            &mut |event| events.push(event),
+        )
+        .await
+        .unwrap();
+        assert_eq!(created.info.build_id, "build-1");
+        let requests = server.finish().await;
+        assert_eq!(requests.len(), 3);
+        for request in &requests {
+            assert_eq!(request.line, "POST /builds HTTP/1.1");
+            assert_eq!(request.header("idempotency-key"), Some(request_id.as_str()));
+            assert_eq!(request.json()["image_ref"], "alpine:3.20");
+        }
+        assert!(events.contains(&SandboxImageBuildEvent::Accepted {
+            build_id: "build-1".to_string(),
+            client_request_id: Some(request_id.clone()),
+        }));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            SandboxImageBuildEvent::Status(message) if message.contains("reconnecting in")
+        )));
+    }
+
+    #[tokio::test]
+    async fn admission_conflicts_are_typed() {
+        let (base_url, server) = recording_image_service(vec![
+            Reply::Status(
+                409,
+                json!({
+                    "error": "Image 'img' already has an unfinished build 'build-9'. Cancel it before starting another.",
+                    "code": "image_build_in_progress",
+                    "image_name": "img",
+                    "active_build_id": "build-9",
+                    "active_kind": "dockerfile",
+                    "active_status": "running",
+                }),
+            ),
+            Reply::Status(
+                409,
+                json!({"error": "key reused", "code": "client_request_id_mismatch"}),
+            ),
+            Reply::Status(400, json!({"error": "Idempotency-Key header is required"})),
+            Reply::Status(403, json!({"error": "forbidden"})),
+        ])
+        .await;
+        let client = ClientBuilder::new(&base_url).build().unwrap();
+        let body = json!({"kind": "import", "image_ref": "alpine:3.20", "name": "img"});
+        let mut emit = |_event| {};
+        let conflict = admit_build(
+            &client,
+            "/builds",
+            &body,
+            "rid-1",
+            &InterruptSignal::new(),
+            &mut emit,
+        )
+        .await
+        .unwrap_err();
+        let ImageBuildError::InProgress(conflict) = conflict else {
+            panic!("expected a conflict, got {conflict}");
+        };
+        assert_eq!(conflict.image_name.as_deref(), Some("img"));
+        assert_eq!(conflict.active_build_id.as_deref(), Some("build-9"));
+        assert_eq!(conflict.active_kind, Some(ImageBuildKind::Dockerfile));
+        assert_eq!(conflict.active_status, Some(ImageBuildStatus::Running));
+        assert!(
+            conflict
+                .message
+                .contains("Cancel it before starting another")
+        );
+
+        let reused = admit_build(
+            &client,
+            "/builds",
+            &body,
+            "rid-1",
+            &InterruptSignal::new(),
+            &mut emit,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            reused,
+            ImageBuildError::IdempotencyKeyReused { client_request_id, .. }
+                if client_request_id == "rid-1"
+        ));
+        let usage = admit_build(
+            &client,
+            "/builds",
+            &body,
+            "rid-1",
+            &InterruptSignal::new(),
+            &mut emit,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(usage, ImageBuildError::Usage(message) if message.contains("required")));
+        let auth = admit_build(
+            &client,
+            "/builds",
+            &body,
+            "rid-1",
+            &InterruptSignal::new(),
+            &mut emit,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(auth, ImageBuildError::Auth(message) if message == "forbidden"));
+        // Answers are not outages: one request each, no retries.
+        assert_eq!(server.finish().await.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn cancel_outcomes_are_typed_including_not_admitted() {
+        let image_id = "c".repeat(64);
+        let (base_url, server) = recording_image_service(vec![
+            Reply::Status(
+                200,
+                json!({"outcome": "cancelled", "build": build_json("cancelled", 1, None, None)}),
+            ),
+            Reply::Status(
+                200,
+                json!({
+                    "outcome": "already_completed",
+                    "build": build_json(
+                        "succeeded",
+                        1,
+                        None,
+                        Some(published_image_record("image_won", "img", &image_id)),
+                    ),
+                }),
+            ),
+            Reply::Status(200, json!({"outcome": "not_admitted", "build": null})),
+            Reply::Status(404, json!({"error": "build 'build-x' not found"})),
+            Reply::Status(400, json!({"error": "exactly one selector"})),
+        ])
+        .await;
+        let client = ClientBuilder::new(&base_url).build().unwrap();
+        let by_id = CancelBuildSelector::BuildId("build-1".to_string());
+
+        let cancelled = cancel_build(&client, &by_id, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(cancelled.outcome, CancelBuildOutcome::Cancelled);
+        assert_eq!(cancelled.build.unwrap().status, ImageBuildStatus::Cancelled);
+
+        let completed = cancel_build(&client, &by_id, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(completed.outcome, CancelBuildOutcome::AlreadyCompleted);
+        assert_eq!(
+            completed.build.unwrap().result.unwrap().id.as_deref(),
+            Some("image_won")
+        );
+
+        let not_admitted = cancel_build(
+            &client,
+            &CancelBuildSelector::ClientRequestId("rid-lost".to_string()),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        assert_eq!(not_admitted.outcome, CancelBuildOutcome::NotAdmitted);
+        assert!(not_admitted.build.is_none());
+        // The report distinguishes it from a confirmation.
+        let report = InterruptionReport {
+            build_id: None,
+            client_request_id: Some("rid-lost".to_string()),
+            outcome: interruption_outcome(not_admitted),
+        };
+        assert!(!report.is_confirmed_cancelled());
+
+        let missing = cancel_build(
+            &client,
+            &CancelBuildSelector::BuildId("build-x".to_string()),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(missing, ImageBuildError::NotFound { build_id } if build_id == "build-x"));
+        let usage = cancel_build(&client, &by_id, Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert!(matches!(usage, ImageBuildError::Usage(_)));
+
+        let requests = server.finish().await;
+        assert_eq!(requests.len(), 5);
+        assert_eq!(requests[0].line, "POST /builds/cancel HTTP/1.1");
+        assert_eq!(requests[0].json(), json!({"build_id": "build-1"}));
+        assert_eq!(requests[2].json(), json!({"client_request_id": "rid-lost"}));
+        assert!(requests[0].header("idempotency-key").is_none());
+    }
+
+    /// A caller timeout reports the build id and leaves the build alone: no
+    /// cancellation, no deletion.
+    #[tokio::test]
+    async fn caller_timeout_carries_the_build_id_and_sends_no_cancel() {
+        let replies =
+            std::iter::repeat_n(Reply::Status(200, build_json("running", 1, None, None)), 40)
+                .collect();
+        let (base_url, server) = recording_image_service(replies).await;
+        let client = ClientBuilder::new(&base_url).build().unwrap();
+        let ctx = test_build_context(&base_url);
+        let options = ImageBuildWaitOptions {
+            timeout: Some(Duration::from_millis(60)),
+            follow_logs: false,
+        };
+        let error = wait_for_terminal_with_follower(
+            &client,
+            Some(&ctx),
+            "build-1",
+            None,
+            None,
+            &options,
+            &InterruptSignal::new(),
+            |_event| {},
+            test_build_wait_timing(),
+            no_follower,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            &error,
+            ImageBuildError::Timeout { build_id, .. } if build_id == "build-1"
+        ));
+        assert!(error.to_string().contains("may still be running"));
+        drop(client);
+        let requests = server.finish().await;
+        assert!(!requests.is_empty());
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.line == "GET /builds/build-1 HTTP/1.1")
+        );
+    }
+
+    /// The service-informed deadline bounds the wait when the caller sets no
+    /// timeout; an already expired deadline (plus allowance) ends it at once.
+    #[tokio::test]
+    async fn server_deadline_bounds_the_wait() {
+        let twenty_minutes_ago = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            - 20 * 60 * 1_000;
+        let mut expired = build_json("running", 1, None, None);
+        expired["operation_deadline_ms"] = json!(twenty_minutes_ago);
+        let replies = std::iter::repeat_n(Reply::Status(200, expired), 4).collect();
+        let (base_url, server) = recording_image_service(replies).await;
+        let client = ClientBuilder::new(&base_url).build().unwrap();
+        let ctx = test_build_context(&base_url);
+        let error = wait_for_terminal_with_follower(
+            &client,
+            Some(&ctx),
+            "build-1",
+            None,
+            None,
+            &ImageBuildWaitOptions::default(),
+            &InterruptSignal::new(),
+            |_event| {},
+            test_build_wait_timing(),
+            no_follower,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, ImageBuildError::Timeout { .. }));
+        drop(client);
+        assert!(server.finish().await.len() <= 2);
+
+        // The pure deadline rule: the caller's bound applies on top of the
+        // service's, and a wait without either is still bounded.
+        let started = Instant::now();
+        let caller = ImageBuildWaitOptions {
+            timeout: Some(Duration::from_secs(5)),
+            follow_logs: false,
+        };
+        let mut far = info_from(build_json("running", 1, None, None));
+        far.operation_deadline_ms = Some(
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64
+                + 3_600_000,
+        );
+        assert_eq!(
+            wait_deadline(Some(&far), &caller, started),
+            started + Duration::from_secs(5)
+        );
+        assert_eq!(
+            wait_deadline(None, &ImageBuildWaitOptions::default(), started),
+            started + DEFAULT_WAIT_LIMIT
+        );
+        assert!(
+            wait_deadline(Some(&far), &ImageBuildWaitOptions::default(), started)
+                > started + Duration::from_secs(3_500)
+        );
+    }
+
+    /// Status polling survives a 503, a dropped connection and a 429 with
+    /// Retry-After, keeps the same build id, and reports the reconnects.
+    #[tokio::test]
+    async fn wait_reconnects_across_transient_failures() {
+        let image_id = "d".repeat(64);
+        let (base_url, server) = recording_image_service(vec![
+            Reply::Status(503, json!({"error": "deploying"})),
+            Reply::Reset,
+            Reply::StatusWithHeaders(
+                429,
+                json!({"error": "slow down"}),
+                vec![("Retry-After".to_string(), "0".to_string())],
+            ),
+            Reply::Status(200, build_json("running", 1, None, None)),
+            Reply::Status(
+                200,
+                build_json(
+                    "succeeded",
+                    1,
+                    None,
+                    Some(published_image_record("image_ok", "img", &image_id)),
+                ),
+            ),
+        ])
+        .await;
+        let client = ClientBuilder::new(&base_url).build().unwrap();
+        let ctx = test_build_context(&base_url);
+        let mut events = Vec::new();
+        let info = wait_for_terminal_with_follower(
+            &client,
+            Some(&ctx),
+            "build-1",
+            None,
+            None,
+            &ImageBuildWaitOptions::default(),
+            &InterruptSignal::new(),
+            |event| events.push(event),
+            test_build_wait_timing(),
+            no_follower,
+        )
+        .await
+        .unwrap();
+        assert_eq!(info.status, ImageBuildStatus::Succeeded);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    SandboxImageBuildEvent::Status(message) if message.contains("reconnecting in")
+                ))
+                .count(),
+            3
+        );
+        let requests = server.finish().await;
+        assert_eq!(requests.len(), 5);
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.line == "GET /builds/build-1 HTTP/1.1")
+        );
+    }
+
+    /// Not-found, authorization and validation answers end the wait at once.
+    #[tokio::test]
+    async fn wait_does_not_retry_definitive_answers() {
+        for (status, body, check) in [
+            (
+                404,
+                json!({"error": "not found"}),
+                (|error: &ImageBuildError| matches!(error, ImageBuildError::NotFound { .. }))
+                    as fn(&ImageBuildError) -> bool,
+            ),
+            (403, json!({"error": "forbidden"}), |error| {
+                matches!(error, ImageBuildError::Auth(_))
+            }),
+            (400, json!({"error": "bad id"}), |error| {
+                matches!(error, ImageBuildError::Usage(_))
+            }),
+        ] {
+            let (base_url, server) =
+                recording_image_service(vec![Reply::Status(status, body)]).await;
+            let client = ClientBuilder::new(&base_url).build().unwrap();
+            let ctx = test_build_context(&base_url);
+            let error = wait_for_terminal_with_follower(
+                &client,
+                Some(&ctx),
+                "build-1",
+                None,
+                None,
+                &ImageBuildWaitOptions::default(),
+                &InterruptSignal::new(),
+                |_event| {},
+                test_build_wait_timing(),
+                no_follower,
+            )
+            .await
+            .unwrap_err();
+            assert!(check(&error), "{status}: {error}");
+            assert_eq!(server.finish().await.len(), 1);
+        }
+    }
+
+    /// An interrupt during the wait cancels by build id and reports the
+    /// confirmed outcome; the client request id is never needed.
+    #[tokio::test]
+    async fn interrupt_during_wait_cancels_by_build_id() {
+        let (base_url, server) = recording_image_service(vec![
+            Reply::Status(200, build_json("running", 1, None, None)),
+            Reply::Status(503, json!({"error": "blip"})),
+            Reply::Status(
+                200,
+                json!({"outcome": "cancelled", "build": build_json("cancelled", 1, None, None)}),
+            ),
+        ])
+        .await;
+        let client = ClientBuilder::new(&base_url).build().unwrap();
+        let ctx = test_build_context(&base_url);
+        let interrupt = InterruptSignal::new();
+        let trigger = interrupt.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            trigger.trigger();
+        });
+        let mut events = Vec::new();
+        let error = wait_for_terminal_with_follower(
+            &client,
+            Some(&ctx),
+            "build-1",
+            None,
+            None,
+            &ImageBuildWaitOptions::default(),
+            &interrupt,
+            |event| events.push(event),
+            BuildWaitTiming {
+                poll_interval: Duration::from_secs(10),
+                log_drain_grace: Duration::ZERO,
+            },
+            no_follower,
+        )
+        .await
+        .unwrap_err();
+        let ImageBuildError::Interrupted(report) = error else {
+            panic!("expected an interruption, got {error}");
+        };
+        assert_eq!(report.build_id.as_deref(), Some("build-1"));
+        assert_eq!(report.outcome, InterruptionOutcome::Cancelled);
+        assert!(report.is_confirmed_cancelled());
+        assert!(events.contains(&SandboxImageBuildEvent::Interrupted(report)));
+        let requests = server.finish().await;
+        assert_eq!(requests.len(), 3);
+        // The handshake retried the transient cancel failure with the same
+        // selector and never touched admission.
+        assert_eq!(requests[1].line, "POST /builds/cancel HTTP/1.1");
+        assert_eq!(requests[2].json(), json!({"build_id": "build-1"}));
+    }
+
+    fn pending_reply(build_id: &str) -> Reply {
+        Reply::Status(
+            503,
+            json!({
+                "error": "registration is still pending",
+                "code": "publication_pending",
+                "build_id": build_id,
+            }),
+        )
+    }
+
+    /// The deadline bounds a request in flight, not only the retries and
+    /// sleeps around it: a cancel handshake against a service that never
+    /// answers ends at its budget (not when the connection does), with the
+    /// 408 the abandoned attempt is reported as, and no second attempt is
+    /// started once the budget is gone.
+    #[tokio::test]
+    async fn a_stalled_request_is_abandoned_at_the_loop_deadline() {
+        const HOLD: Duration = Duration::from_secs(60);
+        let (base_url, server) = recording_image_service(vec![Reply::Hang(HOLD)]).await;
+        let client = ClientBuilder::new(&base_url).build().unwrap();
+        let started = Instant::now();
+        let error = cancel_build(
+            &client,
+            &CancelBuildSelector::BuildId("build-1".to_string()),
+            Duration::from_millis(300),
+        )
+        .await
+        .unwrap_err();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(300) && elapsed < HOLD / 2,
+            "{elapsed:?}"
+        );
+        // The handshake wraps the abandoned attempt's 408 in its own
+        // "no acknowledgement" error, which the callers report as an
+        // unconfirmed cancellation.
+        let message = error.to_string();
+        assert!(
+            message.contains("no cancellation acknowledgement"),
+            "{message}"
+        );
+        assert!(message.contains("HTTP 408"), "{message}");
+        assert!(message.contains("did not answer within"), "{message}");
+        assert_eq!(
+            server.finish().await.len(),
+            1,
+            "no attempt after the budget"
+        );
+    }
+
+    /// `wait` with a caller timeout against a service that never answers the
+    /// first lookup: the lookup is bounded by that timeout too, so the wait
+    /// reports the build's timeout (naming the id) instead of running the
+    /// lookup's own budget, and a timeout never cancels.
+    #[tokio::test]
+    async fn the_initial_lookup_of_a_wait_honors_the_caller_timeout() {
+        const HOLD: Duration = Duration::from_secs(60);
+        let (base_url, server) = recording_image_service(vec![Reply::Hang(HOLD)]).await;
+        let client = ClientBuilder::new(&base_url).build().unwrap();
+        let ctx = test_build_context(&base_url);
+        let started = Instant::now();
+        let error = lookup_and_wait(
+            &client,
+            Some(&ctx),
+            "build-1",
+            &ImageBuildWaitOptions {
+                timeout: Some(Duration::from_millis(300)),
+                follow_logs: false,
+            },
+            &InterruptSignal::new(),
+            |_event| {},
+        )
+        .await
+        .unwrap_err();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(300) && elapsed < HOLD / 2,
+            "{elapsed:?}"
+        );
+        let ImageBuildError::Timeout { build_id, waited } = error else {
+            panic!("expected a timeout, got {error}");
+        };
+        assert_eq!(build_id, "build-1");
+        assert!(waited >= Duration::from_millis(300));
+        let requests = server.finish().await;
+        assert_eq!(
+            requests.len(),
+            1,
+            "{:?}",
+            requests.iter().map(|r| &r.line).collect::<Vec<_>>()
+        );
+        assert!(
+            requests[0].line.starts_with("GET /builds/build-1 "),
+            "{}",
+            requests[0].line
+        );
+    }
+
+    /// An interrupt while the first lookup of a wait is still unanswered
+    /// runs the cancellation handshake by build id (the id the caller
+    /// passed is enough), and the wait ends as an interruption. The
+    /// recording server answers one connection at a time, so the lookup's
+    /// hold is short enough for the cancel to be served after it.
+    #[tokio::test]
+    async fn an_interrupt_during_the_initial_lookup_cancels_by_build_id() {
+        let (base_url, server) = recording_image_service(vec![
+            Reply::Hang(Duration::from_millis(300)),
+            Reply::Status(
+                200,
+                json!({"outcome": "cancelled", "build": build_json("cancelled", 1, None, None)}),
+            ),
+        ])
+        .await;
+        let client = ClientBuilder::new(&base_url).build().unwrap();
+        let ctx = test_build_context(&base_url);
+        let interrupt = InterruptSignal::new();
+        let trigger = interrupt.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            trigger.trigger();
+        });
+        let mut events = Vec::new();
+        let started = Instant::now();
+        let error = lookup_and_wait(
+            &client,
+            Some(&ctx),
+            "build-1",
+            &ImageBuildWaitOptions::default(),
+            &interrupt,
+            |event| events.push(event),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the hung lookup was abandoned"
+        );
+        let ImageBuildError::Interrupted(report) = error else {
+            panic!("expected an interruption, got {error}");
+        };
+        assert_eq!(report.build_id.as_deref(), Some("build-1"));
+        assert!(report.is_confirmed_cancelled(), "{report}");
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, SandboxImageBuildEvent::Interrupted(_))),
+            "the handshake is reported through the event stream"
+        );
+        let requests = server.finish().await;
+        let cancel = requests
+            .iter()
+            .find(|request| request.line.starts_with("POST /builds/cancel "))
+            .expect("cancel by build id");
+        assert_eq!(
+            serde_json::from_str::<Value>(&cancel.body).unwrap(),
+            json!({"build_id": "build-1"})
+        );
+    }
+
+    fn registration_policy(limit: Duration, poll_interval: Duration) -> RegistrationWaitPolicy {
+        RegistrationWaitPolicy {
+            limit,
+            poll_interval,
+        }
+    }
+
+    /// A `publication_pending` answer is progress, not unavailability: the
+    /// registration keeps re-POSTing the identical request under the same
+    /// key until the image publishes, announcing the pending build once.
+    #[tokio::test]
+    async fn registration_retries_pending_answers_under_one_key_until_published() {
+        let (base_url, server) = recording_image_service(vec![
+            pending_reply("build-9"),
+            pending_reply("build-9"),
+            pending_reply("build-9"),
+            Reply::Status(
+                201,
+                published_image_record("image_reg", "img", &"a".repeat(64)),
+            ),
+        ])
+        .await;
+        let client = ClientBuilder::new(&base_url).build().unwrap();
+        let catalog = ImageServiceCatalog::new(&client, &base_url);
+        let mut events = Vec::new();
+        let template = catalog
+            .adopt_snapshot_and_wait_with(
+                "img",
+                "snap-cas",
+                false,
+                registration_policy(Duration::from_secs(10), Duration::from_millis(10)),
+                &InterruptSignal::new(),
+                |event| events.push(event),
+            )
+            .await
+            .unwrap();
+        assert_eq!(template.id.as_deref(), Some("image_reg"));
+        assert_eq!(
+            template.snapshot_format_version.as_deref(),
+            Some("content_addressed_streaming_v1")
+        );
+        let requests = server.completed().await;
+        assert_eq!(requests.len(), 4);
+        let keys: HashSet<String> = requests
+            .iter()
+            .map(|request| request.header("idempotency-key").unwrap().to_string())
+            .collect();
+        assert_eq!(keys.len(), 1, "one key across every retry");
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.line.ends_with("/images/from-snapshot HTTP/1.1")),
+            "{:?}",
+            requests.iter().map(|r| &r.line).collect::<Vec<_>>()
+        );
+        let key = keys.into_iter().next().unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, SandboxImageBuildEvent::Accepted { .. }))
+                .count(),
+            1,
+            "the pending build is announced once"
+        );
+        assert!(events.contains(&SandboxImageBuildEvent::Accepted {
+            build_id: "build-9".to_string(),
+            client_request_id: Some(key),
+        }));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            SandboxImageBuildEvent::Status(message) if message.contains("pending (build build-9)")
+        )));
+    }
+
+    /// A pending streak past the registration wait bound is a timeout naming
+    /// the pending build; nothing is cancelled and no fresh key is minted.
+    #[tokio::test]
+    async fn registration_pending_past_the_bound_times_out_naming_the_build() {
+        let replies: Vec<Reply> = (0..40).map(|_| pending_reply("build-9")).collect();
+        let (base_url, server) = recording_image_service(replies).await;
+        let client = ClientBuilder::new(&base_url).build().unwrap();
+        let catalog = ImageServiceCatalog::new(&client, &base_url);
+        let started = Instant::now();
+        let error = catalog
+            .adopt_snapshot_and_wait_with(
+                "img",
+                "snap-cas",
+                false,
+                registration_policy(Duration::from_millis(250), Duration::from_millis(40)),
+                &InterruptSignal::new(),
+                |_| {},
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        let ImageBuildError::Timeout { build_id, .. } = error else {
+            panic!("expected a timeout, got {error}");
+        };
+        assert_eq!(build_id, "build-9");
+        let requests = server.finish().await;
+        assert!(requests.len() >= 2, "{}", requests.len());
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.line.ends_with("/images/from-snapshot HTTP/1.1")),
+            "no cancel and nothing but the same POST: {:?}",
+            requests.iter().map(|r| &r.line).collect::<Vec<_>>()
+        );
+        let keys: HashSet<String> = requests
+            .iter()
+            .map(|request| request.header("idempotency-key").unwrap().to_string())
+            .collect();
+        assert_eq!(keys.len(), 1);
+    }
+
+    /// A POST still in flight when the registration deadline passes is
+    /// abandoned at the deadline rather than running its own reconnect
+    /// budget to the end; no answer ever named a build, so the timeout
+    /// names the request id. The server holds the connection for far longer
+    /// than the deadline and never answers, so returning at all before the
+    /// hold ends proves the abandonment; the recording server counts only
+    /// complete requests, so the dropped attempt leaves exactly one.
+    #[tokio::test]
+    async fn registration_abandons_an_in_flight_request_at_the_deadline() {
+        const HOLD: Duration = Duration::from_secs(60);
+        let (base_url, server) = recording_image_service(vec![Reply::Hang(HOLD)]).await;
+        let client = ClientBuilder::new(&base_url).build().unwrap();
+        let catalog = ImageServiceCatalog::new(&client, &base_url);
+        let started = Instant::now();
+        let error = catalog
+            .adopt_snapshot_and_wait_with(
+                "img",
+                "snap-cas",
+                false,
+                registration_policy(Duration::from_millis(300), Duration::from_millis(40)),
+                &InterruptSignal::new(),
+                |_| {},
+            )
+            .await
+            .unwrap_err();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(300) && elapsed < HOLD / 2,
+            "{elapsed:?}"
+        );
+        let ImageBuildError::Timeout { build_id, waited } = error else {
+            panic!("expected a timeout, got {error}");
+        };
+        assert!(build_id.starts_with("(request "), "{build_id}");
+        assert!(waited >= Duration::from_millis(300));
+        let requests = server.finish().await;
+        assert_eq!(
+            requests.len(),
+            1,
+            "one complete POST, no second attempt and no cancel: {:?}",
+            requests.iter().map(|r| &r.line).collect::<Vec<_>>()
+        );
+        assert!(requests[0].line.ends_with("/images/from-snapshot HTTP/1.1"));
+    }
+
+    #[test]
+    fn upload_failures_carry_no_capability_material() {
+        let url = "https://bucket.s3.amazonaws.com/contexts/p/b.tar?X-Amz-Algorithm=AWS4-HMAC-SHA256\
+                   &X-Amz-Credential=AKIATESTKEY%2F20261015%2Fus-east-1%2Fs3%2Faws4_request\
+                   &X-Amz-Signature=deadbeefcafef00d";
+        let body = format!(
+            "<Error><Code>SignatureDoesNotMatch</Code><AWSAccessKeyId>AKIATESTKEY</AWSAccessKeyId>\
+             <StringToSign>AWS4-HMAC-SHA256 {url}</StringToSign><Resource>/contexts/p/b.tar</Resource>\
+             </Error> also url={url} json={{\"q\": \"X-Amz-Signature=deadbeefcafef00d\"}}"
+        );
+        let redacted = redact_capability(&body, url);
+        // Fixture markers standing in for signing material; none may survive.
+        for marker in [
+            "deadbeefcafef00d",
+            "AKIATESTKEY",
+            "X-Amz-",
+            "aws4_request",
+            "bucket.s3.amazonaws.com",
+        ] {
+            assert!(!redacted.contains(marker), "{marker} leaked: {redacted}");
+        }
+        assert!(redacted.contains("SignatureDoesNotMatch"), "{redacted}");
+        assert!(redacted.contains("<capability-url>"), "{redacted}");
+        // A transport error loses its URL before it is formatted.
+        let big = "x".repeat(10_000);
+        assert!(redact_capability(&big, url).len() <= MAX_UPLOAD_ERROR_BODY + 3);
+    }
+
+    /// Interrupted before the admission answered: the admission is not
+    /// replayed; the request id resolves it through the cancel route, and
+    /// `not_admitted` is reported as exactly that.
+    #[tokio::test]
+    async fn interrupt_before_admission_response_resolves_by_request_id() {
+        let (base_url, server) = recording_image_service(vec![
+            Reply::Hang(Duration::from_millis(200)),
+            Reply::Status(200, json!({"outcome": "not_admitted", "build": null})),
+        ])
+        .await;
+        let client = ClientBuilder::new(&base_url).build().unwrap();
+        let interrupt = InterruptSignal::new();
+        let trigger = interrupt.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            trigger.trigger();
+        });
+        let request_id = new_client_request_id();
+        let mut events = Vec::new();
+        let error = admit_build(
+            &client,
+            "/builds",
+            &json!({"kind": "import", "image_ref": "alpine:3.20", "name": "img"}),
+            &request_id,
+            &interrupt,
+            &mut |event| events.push(event),
+        )
+        .await
+        .unwrap_err();
+        let ImageBuildError::Interrupted(report) = error else {
+            panic!("expected an interruption, got {error}");
+        };
+        assert_eq!(report.build_id, None);
+        assert_eq!(
+            report.client_request_id.as_deref(),
+            Some(request_id.as_str())
+        );
+        assert_eq!(report.outcome, InterruptionOutcome::NotAdmitted);
+        assert!(!report.is_confirmed_cancelled());
+        assert!(report.to_string().contains("No build was admitted"));
+        let requests = server.finish().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].line, "POST /builds HTTP/1.1");
+        assert_eq!(requests[1].line, "POST /builds/cancel HTTP/1.1");
+        assert_eq!(requests[1].json(), json!({"client_request_id": request_id}));
+    }
+
+    /// When publication wins the race the interruption says so and carries
+    /// the published result instead of claiming cancellation.
+    #[tokio::test]
+    async fn interrupt_racing_success_reports_already_completed() {
+        let image_id = "e".repeat(64);
+        let (base_url, server) = recording_image_service(vec![
+            Reply::Status(200, build_json("running", 1, None, None)),
+            Reply::Status(
+                200,
+                json!({
+                    "outcome": "already_completed",
+                    "build": build_json(
+                        "succeeded",
+                        1,
+                        None,
+                        Some(published_image_record("image_won", "img", &image_id)),
+                    ),
+                }),
+            ),
+        ])
+        .await;
+        let client = ClientBuilder::new(&base_url).build().unwrap();
+        let ctx = test_build_context(&base_url);
+        let interrupt = InterruptSignal::new();
+        let trigger = interrupt.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            trigger.trigger();
+        });
+        let error = wait_for_terminal_with_follower(
+            &client,
+            Some(&ctx),
+            "build-1",
+            None,
+            None,
+            &ImageBuildWaitOptions::default(),
+            &interrupt,
+            |_event| {},
+            BuildWaitTiming {
+                poll_interval: Duration::from_secs(10),
+                log_drain_grace: Duration::ZERO,
+            },
+            no_follower,
+        )
+        .await
+        .unwrap_err();
+        let ImageBuildError::Interrupted(report) = error else {
+            panic!("expected an interruption, got {error}");
+        };
+        match &report.outcome {
+            InterruptionOutcome::AlreadyCompleted(Some(result)) => {
+                assert_eq!(result.id.as_deref(), Some("image_won"));
+            }
+            other => panic!("unexpected outcome {other:?}"),
+        }
+        assert!(!report.is_confirmed_cancelled());
+        assert!(report.to_string().contains("already completed"));
+        server.finish().await;
+    }
+
+    /// A build lookup maps 404 to `NotFound` and reconnects across a 503.
+    #[tokio::test]
+    async fn get_build_reconnects_and_maps_not_found() {
+        let (base_url, server) = recording_image_service(vec![
+            Reply::Status(503, json!({"error": "deploying"})),
+            Reply::Status(200, build_json("running", 1, Some("builder-1"), None)),
+            Reply::Status(404, json!({"error": "unknown"})),
+        ])
+        .await;
+        let client = ClientBuilder::new(&base_url).build().unwrap();
+        let info = get_build(&client, "build-1").await.unwrap();
+        assert_eq!(info.builder_sandbox_id.as_deref(), Some("builder-1"));
+        let missing = get_build(&client, "build-2").await.unwrap_err();
+        assert!(matches!(missing, ImageBuildError::NotFound { build_id } if build_id == "build-2"));
+        assert_eq!(server.finish().await.len(), 3);
+    }
+
+    #[test]
+    fn retryable_failures_are_outages_not_answers() {
+        let server = |status: u16| {
+            ImageBuildError::Sdk(SdkError::ServerError {
+                status: StatusCode::from_u16(status).unwrap(),
+                message: String::new(),
+            })
+        };
+        assert!(is_retryable(&server(500)));
+        assert!(is_retryable(&server(503)));
+        assert!(is_retryable(&ImageBuildError::Service {
+            status: 429,
+            message: String::new()
+        }));
+        assert!(is_retryable(&ImageBuildError::Service {
+            status: 408,
+            message: String::new()
+        }));
+        assert!(!is_retryable(&ImageBuildError::Service {
+            status: 409,
+            message: String::new()
+        }));
+        assert!(!is_retryable(&ImageBuildError::Auth(String::new())));
+        assert!(!is_retryable(&ImageBuildError::NotFound {
+            build_id: "b".to_string()
+        }));
+        assert!(!is_retryable(&ImageBuildError::Usage(String::new())));
+
+        // Retry-After wins over the schedule; the schedule is capped and
+        // jittered.
+        assert_eq!(
+            reconnect_delay(1, Some(Duration::from_secs(3))),
+            Duration::from_secs(3)
+        );
+        assert_eq!(
+            reconnect_delay(1, Some(Duration::from_secs(600))),
+            MAX_RETRY_AFTER
+        );
+        for attempt in 1..=12 {
+            let delay = reconnect_delay(attempt, None);
+            assert!(delay >= Duration::from_millis(375), "{delay:?}");
+            assert!(delay <= MAX_RECONNECT_BACKOFF.mul_f64(1.25), "{delay:?}");
+        }
+    }
+
+    fn no_follower(
+        _ctx: ResolvedBuildContext,
+        _sandbox_id: String,
+        _sink: BuilderLogSink,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn follow_logs_options() -> ImageBuildWaitOptions {
+        ImageBuildWaitOptions {
+            timeout: Some(Duration::from_secs(5)),
+            follow_logs: true,
+        }
+    }
+
     fn test_build_wait_timing() -> BuildWaitTiming {
         BuildWaitTiming {
             poll_interval: Duration::from_millis(5),
-            poll_timeout: Duration::from_secs(1),
             log_drain_grace: Duration::from_millis(20),
         }
     }
 
-    fn test_build_context(api_url: &str) -> crate::sandbox_images::ResolvedBuildContext {
-        crate::sandbox_images::ResolvedBuildContext {
+    fn test_build_context(api_url: &str) -> ResolvedBuildContext {
+        ResolvedBuildContext {
             api_url: api_url.to_string(),
             bearer_token: "token".to_string(),
             use_scope_headers: false,
@@ -1570,36 +3838,219 @@ mod tests {
         }
     }
 
+    /// A build record as the service reports it.
+    fn build_json(
+        status: &str,
+        attempt: u64,
+        builder_sandbox_id: Option<&str>,
+        result: Option<Value>,
+    ) -> Value {
+        json!({
+            "build_id": "build-1",
+            "client_request_id": "rid-1",
+            "kind": "dockerfile",
+            "name": "img",
+            "status": status,
+            "phase": null,
+            "attempt_no": attempt,
+            "builder_sandbox_id": builder_sandbox_id,
+            "result": result,
+            "cleanup_pending": false,
+            "operation_deadline_ms": null,
+        })
+    }
+
+    fn info_from(value: Value) -> ImageBuildInfo {
+        ImageBuildInfo::from_json(value).unwrap()
+    }
+
+    /// The Image Service's tenant record for a published image: the trimmed
+    /// eight fields. `_image_id` is accepted for the callers that still
+    /// name the content; the record carries no digest.
+    fn published_image_record(public_id: &str, name: &str, _image_id: &str) -> Value {
+        json!({
+            "id": public_id,
+            "name": name,
+            "snapshot_id": "snap123",
+            "global": false,
+            "physical_size_bytes": 42,
+            "logical_size_bytes": 10_737_418_240_u64,
+            "created_at": "2026-10-15T00:00:00.000Z",
+            "updated_at": "2026-10-15T00:00:00.000Z",
+        })
+    }
+
     async fn scripted_image_service(
         responses: Vec<Value>,
     ) -> (String, tokio::task::JoinHandle<()>) {
+        scripted_image_service_with_status(
+            responses
+                .into_iter()
+                .map(|response| (200, response))
+                .collect(),
+        )
+        .await
+    }
+
+    async fn scripted_image_service_with_status(
+        responses: Vec<(u16, Value)>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let expected = responses.len();
+        let (url, server) = recording_image_service(
+            responses
+                .into_iter()
+                .map(|(status, body)| Reply::Status(status, body))
+                .collect(),
+        )
+        .await;
+        (
+            url,
+            tokio::spawn(async move {
+                assert_eq!(server.completed().await.len(), expected);
+            }),
+        )
+    }
+
+    /// One scripted answer of the recording Image Service.
+    #[derive(Clone)]
+    enum Reply {
+        Status(u16, Value),
+        StatusWithHeaders(u16, Value, Vec<(String, String)>),
+        /// Read the request, then drop the connection without answering.
+        Reset,
+        /// Read the request, hold the connection for the duration, then drop
+        /// it: an admission whose answer the client never sees.
+        Hang(Duration),
+    }
+
+    struct RecordedRequest {
+        line: String,
+        headers: Vec<(String, String)>,
+        body: String,
+    }
+
+    impl RecordedRequest {
+        fn header(&self, name: &str) -> Option<&str> {
+            self.headers
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.as_str())
+        }
+
+        fn json(&self) -> Value {
+            serde_json::from_str(&self.body).unwrap_or(Value::Null)
+        }
+    }
+
+    /// A scripted Image Service that records every request it answers, in
+    /// arrival order, so tests can assert on methods, paths, headers and
+    /// bodies — including which requests were never made. `finish` returns
+    /// the record whether or not every scripted reply was consumed.
+    struct RecordingServer {
+        recorded: Arc<std::sync::Mutex<Vec<RecordedRequest>>>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl RecordingServer {
+        /// Wait until every scripted reply has been consumed.
+        async fn completed(self) -> Vec<RecordedRequest> {
+            self.task.await.unwrap();
+            std::mem::take(&mut *self.recorded.lock().unwrap())
+        }
+
+        async fn finish(self) -> Vec<RecordedRequest> {
+            // Give an in-flight accept a moment, then stop listening.
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            self.task.abort();
+            let _ = self.task.await;
+            std::mem::take(&mut *self.recorded.lock().unwrap())
+        }
+    }
+
+    async fn recording_image_service(replies: Vec<Reply>) -> (String, RecordingServer) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            for response in responses {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let mut request = Vec::new();
-                let mut buffer = [0_u8; 1024];
-                loop {
-                    let read = stream.read(&mut buffer).await.unwrap();
-                    if read == 0 {
-                        break;
+        let recorded: Arc<std::sync::Mutex<Vec<RecordedRequest>>> = Arc::default();
+        let record = recorded.clone();
+        let task = tokio::spawn(async move {
+            for reply in replies {
+                // Accept until one complete request (head and body) arrives.
+                // A connection the client opened and dropped before or while
+                // sending -- an attempt abandoned at a deadline, a pooled
+                // connection never used -- is not a request: it is neither
+                // recorded nor answered with this reply.
+                let (mut stream, line, headers, body) = loop {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut raw = Vec::new();
+                    let mut byte = [0_u8];
+                    while !raw.ends_with(b"\r\n\r\n") {
+                        if stream.read_exact(&mut byte).await.is_err() {
+                            break;
+                        }
+                        raw.push(byte[0]);
                     }
-                    request.extend_from_slice(&buffer[..read]);
-                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
-                        break;
+                    if !raw.ends_with(b"\r\n\r\n") {
+                        drop(stream);
+                        continue;
                     }
-                }
+                    let head = String::from_utf8_lossy(&raw).to_string();
+                    let mut lines = head.lines();
+                    let line = lines.next().unwrap_or_default().to_string();
+                    if line.is_empty() {
+                        drop(stream);
+                        continue;
+                    }
+                    let headers: Vec<(String, String)> = lines
+                        .filter_map(|header| header.split_once(':'))
+                        .map(|(key, value)| (key.trim().to_string(), value.trim().to_string()))
+                        .collect();
+                    let length = headers
+                        .iter()
+                        .find(|(key, _)| key.eq_ignore_ascii_case("content-length"))
+                        .and_then(|(_, value)| value.parse::<usize>().ok())
+                        .unwrap_or(0);
+                    let mut body = vec![0_u8; length];
+                    if length > 0 && stream.read_exact(&mut body).await.is_err() {
+                        drop(stream);
+                        continue;
+                    }
+                    break (stream, line, headers, body);
+                };
+                record.lock().unwrap().push(RecordedRequest {
+                    line,
+                    headers,
+                    body: String::from_utf8_lossy(&body).to_string(),
+                });
+                let (status, response, extra) = match reply {
+                    Reply::Status(status, response) => (status, response, Vec::new()),
+                    Reply::StatusWithHeaders(status, response, extra) => (status, response, extra),
+                    Reply::Reset => {
+                        drop(stream);
+                        continue;
+                    }
+                    Reply::Hang(duration) => {
+                        tokio::time::sleep(duration).await;
+                        drop(stream);
+                        continue;
+                    }
+                };
                 let body = serde_json::to_vec(&response).unwrap();
-                let headers = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                let mut head = format!(
+                    "HTTP/1.1 {status} Response\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
                     body.len()
                 );
-                stream.write_all(headers.as_bytes()).await.unwrap();
-                stream.write_all(&body).await.unwrap();
+                for (key, value) in extra {
+                    head.push_str(&format!("{key}: {value}\r\n"));
+                }
+                head.push_str("\r\n");
+                let _ = stream.write_all(head.as_bytes()).await;
+                let _ = stream.write_all(&body).await;
             }
         });
-        (format!("http://{address}"), server)
+        (
+            format!("http://{address}"),
+            RecordingServer { recorded, task },
+        )
     }
 
     fn plan_with_context(context_dir: std::path::PathBuf) -> DockerfileBuildPlan {
@@ -1613,6 +4064,7 @@ mod tests {
             unresolvable_image_references: Vec::new(),
             ignored_instructions: Vec::new(),
             import_image_reference: None,
+            global_build_args: Vec::new(),
         }
     }
 

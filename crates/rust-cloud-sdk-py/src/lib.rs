@@ -29,10 +29,14 @@ use tensorlake::artifact_storage::merge::MergeRequest;
 use tensorlake::artifact_storage::models::{
     NativeDirectFilePathWrite, NativeDirectFileWrite, REPO_KIND_FILESYSTEM,
 };
+use tensorlake::image_builds::{
+    CancelBuildSelector, ImageBuildClient, ImageBuildClientOptions, ImageBuildError,
+    ImageBuildWaitOptions, InterruptSignal,
+};
 use tensorlake::images::ImagesClient;
 use tensorlake::images::models::{ApplicationBuildContext, CreateApplicationBuildRequest};
-use tensorlake::sandbox_images::SandboxImageBuildEvent;
-use tensorlake::sandbox_templates::SandboxTemplatesClient;
+use tensorlake::sandbox_image_catalog::SandboxImageCatalog;
+use tensorlake::sandbox_images::{SandboxImageBuildError, SandboxImageBuildEvent};
 use tensorlake::sandboxes::models::{
     ArchivedSandboxesPaginationDirection, ClaimSandboxRequest, CreateSandboxPoolRequest,
     CreateSandboxRequest, GetSandboxLogsRequest, ListArchivedSandboxesParams, SnapshotType,
@@ -188,91 +192,84 @@ impl CloudApiClient {
         })
     }
 
-    fn delete_sandbox_image(&self, image_name: String) -> PyResult<()> {
-        let namespace = self.namespace.clone();
-        self.run_with_retry(5, move |client| {
-            let encoded_image = urlencoding::encode(&image_name).into_owned();
-            let path = format!("/v1/namespaces/{namespace}/sandbox-images/{encoded_image}");
-            async move {
-                let request = client.request(Method::DELETE, &path).build()?;
-                let _response = client.execute(request).await?;
-                Ok(())
-            }
-        })
+    /// Delete a registered sandbox image by name or id through the merged
+    /// catalog (ADR 0107): an `image_` id or a name known to the Image
+    /// Service deletes a CAS image, a `sandbox_template_` id or a name known
+    /// only to the platform registry deletes a legacy one. Not found in
+    /// either raises the 404 as a `remote_api` error. Replayed only when the
+    /// request provably never reached a server: a lost response must not
+    /// retry into deleting a same-named image in the other catalog.
+    #[pyo3(signature = (image_name, organization_id=None, project_id=None))]
+    fn delete_sandbox_image(
+        &self,
+        image_name: String,
+        organization_id: Option<String>,
+        project_id: Option<String>,
+    ) -> PyResult<()> {
+        let catalog = self.sandbox_image_catalog(organization_id, project_id)?;
+        run_with_connect_replay_blocking(
+            catalog,
+            "rust cloud API request",
+            into_py_error,
+            move |catalog| {
+                let image_name = image_name.clone();
+                async move { catalog.delete(&image_name).await }
+            },
+        )
     }
 
-    /// Look up a registered sandbox image (template) by name.
-    ///
-    /// Returns the template JSON, or `None` when no image with that name
-    /// exists. When organization/project are both omitted, the authenticated
-    /// API key supplies the scope through the token-scoped Platform API route.
+    /// Look up a registered sandbox image by name or id through the merged
+    /// catalog. Returns the record in the platform template shape (CAS
+    /// images are mapped onto it), or `None` when neither catalog knows the
+    /// reference. When organization/project are both omitted, the
+    /// authenticated API key supplies the scope.
     fn find_sandbox_image_by_name(
         &self,
         organization_id: Option<String>,
         project_id: Option<String>,
         image_name: String,
     ) -> PyResult<Option<String>> {
-        let scope = match (organization_id, project_id) {
-            (Some(organization_id), Some(project_id)) => Some((organization_id, project_id)),
-            (None, None) => None,
-            _ => {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "organization_id and project_id must be provided together",
-                ));
-            }
-        };
-        self.run_with_retry(5, move |client| {
-            let scope = scope.clone();
-            let image_name = image_name.clone();
-            async move {
-                let templates = match scope {
-                    Some((organization_id, project_id)) => {
-                        SandboxTemplatesClient::new(client, organization_id, project_id)
+        let catalog = self.sandbox_image_catalog(organization_id, project_id)?;
+        run_with_retry_blocking(
+            catalog,
+            5,
+            "rust cloud API request",
+            into_py_error,
+            move |catalog| {
+                let image_name = image_name.clone();
+                async move {
+                    match catalog.find(&image_name).await? {
+                        Some(image) => {
+                            let json = serde_json::to_string(&image).map_err(SdkError::from)?;
+                            Ok(Some(json))
+                        }
+                        None => Ok(None),
                     }
-                    None => SandboxTemplatesClient::new_api_key_scoped(client),
-                };
-                match templates.find_by_name(&image_name).await? {
-                    Some(traced) => {
-                        let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
-                        Ok(Some(json))
-                    }
-                    None => Ok(None),
                 }
-            }
-        })
+            },
+        )
     }
 
-    /// List all registered sandbox images (templates) for the given scope.
-    ///
-    /// Returns a JSON array of templates. When organization/project are both
-    /// omitted, the authenticated API key supplies the scope.
+    /// List every registered sandbox image of both families, newest first
+    /// (ADR 0107 D20), as a JSON array in the platform template shape. When
+    /// organization/project are both omitted, the authenticated API key
+    /// supplies the scope.
     fn list_sandbox_images(
         &self,
         organization_id: Option<String>,
         project_id: Option<String>,
     ) -> PyResult<String> {
-        let scope = match (organization_id, project_id) {
-            (Some(organization_id), Some(project_id)) => Some((organization_id, project_id)),
-            (None, None) => None,
-            _ => {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "organization_id and project_id must be provided together",
-                ));
-            }
-        };
-        self.run_with_retry(5, move |client| {
-            let scope = scope.clone();
-            async move {
-                let templates = match scope {
-                    Some((organization_id, project_id)) => {
-                        SandboxTemplatesClient::new(client, organization_id, project_id)
-                    }
-                    None => SandboxTemplatesClient::new_api_key_scoped(client),
-                };
-                let traced = templates.list().await?;
-                serde_json::to_string(&*traced).map_err(SdkError::from)
-            }
-        })
+        let catalog = self.sandbox_image_catalog(organization_id, project_id)?;
+        run_with_retry_blocking(
+            catalog,
+            5,
+            "rust cloud API request",
+            into_py_error,
+            move |catalog| async move {
+                let images = catalog.list().await?;
+                serde_json::to_string(&images).map_err(SdkError::from)
+            },
+        )
     }
 
     fn git_repo_url(&self, project_id: String, repo: String) -> PyResult<String> {
@@ -3675,6 +3672,30 @@ impl CloudApiClient {
         self.artifact_storage.clone()
     }
 
+    /// The merged image catalog over this client's credentials. Explicit
+    /// organization/project address the platform's project routes (PAT
+    /// callers); both omitted means the API key supplies the scope.
+    fn sandbox_image_catalog(
+        &self,
+        organization_id: Option<String>,
+        project_id: Option<String>,
+    ) -> PyResult<SandboxImageCatalog> {
+        let scope = match (organization_id, project_id) {
+            (Some(organization_id), Some(project_id)) => Some((organization_id, project_id)),
+            (None, None) => None,
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "organization_id and project_id must be provided together",
+                ));
+            }
+        };
+        Ok(SandboxImageCatalog::new(
+            self.client.clone(),
+            &self.api_url,
+            scope,
+        ))
+    }
+
     fn run_with_retry<T, F, Fut>(&self, max_retries: usize, operation: F) -> PyResult<T>
     where
         F: FnMut(Client) -> Fut + Send,
@@ -4160,6 +4181,34 @@ fn build_sandbox_image(
             .unwrap_or_default(),
     };
 
+    if cas {
+        // CAS builds run as an interruptible Image Service operation:
+        // KeyboardInterrupt reaches the remote cancellation handshake and
+        // a raising callback stops the wait. The legacy branch below is
+        // untouched.
+        let result = run_cas_image_operation(
+            py,
+            "sandbox_image_build",
+            emit,
+            |interrupt, emit| async move {
+                tensorlake::sandbox_images::build_sandbox_image_with_interrupt(
+                    options,
+                    docker_config_json,
+                    &interrupt,
+                    emit,
+                )
+                .await
+            },
+        )?;
+        return serde_json::to_string(&result).map_err(|error| {
+            CloudSandboxClientError::new_err((
+                "sandbox_image_build",
+                Option::<u16>::None,
+                error.to_string(),
+            ))
+        });
+    }
+
     let result = py
         .detach(move || {
             shared_runtime().block_on(async move {
@@ -4255,6 +4304,30 @@ fn import_sandbox_image(
         image_reference,
     };
 
+    if cas {
+        let result = run_cas_image_operation(
+            py,
+            "sandbox_image_import",
+            emit,
+            |interrupt, emit| async move {
+                tensorlake::sandbox_images::import_sandbox_image_with_interrupt(
+                    options,
+                    docker_config_json,
+                    &interrupt,
+                    emit,
+                )
+                .await
+            },
+        )?;
+        return serde_json::to_string(&result).map_err(|error| {
+            CloudSandboxClientError::new_err((
+                "sandbox_image_import",
+                Option::<u16>::None,
+                error.to_string(),
+            ))
+        });
+    }
+
     let result = py
         .detach(move || {
             shared_runtime().block_on(async move {
@@ -4326,27 +4399,677 @@ fn common_build_options(
     }
 }
 
+/// The legacy event emitter: a raising callback is swallowed and the build
+/// or import wait completes as it always has. The CAS operation API uses
+/// [`CasImageEventEmitter`] instead, which propagates callback errors.
 fn emit_sandbox_image_event(callback: &Py<PyAny>, event: SandboxImageBuildEvent) {
     let _ = Python::attach(|py| -> PyResult<()> {
-        let dict = PyDict::new(py);
-        match event {
-            SandboxImageBuildEvent::Status(message) => {
-                dict.set_item("type", "status")?;
-                dict.set_item("message", message)?;
-            }
-            SandboxImageBuildEvent::BuildLog { stream, message } => {
-                dict.set_item("type", "build_log")?;
-                dict.set_item("stream", stream)?;
-                dict.set_item("message", message)?;
-            }
-            SandboxImageBuildEvent::Warning(message) => {
-                dict.set_item("type", "warning")?;
-                dict.set_item("message", message)?;
-            }
-        }
+        let dict = sandbox_image_event_dict(py, event)?;
         callback.call1(py, (dict,))?;
         Ok(())
     });
+}
+
+/// The Python dict for one build event, shared by both emitters.
+fn sandbox_image_event_dict(
+    py: Python<'_>,
+    event: SandboxImageBuildEvent,
+) -> PyResult<Bound<'_, PyDict>> {
+    let dict = PyDict::new(py);
+    match event {
+        SandboxImageBuildEvent::Status(message) => {
+            dict.set_item("type", "status")?;
+            dict.set_item("message", message)?;
+        }
+        SandboxImageBuildEvent::BuildLog { stream, message } => {
+            dict.set_item("type", "build_log")?;
+            dict.set_item("stream", stream)?;
+            dict.set_item("message", message)?;
+        }
+        SandboxImageBuildEvent::Warning(message) => {
+            dict.set_item("type", "warning")?;
+            dict.set_item("message", message)?;
+        }
+        SandboxImageBuildEvent::Accepted {
+            build_id,
+            client_request_id,
+        } => {
+            dict.set_item("type", "build_accepted")?;
+            dict.set_item("message", format!("Build {build_id} accepted"))?;
+            dict.set_item("build_id", build_id)?;
+            dict.set_item("client_request_id", client_request_id)?;
+        }
+        SandboxImageBuildEvent::Progress {
+            build_id,
+            status,
+            phase,
+            attempt,
+        }
+        | SandboxImageBuildEvent::Terminal {
+            build_id,
+            status,
+            phase,
+            attempt,
+        } => {
+            let terminal = status.is_terminal();
+            dict.set_item(
+                "type",
+                if terminal {
+                    "build_terminal"
+                } else {
+                    "build_progress"
+                },
+            )?;
+            dict.set_item(
+                "message",
+                format!("Build {build_id}: {status} (attempt {attempt})"),
+            )?;
+            dict.set_item("build_id", build_id)?;
+            dict.set_item("status", status.as_str())?;
+            dict.set_item("phase", phase.map(|phase| phase.as_str().to_string()))?;
+            dict.set_item("attempt", attempt)?;
+        }
+        SandboxImageBuildEvent::Interrupted(report) => {
+            dict.set_item("type", "interrupted")?;
+            dict.set_item("message", report.to_string())?;
+            dict.set_item("build_id", report.build_id.clone())?;
+            dict.set_item("client_request_id", report.client_request_id.clone())?;
+            dict.set_item("outcome", report.outcome.name())?;
+            dict.set_item("confirmed", report.is_confirmed_cancelled())?;
+        }
+    }
+    Ok(dict)
+}
+
+// ---- Image Service build operations (CAS only) ----------------------------
+//
+// Every function here addresses the Image Service build plane. Legacy image
+// builds, lookups and deletes keep the bindings above, including their
+// `py.detach(block_on)` call shape, the error-swallowing legacy emitter and
+// their interruption behavior; nothing in this section is reached by them.
+
+/// The CAS event adapter: forwards events to the Python callback and keeps
+/// the first error the callback raised, so the operation stops and the
+/// error propagates instead of being discarded. Also remembers the admitted
+/// build id for the interruption messages.
+#[derive(Clone)]
+struct CasImageEventEmitter {
+    callback: Option<std::sync::Arc<Py<PyAny>>>,
+    error: std::sync::Arc<std::sync::Mutex<Option<PyErr>>>,
+    build_id: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+}
+
+impl CasImageEventEmitter {
+    fn new(callback: Option<Py<PyAny>>) -> Self {
+        Self {
+            callback: callback.map(std::sync::Arc::new),
+            error: std::sync::Arc::default(),
+            build_id: std::sync::Arc::default(),
+        }
+    }
+
+    fn emit(&self, event: SandboxImageBuildEvent) {
+        if let SandboxImageBuildEvent::Accepted { build_id, .. } = &event {
+            *self.build_id.lock().unwrap_or_else(|e| e.into_inner()) = Some(build_id.clone());
+        }
+        let Some(callback) = self.callback.as_ref() else {
+            return;
+        };
+        if self
+            .error
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+        {
+            return;
+        }
+        let result = Python::attach(|py| -> PyResult<()> {
+            let dict = sandbox_image_event_dict(py, event)?;
+            callback.call1(py, (dict,))?;
+            Ok(())
+        });
+        if let Err(error) = result {
+            *self.error.lock().unwrap_or_else(|e| e.into_inner()) = Some(error);
+        }
+    }
+
+    fn take_error(&self) -> Option<PyErr> {
+        self.error.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+
+    fn build_id(&self) -> Option<String> {
+        self.build_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    fn set_build_id(&self, build_id: String) {
+        *self.build_id.lock().unwrap_or_else(|e| e.into_inner()) = Some(build_id);
+    }
+
+    /// Deliver a binding-generated event (the forced second interrupt).
+    fn emit_dict(&self, py: Python<'_>, fields: &[(&str, Option<String>)]) {
+        let Some(callback) = self.callback.as_ref() else {
+            return;
+        };
+        let _ = (|| -> PyResult<()> {
+            let dict = PyDict::new(py);
+            for (key, value) in fields {
+                dict.set_item(*key, value.clone())?;
+            }
+            callback.call1(py, (dict,))?;
+            Ok(())
+        })();
+    }
+}
+
+/// How long the binding waits for the remote cancellation handshake after
+/// an interrupt before giving up locally. Above the core's 30 s budget so
+/// the core's own report normally arrives first.
+const CAS_INTERRUPT_GRACE: Duration = Duration::from_secs(45);
+const CAS_POLL_TICK: Duration = Duration::from_millis(50);
+
+/// Run a CAS operation so Python can interrupt it: the future runs on the
+/// shared runtime while this thread releases the GIL in short bounded
+/// ticks, checking for signals and callback errors between them.
+///
+/// - A `KeyboardInterrupt` (from the signal check or raised by the callback)
+///   triggers the core's interrupt signal, which runs the bounded remote
+///   cancellation handshake; its outcome is delivered as an `interrupted`
+///   event, then the `KeyboardInterrupt` propagates.
+/// - A second interrupt forces an immediate local exit: the task is
+///   abandoned and an `interrupted` event with outcome `unconfirmed` says
+///   the remote cancellation might not be confirmed.
+/// - Any other callback exception stops the operation locally — no remote
+///   cancellation is requested for it — and propagates.
+fn run_cas_image_operation<T, Fut>(
+    py: Python<'_>,
+    label: &'static str,
+    callback: Option<Py<PyAny>>,
+    operation: impl FnOnce(InterruptSignal, Box<dyn FnMut(SandboxImageBuildEvent) + Send>) -> Fut,
+) -> PyResult<T>
+where
+    T: Send + 'static,
+    Fut: Future<Output = Result<T, SandboxImageBuildError>> + Send + 'static,
+{
+    run_cas_image_operation_on(py, label, callback, None, operation)
+}
+
+/// [`run_cas_image_operation`] for an operation on a build whose id the
+/// caller already knows (a wait by id): the forced-exit message can name it
+/// before any event has.
+fn run_cas_image_operation_on<T, Fut>(
+    py: Python<'_>,
+    label: &'static str,
+    callback: Option<Py<PyAny>>,
+    known_build_id: Option<String>,
+    operation: impl FnOnce(InterruptSignal, Box<dyn FnMut(SandboxImageBuildEvent) + Send>) -> Fut,
+) -> PyResult<T>
+where
+    T: Send + 'static,
+    Fut: Future<Output = Result<T, SandboxImageBuildError>> + Send + 'static,
+{
+    let emitter = CasImageEventEmitter::new(callback);
+    if let Some(build_id) = known_build_id {
+        emitter.set_build_id(build_id);
+    }
+    let interrupt = InterruptSignal::new();
+    let task_emitter = emitter.clone();
+    let future = operation(
+        interrupt.clone(),
+        Box::new(move |event| task_emitter.emit(event)),
+    );
+    let mut task = shared_runtime().spawn(future);
+    let mut pending_interrupt: Option<PyErr> = None;
+    let mut interrupt_deadline: Option<std::time::Instant> = None;
+
+    let force_exit = |py: Python<'_>, task: &tokio::task::JoinHandle<_>, error: PyErr| {
+        task.abort();
+        let build_id = emitter.build_id();
+        let message = match &build_id {
+            Some(build_id) => format!(
+                "Interrupted again; remote cancellation of build {build_id} might not be \
+                 confirmed. Check it by build id and cancel it again if needed."
+            ),
+            None => "Interrupted again before the build was admitted; remote cancellation \
+                     might not be confirmed."
+                .to_string(),
+        };
+        emitter.emit_dict(
+            py,
+            &[
+                ("type", Some("interrupted".to_string())),
+                ("message", Some(message)),
+                ("build_id", build_id),
+                ("outcome", Some("unconfirmed".to_string())),
+            ],
+        );
+        Err(error)
+    };
+
+    loop {
+        let tick = py.detach(|| {
+            shared_runtime()
+                .block_on(async { tokio::time::timeout(CAS_POLL_TICK, &mut task).await })
+        });
+        if let Ok(joined) = tick {
+            let outcome = joined.map_err(|error| {
+                CloudSandboxClientError::new_err((
+                    label,
+                    Option::<u16>::None,
+                    format!("image operation task failed: {error}"),
+                ))
+            })?;
+            if let Some(error) = emitter.take_error() {
+                return Err(error);
+            }
+            if let Some(error) = pending_interrupt {
+                // The handshake ran and reported through the event stream;
+                // the interrupt itself is what Python sees.
+                return Err(error);
+            }
+            return outcome.map_err(|error| cas_image_error(label, error));
+        }
+
+        if let Some(error) = emitter.take_error() {
+            if error.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py) {
+                if pending_interrupt.is_some() {
+                    return force_exit(py, &task, error);
+                }
+                interrupt.trigger();
+                pending_interrupt = Some(error);
+                interrupt_deadline = Some(std::time::Instant::now() + CAS_INTERRUPT_GRACE);
+                continue;
+            }
+            // An ordinary callback exception is not a cancel request: stop
+            // waiting locally and surface it as is.
+            task.abort();
+            return Err(error);
+        }
+        if let Err(error) = py.check_signals() {
+            if pending_interrupt.is_some() {
+                return force_exit(py, &task, error);
+            }
+            interrupt.trigger();
+            pending_interrupt = Some(error);
+            interrupt_deadline = Some(std::time::Instant::now() + CAS_INTERRUPT_GRACE);
+            continue;
+        }
+        if let (Some(deadline), Some(error)) = (interrupt_deadline, pending_interrupt.as_ref())
+            && std::time::Instant::now() >= deadline
+        {
+            let error = error.clone_ref(py);
+            return force_exit(py, &task, error);
+        }
+    }
+}
+
+/// Map a CAS operation failure to the Python exception. Typed Image Service
+/// outcomes become `CloudSandboxClientError(("image_build", None, json))`
+/// where `json` carries `code`, `message`, the build id and the outcome
+/// fields; the Python layer turns them into typed exceptions. Other failures
+/// keep the legacy `(label, None, message)` shape.
+fn cas_image_error(label: &'static str, error: SandboxImageBuildError) -> PyErr {
+    match error {
+        SandboxImageBuildError::Build(error) => image_build_py_error(error),
+        other => CloudSandboxClientError::new_err((label, Option::<u16>::None, other.to_string())),
+    }
+}
+
+fn image_build_py_error(error: ImageBuildError) -> PyErr {
+    let payload = error.to_json();
+    CloudSandboxClientError::new_err(("image_build", Option::<u16>::None, payload.to_string()))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn image_build_client(
+    api_url: String,
+    token: String,
+    organization_id: Option<String>,
+    project_id: Option<String>,
+    namespace: Option<String>,
+    use_scope_headers: bool,
+    user_agent: Option<String>,
+) -> PyResult<ImageBuildClient> {
+    ImageBuildClient::new(ImageBuildClientOptions {
+        api_url,
+        bearer_token: token,
+        use_scope_headers,
+        organization_id,
+        project_id,
+        namespace: namespace.unwrap_or_else(|| "default".to_string()),
+        user_agent,
+    })
+    .map_err(image_build_py_error)
+}
+
+fn image_build_json<T: serde::Serialize>(value: &T) -> PyResult<String> {
+    serde_json::to_string(value).map_err(|error| {
+        CloudSandboxClientError::new_err(("image_build", Option::<u16>::None, error.to_string()))
+    })
+}
+
+/// Admit a CAS Dockerfile build (upload and seal its context) without
+/// waiting. Returns JSON `{"build": <BuildInfo>, "client_request_id": ...}`.
+#[pyfunction]
+#[pyo3(signature = (
+    api_url,
+    token,
+    dockerfile_path,
+    registered_name=None,
+    disk_mb=None,
+    cpus=None,
+    memory_mb=None,
+    is_public=false,
+    organization_id=None,
+    project_id=None,
+    namespace=None,
+    use_scope_headers=false,
+    user_agent=None,
+    dockerfile_text=None,
+    context_dir=None,
+    build_args=None,
+    emit=None,
+    docker_config_json=None,
+))]
+#[allow(clippy::too_many_arguments)]
+fn start_image_build(
+    py: Python<'_>,
+    api_url: String,
+    token: String,
+    dockerfile_path: String,
+    registered_name: Option<String>,
+    disk_mb: Option<u64>,
+    cpus: Option<f64>,
+    memory_mb: Option<i64>,
+    is_public: bool,
+    organization_id: Option<String>,
+    project_id: Option<String>,
+    namespace: Option<String>,
+    use_scope_headers: bool,
+    user_agent: Option<String>,
+    dockerfile_text: Option<String>,
+    context_dir: Option<String>,
+    build_args: Option<std::collections::BTreeMap<String, String>>,
+    emit: Option<Py<PyAny>>,
+    docker_config_json: Option<String>,
+) -> PyResult<String> {
+    let options = tensorlake::sandbox_images::SandboxImageBuildOptions {
+        common: common_build_options(
+            api_url,
+            token,
+            use_scope_headers,
+            organization_id,
+            project_id,
+            namespace,
+            registered_name,
+            disk_mb,
+            None,
+            cpus,
+            memory_mb,
+            is_public,
+            user_agent,
+            false,
+            true,
+        ),
+        dockerfile_path: PathBuf::from(dockerfile_path),
+        dockerfile_text,
+        context_dir: context_dir.map(PathBuf::from),
+        context_files: Vec::new(),
+        build_args: build_args
+            .map(|args| args.into_iter().collect())
+            .unwrap_or_default(),
+    };
+    let handle = run_cas_image_operation(py, "image_build", emit, |interrupt, emit| async move {
+        tensorlake::image_builds::start_build(options, docker_config_json, &interrupt, emit)
+            .await
+            .map_err(SandboxImageBuildError::Build)
+    })?;
+    image_build_json(&serde_json::json!({
+        "build": handle.info(),
+        "client_request_id": handle.client_request_id(),
+    }))
+}
+
+/// Admit a CAS registry import without waiting.
+#[pyfunction]
+#[pyo3(signature = (
+    api_url,
+    token,
+    image_reference,
+    registered_name=None,
+    disk_mb=None,
+    cpus=None,
+    memory_mb=None,
+    is_public=false,
+    organization_id=None,
+    project_id=None,
+    namespace=None,
+    use_scope_headers=false,
+    user_agent=None,
+    emit=None,
+    docker_config_json=None,
+))]
+#[allow(clippy::too_many_arguments)]
+fn start_image_import(
+    py: Python<'_>,
+    api_url: String,
+    token: String,
+    image_reference: String,
+    registered_name: Option<String>,
+    disk_mb: Option<u64>,
+    cpus: Option<f64>,
+    memory_mb: Option<i64>,
+    is_public: bool,
+    organization_id: Option<String>,
+    project_id: Option<String>,
+    namespace: Option<String>,
+    use_scope_headers: bool,
+    user_agent: Option<String>,
+    emit: Option<Py<PyAny>>,
+    docker_config_json: Option<String>,
+) -> PyResult<String> {
+    let options = tensorlake::sandbox_images::SandboxImageImportOptions {
+        common: common_build_options(
+            api_url,
+            token,
+            use_scope_headers,
+            organization_id,
+            project_id,
+            namespace,
+            registered_name,
+            disk_mb,
+            None,
+            cpus,
+            memory_mb,
+            is_public,
+            user_agent,
+            false,
+            true,
+        ),
+        image_reference,
+    };
+    let handle = run_cas_image_operation(py, "image_build", emit, |interrupt, emit| async move {
+        tensorlake::image_builds::start_import(options, docker_config_json, &interrupt, emit)
+            .await
+            .map_err(SandboxImageBuildError::Build)
+    })?;
+    image_build_json(&serde_json::json!({
+        "build": handle.info(),
+        "client_request_id": handle.client_request_id(),
+    }))
+}
+
+/// `GET /builds/{build_id}` as BuildInfo JSON. Unknown and foreign builds
+/// raise the `not_found` code; legacy references are refused locally.
+#[pyfunction]
+#[pyo3(signature = (
+    api_url,
+    token,
+    build_id,
+    organization_id=None,
+    project_id=None,
+    namespace=None,
+    use_scope_headers=false,
+    user_agent=None,
+))]
+#[allow(clippy::too_many_arguments)]
+fn get_image_build(
+    py: Python<'_>,
+    api_url: String,
+    token: String,
+    build_id: String,
+    organization_id: Option<String>,
+    project_id: Option<String>,
+    namespace: Option<String>,
+    use_scope_headers: bool,
+    user_agent: Option<String>,
+) -> PyResult<String> {
+    let client = image_build_client(
+        api_url,
+        token,
+        organization_id,
+        project_id,
+        namespace,
+        use_scope_headers,
+        user_agent,
+    )?;
+    let handle = py
+        .detach(move || shared_runtime().block_on(async move { client.get(&build_id).await }))
+        .map_err(image_build_py_error)?;
+    image_build_json(handle.info())
+}
+
+/// Wait for a build to finish and return its immutable result JSON.
+/// `timeout_secs` bounds the wait on top of the service-informed deadline;
+/// expiry raises the `timeout` code and leaves the build running.
+/// KeyboardInterrupt cancels the build through the bounded handshake.
+#[pyfunction]
+#[pyo3(signature = (
+    api_url,
+    token,
+    build_id,
+    timeout_secs=None,
+    follow_logs=false,
+    organization_id=None,
+    project_id=None,
+    namespace=None,
+    use_scope_headers=false,
+    user_agent=None,
+    emit=None,
+))]
+#[allow(clippy::too_many_arguments)]
+fn wait_image_build(
+    py: Python<'_>,
+    api_url: String,
+    token: String,
+    build_id: String,
+    timeout_secs: Option<f64>,
+    follow_logs: bool,
+    organization_id: Option<String>,
+    project_id: Option<String>,
+    namespace: Option<String>,
+    use_scope_headers: bool,
+    user_agent: Option<String>,
+    emit: Option<Py<PyAny>>,
+) -> PyResult<String> {
+    let client = image_build_client(
+        api_url,
+        token,
+        organization_id,
+        project_id,
+        namespace,
+        use_scope_headers,
+        user_agent,
+    )?;
+    let timeout = match timeout_secs {
+        Some(secs) if secs.is_finite() && secs >= 0.0 => Some(Duration::from_secs_f64(secs)),
+        Some(_) => {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "timeout_secs must be a non-negative number",
+            ));
+        }
+        None => None,
+    };
+    // The lookup runs inside the interruptible operation too: a
+    // KeyboardInterrupt during a slow or stalled first request cancels the
+    // build by its id instead of ending the call without a request.
+    let known_build_id = build_id.clone();
+    let result = run_cas_image_operation_on(
+        py,
+        "image_build",
+        emit,
+        Some(known_build_id),
+        |interrupt, mut emit| async move {
+            client
+                .wait_build(
+                    &build_id,
+                    ImageBuildWaitOptions {
+                        timeout,
+                        follow_logs,
+                    },
+                    &interrupt,
+                    &mut emit,
+                )
+                .await
+                .map_err(SandboxImageBuildError::Build)
+        },
+    )?;
+    image_build_json(&result)
+}
+
+/// Cancel a build by build id (sufficient) or, to recover an admission whose
+/// response was lost, by client request id. Exactly one selector. Returns
+/// JSON `{"outcome": ..., "build": BuildInfo|null}`; `not_admitted` is not a
+/// confirmed cancellation.
+#[pyfunction]
+#[pyo3(signature = (
+    api_url,
+    token,
+    build_id=None,
+    client_request_id=None,
+    organization_id=None,
+    project_id=None,
+    namespace=None,
+    use_scope_headers=false,
+    user_agent=None,
+))]
+#[allow(clippy::too_many_arguments)]
+fn cancel_image_build(
+    py: Python<'_>,
+    api_url: String,
+    token: String,
+    build_id: Option<String>,
+    client_request_id: Option<String>,
+    organization_id: Option<String>,
+    project_id: Option<String>,
+    namespace: Option<String>,
+    use_scope_headers: bool,
+    user_agent: Option<String>,
+) -> PyResult<String> {
+    let selector = match (build_id, client_request_id) {
+        (Some(build_id), None) => CancelBuildSelector::BuildId(build_id),
+        (None, Some(request_id)) => CancelBuildSelector::ClientRequestId(request_id),
+        _ => {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "exactly one of build_id or client_request_id is required",
+            ));
+        }
+    };
+    let client = image_build_client(
+        api_url,
+        token,
+        organization_id,
+        project_id,
+        namespace,
+        use_scope_headers,
+        user_agent,
+    )?;
+    let response = py
+        .detach(move || shared_runtime().block_on(async move { client.cancel(selector).await }))
+        .map_err(image_build_py_error)?;
+    image_build_json(&response)
 }
 
 /// Validate a managed-process name client-side, raising `ValueError` on failure. Wraps the
@@ -4379,6 +5102,11 @@ fn _cloud_sdk(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(load_docker_config_json, module)?)?;
     module.add_function(wrap_pyfunction!(build_sandbox_image, module)?)?;
     module.add_function(wrap_pyfunction!(import_sandbox_image, module)?)?;
+    module.add_function(wrap_pyfunction!(start_image_build, module)?)?;
+    module.add_function(wrap_pyfunction!(start_image_import, module)?)?;
+    module.add_function(wrap_pyfunction!(get_image_build, module)?)?;
+    module.add_function(wrap_pyfunction!(wait_image_build, module)?)?;
+    module.add_function(wrap_pyfunction!(cancel_image_build, module)?)?;
     module.add_function(wrap_pyfunction!(validate_managed_name, module)?)?;
     Ok(())
 }
