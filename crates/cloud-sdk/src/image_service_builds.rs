@@ -3382,14 +3382,15 @@ mod tests {
              </Error> also url={url} json={{\"q\": \"X-Amz-Signature=deadbeefcafef00d\"}}"
         );
         let redacted = redact_capability(&body, url);
-        for secret in [
+        // Fixture markers standing in for signing material; none may survive.
+        for marker in [
             "deadbeefcafef00d",
             "AKIATESTKEY",
             "X-Amz-",
             "aws4_request",
             "bucket.s3.amazonaws.com",
         ] {
-            assert!(!redacted.contains(secret), "{secret} leaked: {redacted}");
+            assert!(!redacted.contains(marker), "{marker} leaked: {redacted}");
         }
         assert!(redacted.contains("SignatureDoesNotMatch"), "{redacted}");
         assert!(redacted.contains("<capability-url>"), "{redacted}");
