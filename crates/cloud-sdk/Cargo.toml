@@ -25,6 +25,9 @@ derive_builder = { workspace = true }
 flate2 = { workspace = true }
 futures = { workspace = true }
 hex = { workspace = true }
+hickory-resolver = "0.25.2"
+hyper-util = { version = "0.1", features = ["client-proxy"] }
+httpdate = "1"
 ignore = { workspace = true }
 pin-project-lite = { workspace = true }
 png = { workspace = true }
@@ -46,6 +49,7 @@ shlex = { workspace = true }
 tar = { workspace = true }
 tempfile = "3"
 thiserror = { workspace = true }
+tracing = { workspace = true }
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 tokio-util = { workspace = true }
@@ -63,6 +67,11 @@ libc = "0.2"
 xattr = { workspace = true }
 
 [dev-dependencies]
+hyper = { version = "1", features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
+http-body-util = { workspace = true }
+async-trait = { workspace = true }
+http = { workspace = true }
 rcgen = "0.14"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 data-encoding = "2.5"

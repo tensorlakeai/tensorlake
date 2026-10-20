@@ -3802,7 +3802,7 @@ where
 }
 
 fn into_py_error(error: SdkError) -> PyErr {
-    match error {
+    match error.into_original() {
         SdkError::Authentication(message) => {
             CloudApiClientError::new_err(("sdk_usage", Some(401u16), message))
         }
@@ -3824,7 +3824,7 @@ fn into_py_error(error: SdkError) -> PyErr {
 }
 
 fn into_sandbox_py_error(error: SdkError) -> PyErr {
-    match error {
+    match error.into_original() {
         SdkError::SandboxResize(error) => CloudSandboxClientError::new_err((
             "resize",
             Option::<u16>::None,

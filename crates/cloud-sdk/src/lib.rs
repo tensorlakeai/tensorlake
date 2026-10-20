@@ -88,7 +88,7 @@ use sandboxes::*;
 use secrets::*;
 
 mod client;
-pub use client::{Client, ClientBuilder, Traced};
+pub use client::{Client, ClientBuilder, ReadRetryConfig, Traced};
 
 /// Environment variable that overrides the sandbox API (lifecycle) base URL.
 ///

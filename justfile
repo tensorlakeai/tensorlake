@@ -248,6 +248,18 @@ test-rust:
 test-crate crate:
     just with-function-agent-core cargo test -p {{crate}}
 
+# Sandbox metadata read retry/failover tests; local fault servers, no cloud credentials.
+test-sdk-resilience *ARGS:
+    cargo nextest run --locked -p tensorlake {{ARGS}}
+
+# Lint the SDK, CLI and both native bindings with the pinned private core staged.
+lint-sdk-resilience:
+    just with-function-agent-core cargo clippy -p tensorlake -p tensorlake-cli -p tensorlake-rust-cloud-sdk-node -p tensorlake-rust-cloud-sdk-py --all-targets --no-deps -- -D warnings
+
+# Compare the healthy pooled HTTP/2 read path with the previous transport.
+bench-sdk-resilience:
+    cargo test --locked -p tensorlake --lib client::read_retry::tests::benchmark_healthy_read_transport -- --ignored --nocapture --test-threads=1
+
 # Artifact Storage transport unit tests; no credentials or live services required.
 test-artifact-storage:
     cargo test --locked -p tensorlake --lib artifact_storage::

@@ -17,6 +17,11 @@ use crate::{
 /// including client-specific errors, authentication issues, and general HTTP errors.
 #[derive(Debug, Error)]
 pub enum SdkError {
+    /// A safe read has already used its retry policy. Binding-level retry
+    /// wrappers must not start another sequence. The original error is kept
+    /// for language bindings and callers inspecting the failure.
+    #[error(transparent)]
+    ReadRetryExhausted(Box<SdkError>),
     /// A resize failed or could not be observed to completion.
     #[error(transparent)]
     SandboxResize(#[from] Box<crate::sandboxes::resize::SandboxResizeError>),
@@ -136,6 +141,14 @@ pub enum TransportFailure {
 }
 
 impl SdkError {
+    /// Remove the internal retry boundary when presenting an error to a caller.
+    pub fn into_original(self) -> Self {
+        match self {
+            Self::ReadRetryExhausted(error) => error.into_original(),
+            error => error,
+        }
+    }
+
     /// The underlying [`reqwest::Error`], whether it surfaced directly or
     /// wrapped by `reqwest_middleware`.
     ///
@@ -146,6 +159,7 @@ impl SdkError {
     /// rather than matching on [`SdkError::Http`] alone.
     pub fn as_reqwest(&self) -> Option<&reqwest::Error> {
         match self {
+            Self::ReadRetryExhausted(error) => error.as_reqwest(),
             Self::Http(error) => Some(error),
             Self::Middleware(reqwest_middleware::Error::Reqwest(error)) => Some(error),
             Self::EventStreamTransport(error) => Some(error),
@@ -161,6 +175,9 @@ impl SdkError {
     /// that identify it (`tcp connect error`, `dns error`) appear only in the
     /// [`std::error::Error::source`] chain.
     pub fn transport_failure(&self) -> Option<TransportFailure> {
+        if let Self::ReadRetryExhausted(error) = self {
+            return error.transport_failure();
+        }
         if matches!(self, Self::StreamTimeout { .. }) {
             return Some(TransportFailure::Timeout);
         }
