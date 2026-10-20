@@ -45,6 +45,7 @@ export enum SnapshotStatus {
   FAILED = "failed",
   DELETING = "deleting",
   REPLICATING = "replicating",
+  UNKNOWN = "unknown",
 }
 
 /**
@@ -438,6 +439,8 @@ export interface ListArchivedSandboxesResponse {
 export interface CreateSnapshotResponse {
   snapshotId: string;
   status: SnapshotStatus;
+  /** Original response, populated when decoded by the SDK. */
+  raw?: Record<string, unknown>;
 }
 
 export interface SnapshotInfo {
@@ -446,6 +449,8 @@ export interface SnapshotInfo {
   sandboxId: string;
   baseImage: string;
   status: SnapshotStatus;
+  /** Original response, populated when decoded by the SDK. */
+  raw?: Record<string, unknown>;
   snapshotType?: SnapshotType;
   error?: string;
   snapshotUri?: string;

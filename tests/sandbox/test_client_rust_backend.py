@@ -21,6 +21,11 @@ from tensorlake.sandbox import (
 )
 from tensorlake.sandbox.client import SandboxClient
 from tensorlake.sandbox.exceptions import RemoteAPIError, SandboxError
+from tensorlake.sandbox.models import (
+    CreateSnapshotResponse,
+    ListSnapshotsResponse,
+    SnapshotInfo,
+)
 
 
 def _pending_from_create(create_json: str) -> str:
@@ -2069,7 +2074,7 @@ class TestSandboxClientRustBackend(unittest.TestCase):
 
         info = client.snapshot_and_wait("sbx-1")
 
-        self.assertEqual(info.status, SnapshotStatus.LOCAL_READY)
+        self.assertIs(info.status, SnapshotStatus.LOCAL_READY)
         self.assertIsNone(info.snapshot_uri)
 
     def test_snapshot_and_wait_can_wait_for_completed(self):
@@ -2098,7 +2103,7 @@ class TestSandboxClientRustBackend(unittest.TestCase):
             wait_until=SnapshotWaitCondition.COMPLETED,
         )
 
-        self.assertEqual(info.status, SnapshotStatus.COMPLETED)
+        self.assertIs(info.status, SnapshotStatus.COMPLETED)
         self.assertEqual(fake.get_calls, 2)
 
     def test_snapshot_omits_snapshot_type_when_none(self):
@@ -2111,6 +2116,165 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         self.assertEqual(len(fake.create_snapshot_calls), 1)
         _, snapshot_type = fake.create_snapshot_calls[0]
         self.assertIsNone(snapshot_type)
+
+    def test_snapshot_wait_does_not_treat_future_status_as_ready(self):
+        class _FutureStatusClient(_FakeRustClient):
+            get_calls = 0
+
+            def get_snapshot_json(self, snapshot_id):
+                self.get_calls += 1
+                status = "future_status" if self.get_calls == 1 else "local_ready"
+                return "trace-get", json.dumps(
+                    {
+                        "id": "snap-1",
+                        "namespace": "default",
+                        "sandbox_id": "sbx-1",
+                        "status": status,
+                    }
+                )
+
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        fake = _FutureStatusClient()
+        client._rust_client = fake
+        info = client.snapshot_and_wait("sbx-1", poll_interval=0)
+        self.assertIs(info.status, SnapshotStatus.LOCAL_READY)
+        self.assertEqual(fake.get_calls, 2)
+
+    def test_snapshot_wait_rejects_a_missing_or_null_status_before_polling(self):
+        fake = _FakeRustClient()
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        client._rust_client = fake
+        for payload in ({"snapshot_id": "s"}, {"snapshot_id": "s", "status": None}):
+            with (
+                self.subTest(payload=payload),
+                patch.object(
+                    fake, "create_snapshot", return_value=("trace", json.dumps(payload))
+                ),
+                patch.object(fake, "get_snapshot_json") as get,
+                self.assertRaisesRegex(SandboxError, "status"),
+            ):
+                client.snapshot_and_wait("sbx-1", poll_interval=0)
+            get.assert_not_called()
+
+
+class TestSnapshotStatusCompatibility(unittest.TestCase):
+    def test_snapshot_enums_keep_the_standard_enum_string_form(self):
+        self.assertEqual(str(SnapshotStatus.COMPLETED), "SnapshotStatus.COMPLETED")
+
+    def test_non_object_snapshot_responses_report_the_body_shape(self):
+        for model in (CreateSnapshotResponse, SnapshotInfo):
+            for payload in ("null", "[]", "1", '"bad"'):
+                with (
+                    self.subTest(model=model, payload=payload),
+                    self.assertRaisesRegex(ValueError, "JSON object"),
+                ):
+                    model.from_response(payload)
+
+    def test_diagnostics_do_not_affect_snapshot_equality(self):
+        payload = {
+            "id": "s",
+            "namespace": "n",
+            "sandbox_id": "b",
+            "status": "completed",
+        }
+        a = SnapshotInfo.from_response(payload)
+        b = SnapshotInfo.from_response({**payload, "future": 42})
+        self.assertEqual(a, b)
+        self.assertNotEqual(a.raw, b.raw)
+        self.assertNotIn("raw", a.model_dump())
+
+    def test_known_statuses_preserve_enum_values(self):
+        for model in (CreateSnapshotResponse, SnapshotInfo):
+            for status in SnapshotStatus:
+                payload = {
+                    "snapshot_id": "snap-1",
+                    "namespace": "default",
+                    "sandbox_id": "sbx-1",
+                    "status": status.value,
+                }
+                for mode, info in (
+                    ("python", model.model_validate(payload)),
+                    ("json", model.model_validate_json(json.dumps(payload))),
+                ):
+                    with self.subTest(model=model.__name__, status=status, mode=mode):
+                        self.assertIs(info.status, status)
+                        self.assertEqual(info.status.value, status.value)
+                        self.assertEqual(
+                            json.loads(info.model_dump_json())["status"], status.value
+                        )
+
+    def test_unknown_statuses_map_to_unknown_enum(self):
+        for model in (CreateSnapshotResponse, SnapshotInfo):
+            payload = {
+                "snapshot_id": "snap-1",
+                "namespace": "default",
+                "sandbox_id": "sbx-1",
+                "status": "future_status",
+            }
+            for mode, info in (
+                ("python", model.from_response(payload)),
+                ("json", model.from_response(json.dumps(payload))),
+            ):
+                with self.subTest(model=model.__name__, mode=mode):
+                    self.assertIs(info.status, SnapshotStatus.UNKNOWN)
+                    self.assertEqual(info.status.value, "unknown")
+                    self.assertEqual(
+                        json.loads(info.model_dump_json())["status"], "unknown"
+                    )
+                    self.assertEqual(info.raw, payload)
+                    self.assertNotIn("raw", info.model_dump())
+                    self.assertNotIn("raw", json.loads(info.model_dump_json()))
+
+    def test_response_decoding_requires_status(self):
+        payload = {"snapshot_id": "s", "namespace": "n", "sandbox_id": "b"}
+        for model in (CreateSnapshotResponse, SnapshotInfo):
+            for value in (
+                payload,
+                json.dumps(payload),
+                {**payload, "status": None},
+                json.dumps({**payload, "status": None}),
+            ):
+                with (
+                    self.subTest(model=model.__name__, value=value),
+                    self.assertRaisesRegex(ValueError, "status"),
+                ):
+                    model.from_response(value)
+
+    def test_list_response_handles_empty_results_and_validates_nested_records(self):
+        for payload in ({}, {"snapshots": None}, None):
+            with self.subTest(payload=payload):
+                self.assertEqual(
+                    ListSnapshotsResponse.from_response(json.dumps(payload)).snapshots,
+                    [],
+                )
+        payload = {
+            "snapshots": [
+                {
+                    "id": "s",
+                    "namespace": "n",
+                    "sandbox_id": "b",
+                    "status": "future_status",
+                }
+            ]
+        }
+        snapshot = ListSnapshotsResponse.from_response(json.dumps(payload)).snapshots[0]
+        self.assertIs(snapshot.status, SnapshotStatus.UNKNOWN)
+        self.assertEqual(snapshot.raw, payload["snapshots"][0])
+        for payload in ("[]", '{"snapshots":{}}', '{"snapshots":[{"id":"s"}]}'):
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                ListSnapshotsResponse.from_response(payload)
+
+    def test_constructing_snapshot_models_rejects_status_typos(self):
+        for model in (CreateSnapshotResponse, SnapshotInfo):
+            with self.subTest(model=model.__name__), self.assertRaises(ValueError):
+                model.model_validate(
+                    {
+                        "snapshot_id": "snap-1",
+                        "namespace": "default",
+                        "sandbox_id": "sbx-1",
+                        "status": "in_progres",
+                    }
+                )
 
 
 class TestSandboxFailureCompatibility(unittest.TestCase):

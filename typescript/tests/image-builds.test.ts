@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   __setNativeBindingForTest,
@@ -8,6 +9,11 @@ import {
   importSandboxImage,
 } from "../src/sandbox-image.js";
 import {
+  ImageBuildStatus,
+  ImageBuildPhase,
+  ImageBuildKind,
+  ImageBuildErrorCode,
+  ImageBuildCancellationOutcome,
   ImageBuildCancelledError,
   ImageBuildError,
   ImageBuildFailedError,
@@ -192,6 +198,184 @@ describe("image build operations", () => {
       build_id: "build-1",
       client_request_id: "rid-gen",
     });
+  });
+
+  it.each([
+    {}, { build: null }, { build: [] }, { build: {} },
+    ...[null, "", " ", 123].map((build_id) => ({ build: buildJson("pending", { build_id }) })),
+  ])("rejects admission without a build identity: %j", async (payload) => {
+    const binding = makeFakeBinding();
+    for (const [native, invoke] of [
+      [binding.startImageBuild, () => startImageBuild(new Image({ name: "img", baseImage: "ubuntu" }))],
+      [binding.startImageImport, () => startImageImport("ubuntu")],
+    ] as const) {
+      native.mockResolvedValueOnce(JSON.stringify(payload));
+      await expect(invoke()).rejects.toMatchObject({
+        code: ImageBuildErrorCode.SERVICE, raw: { response: payload },
+      });
+    }
+  });
+
+  it("keeps a null build id empty", async () => {
+    const binding = makeFakeBinding();
+    binding.getImageBuild.mockResolvedValueOnce(JSON.stringify(buildJson("pending", { build_id: null })));
+    expect((await getImageBuild("build-1")).info.buildId).toBe("");
+  });
+
+  it.each([{ build_id: "b" }, { build_id: "b", status: null }])(
+    "rejects a missing or null build status at every record boundary: %j", async (raw) => {
+      const binding = makeFakeBinding();
+      const handle = await getImageBuild("build-1");
+      for (const [native, invoke, payload] of [
+        [binding.getImageBuild, () => getImageBuild("build-1"), raw],
+        [binding.getImageBuild, () => handle.refresh(), raw],
+        [binding.startImageBuild, () => startImageBuild(new Image({ name: "img", baseImage: "ubuntu" })), { build: raw }],
+        [binding.startImageImport, () => startImageImport("ubuntu"), { build: raw }],
+      ] as const) {
+        native.mockResolvedValueOnce(JSON.stringify(payload));
+        await expect(invoke()).rejects.toMatchObject({
+          code: ImageBuildErrorCode.SERVICE, message: expect.stringContaining("status"),
+        });
+      }
+    },
+  );
+
+  it.each([
+    [null, 0], [0, 0], [2, 2], ["2", 2], ["2.0", 2], [Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER],
+  ])("decodes attempt_no %j as %j", async (attempt_no, expected) => {
+    const binding = makeFakeBinding();
+    binding.getImageBuild.mockResolvedValueOnce(JSON.stringify(buildJson("pending", { attempt_no })));
+    expect((await getImageBuild("build-1")).info.attemptNo).toBe(expected);
+  });
+
+  it.each([true, false, 1.5, "1.5", 2 ** 53, -(2 ** 53), "bad", "", [], {}])(
+    "rejects invalid attempt_no %j with SERVICE", async (attempt_no) => {
+      const binding = makeFakeBinding();
+      binding.getImageBuild.mockResolvedValueOnce(JSON.stringify(buildJson("pending", { attempt_no })));
+      await expect(getImageBuild("build-1")).rejects.toMatchObject({ code: ImageBuildErrorCode.SERVICE });
+    },
+  );
+
+  it("decodes known and future build enums at the response boundary", async () => {
+    const binding = makeFakeBinding();
+    for (const [field, values] of [["status", ImageBuildStatus], ["kind", ImageBuildKind], ["phase", ImageBuildPhase]] as const) {
+      for (const value of Object.values(values)) {
+        binding.getImageBuild.mockResolvedValueOnce(JSON.stringify(buildJson("pending", { [field]: value })));
+        expect((await getImageBuild("build-1")).info[field]).toBe(value);
+      }
+    }
+    const raw = buildJson("future_status", { kind: "future_kind", phase: "future_phase" });
+    binding.getImageBuild.mockResolvedValueOnce(JSON.stringify(raw));
+    const { info } = await getImageBuild("build-1");
+    expect(info).toMatchObject({ status: ImageBuildStatus.UNKNOWN, kind: ImageBuildKind.UNKNOWN, phase: ImageBuildPhase.UNKNOWN });
+    expect(info.raw).toEqual(raw);
+    for (const value of [null, "", undefined]) {
+      binding.getImageBuild.mockResolvedValueOnce(JSON.stringify(buildJson("pending", { kind: value, phase: value })));
+      const { info } = await getImageBuild("build-1");
+      expect(info.kind).toBeNull();
+      expect(info.phase).toBeNull();
+    }
+  });
+
+  it("keeps diagnostic raw out of equality and serialization and updates it on wait", async () => {
+    const binding = makeFakeBinding();
+    const raw = buildJson("pending");
+    binding.getImageBuild.mockResolvedValueOnce(JSON.stringify(raw));
+    binding.getImageBuild.mockResolvedValueOnce(JSON.stringify({ ...raw, future_field: "different" }));
+    const a = await getImageBuild("build-1");
+    const b = await getImageBuild("build-1");
+    expect(isDeepStrictEqual(a.info, b.info)).toBe(true);
+    expect(a.info.raw).not.toEqual(b.info.raw);
+    expect(JSON.parse(JSON.stringify(a.info))).not.toHaveProperty("raw");
+    await a.wait();
+    expect(a.info.raw).toEqual({ ...raw, status: "succeeded", result: resultJson() });
+    expect(a.info.raw).not.toHaveProperty("raw");
+    expect(a.info.buildId).toBe("build-1");
+    const cancellation = await a.cancel();
+    const dumped = JSON.parse(JSON.stringify(cancellation));
+    expect(dumped).not.toHaveProperty("raw");
+    expect(dumped.build).not.toHaveProperty("raw");
+  });
+
+  it("decodes structured errors without reparsing them in constructors", () => {
+    for (const code of Object.values(ImageBuildErrorCode)) {
+      expect((toImageBuildError(nativeError({ code, message: "m" })) as ImageBuildError).code).toBe(code);
+    }
+    const payload = { code: "future_code", message: "m", active_kind: "future_kind", active_status: "future_status" };
+    const error = toImageBuildError(nativeError(payload)) as ImageBuildError;
+    expect(error.code).toBe(ImageBuildErrorCode.UNKNOWN);
+    expect(error.details.activeKind).toBe(ImageBuildKind.UNKNOWN);
+    expect(error.details.activeStatus).toBe(ImageBuildStatus.UNKNOWN);
+    expect(error.raw).toMatchObject(payload);
+    expect(JSON.parse(JSON.stringify(error))).not.toHaveProperty("raw");
+    for (const code of ["failed", "cancelled"]) {
+      const error = toImageBuildError(nativeError({ code, message: "m", info: buildJson("future_status") })) as ImageBuildFailedError;
+      expect(error.info?.status).toBe(ImageBuildStatus.UNKNOWN);
+      expect(error.info?.raw.status).toBe("future_status");
+      for (const info of [{ build_id: "b" }, buildJson("pending", { status: null })]) {
+        const malformed = toImageBuildError(nativeError({ code, message: "m", info })) as ImageBuildFailedError;
+        expect(malformed).toBeInstanceOf(code === "failed" ? ImageBuildFailedError : ImageBuildCancelledError);
+        expect(malformed.info).toBeUndefined();
+        expect(malformed.raw.info).toEqual(info);
+      }
+    }
+    for (const info of ["bad", [], { attempt_no: "bad" }]) {
+      const error = toImageBuildError(nativeError({ code: "failed", message: "m", info })) as ImageBuildFailedError;
+      expect(error).toBeInstanceOf(ImageBuildFailedError);
+      expect(error.info).toBeUndefined();
+    }
+  });
+
+  it("never confirms an unfamiliar cancellation outcome", async () => {
+    const binding = makeFakeBinding();
+    for (const outcome of Object.values(ImageBuildCancellationOutcome)) {
+      binding.cancelImageBuild.mockResolvedValueOnce(JSON.stringify({ outcome }));
+      expect((await cancelImageBuild({ buildId: "build-1" })).outcome).toBe(outcome);
+    }
+    binding.cancelImageBuild.mockResolvedValueOnce(JSON.stringify({ outcome: "future_outcome" }));
+    const outcome = await cancelImageBuild({ buildId: "build-1" });
+    expect(outcome.outcome).toBe(ImageBuildCancellationOutcome.UNKNOWN);
+    expect(outcome.confirmed).toBe(false);
+    for (const fields of [{}, { outcome: null }, { outcome: "future_outcome" }]) {
+      const error = toImageBuildError(nativeError({ code: "interrupted", message: "m", confirmed: true, ...fields })) as ImageBuildInterruptedError;
+      expect(error.confirmed).toBe(false);
+      expect(error.details.confirmed).toBe(false);
+      expect(error.raw.confirmed).toBe(true);
+    }
+  });
+
+  it.each([null, [], { attempt_no: "bad" }])("keeps malformed top-level build records in the typed hierarchy: %j", async (raw) => {
+    const binding = makeFakeBinding();
+    binding.getImageBuild.mockResolvedValueOnce(JSON.stringify(raw));
+    await expect(getImageBuild("build-1")).rejects.toBeInstanceOf(ImageBuildError);
+  });
+
+  it("keeps callback events as plain strings with the native spelling", async () => {
+    const binding = makeFakeBinding();
+    binding.waitImageBuild.mockImplementationOnce(async (_opts, _id, _wait, emit) => {
+      emit?.({ eventType: "future_event", message: "m", status: "future_status", outcome: "future_outcome", confirmed: true });
+      return JSON.stringify(resultJson());
+    });
+    const events: Record<string, unknown>[] = [];
+    await waitImageBuild("build-1", { emit: (e) => events.push(e) });
+    expect(events).toEqual([{ type: "future_event", message: "m", status: "future_status", outcome: "future_outcome", confirmed: true }]);
+  });
+
+  it("keeps malformed native bodies typed across every build response boundary", async () => {
+    const binding = makeFakeBinding();
+    const handle = await getImageBuild("build-1");
+    for (const [native, invoke] of [
+      [binding.getImageBuild, () => getImageBuild("build-1")],
+      [binding.getImageBuild, () => handle.refresh()],
+      [binding.startImageBuild, () => startImageBuild(new Image({ name: "img", baseImage: "ubuntu" }))],
+      [binding.startImageImport, () => startImageImport("ubuntu")],
+      [binding.waitImageBuild, () => handle.wait()],
+      [binding.waitImageBuild, () => waitImageBuild("build-1")],
+      [binding.cancelImageBuild, () => cancelImageBuild({ buildId: "build-1" })],
+    ] as const) {
+      native.mockResolvedValueOnce("null");
+      await expect(invoke()).rejects.toBeInstanceOf(ImageBuildError);
+    }
   });
 
   it("startImageBuild renders an Image into an empty context and cleans it up", async () => {

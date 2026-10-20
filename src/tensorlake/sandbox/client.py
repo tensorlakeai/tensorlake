@@ -1581,9 +1581,7 @@ class SandboxClient:
                     snapshot_type.value if snapshot_type is not None else None
                 ),
             )
-            return Traced(
-                trace_id, CreateSnapshotResponse.model_validate_json(response_json)
-            )
+            return Traced(trace_id, CreateSnapshotResponse.from_response(response_json))
         except Exception as e:
             if _rust_status_code(e) == 404:
                 raise SandboxNotFoundError(sandbox_id) from None
@@ -1606,7 +1604,7 @@ class SandboxClient:
             trace_id, response_json = self._rust_client.get_snapshot_json(
                 snapshot_id=snapshot_id
             )
-            return Traced(trace_id, SnapshotInfo.model_validate_json(response_json))
+            return Traced(trace_id, SnapshotInfo.from_response(response_json))
         except Exception as e:
             _raise_as_sandbox_error(e)
 
@@ -1622,7 +1620,7 @@ class SandboxClient:
         """
         try:
             trace_id, response_json = self._rust_client.list_snapshots_json()
-            data = ListSnapshotsResponse.model_validate(json.loads(response_json))
+            data = ListSnapshotsResponse.from_response(response_json)
             return TracedIterator(trace_id, data.snapshots)
         except Exception as e:
             _raise_as_sandbox_error(e)

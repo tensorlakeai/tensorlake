@@ -370,6 +370,42 @@ class TestBuildOperationsNative(unittest.TestCase):
             },
         )()
 
+    def test_future_build_values_survive_native_decoding_as_unknown_enums(self):
+        with ScriptedService() as service, _env():
+            record = _build(
+                status="future_status", kind="future_kind", phase="future_phase"
+            )
+            service.handlers[("GET", "/images/v4/builds/build-1")] = (200, record)
+            service.handlers[("POST", "/images/v4/builds/cancel")] = (
+                200,
+                {"outcome": "future_outcome", "build": record},
+            )
+            with patch.object(
+                builds, "_build_context_from_env", return_value=self._ctx(service.url)
+            ):
+                info = builds.get_build("build-1").info
+                outcome = builds.cancel_build("build-1")
+            self.assertIs(info.status, builds.ImageBuildStatus.UNKNOWN)
+            self.assertIs(info.kind, builds.ImageBuildKind.UNKNOWN)
+            self.assertIs(info.phase, builds.ImageBuildPhase.UNKNOWN)
+            self.assertEqual(info.raw["status"], "future_status")
+            self.assertFalse(info.is_terminal)
+            self.assertIs(outcome.outcome, builds.ImageBuildCancellationOutcome.UNKNOWN)
+            self.assertFalse(outcome.confirmed)
+            self.assertIs(outcome.build.status, builds.ImageBuildStatus.UNKNOWN)
+
+    def test_missing_optional_kind_from_native_is_absent(self):
+        with ScriptedService() as service, _env():
+            record = _build()
+            record.pop("kind")
+            service.handlers[("GET", "/images/v4/builds/build-1")] = (200, record)
+            with patch.object(
+                builds, "_build_context_from_env", return_value=self._ctx(service.url)
+            ):
+                info = builds.get_build("build-1").info
+            self.assertIsNone(info.kind)
+            self.assertEqual(info.raw["kind"], "")
+
     def test_upload_failures_never_expose_the_capability_url(self):
         """The context-upload capability is a signed URL. A storage error
         body that echoes it and a transport error that carries it both

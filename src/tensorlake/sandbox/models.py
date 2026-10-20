@@ -1,9 +1,10 @@
 """Pydantic models for sandbox operations."""
 
+import json
 import warnings
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, TypeVar
 from urllib.parse import urlparse, urlunparse
 
 from pydantic import (
@@ -15,6 +16,8 @@ from pydantic import (
     PrivateAttr,
     model_serializer,
 )
+
+from tensorlake._enums import ResponseEnum
 
 _SANDBOX_MANAGEMENT_PORT = 9501
 
@@ -124,8 +127,8 @@ TERMINATION_REASON_CANCELLED = "cancelled"
 """A pending sandbox was deleted before it ran."""
 
 
-class SnapshotStatus(str, Enum):
-    """Status of a snapshot."""
+class SnapshotStatus(ResponseEnum):
+    """Status of a snapshot; future server values map to UNKNOWN."""
 
     IN_PROGRESS = "in_progress"
     LOCAL_READY = "local_ready"
@@ -133,6 +136,7 @@ class SnapshotStatus(str, Enum):
     FAILED = "failed"
     DELETING = "deleting"
     REPLICATING = "replicating"
+    UNKNOWN = "unknown"
 
 
 class SnapshotWaitCondition(str, Enum):
@@ -143,12 +147,11 @@ class SnapshotWaitCondition(str, Enum):
 
 
 def snapshot_satisfies_wait_condition(
-    status: SnapshotStatus | str,
+    status: SnapshotStatus,
     wait_until: SnapshotWaitCondition | str,
 ) -> bool:
     """Return whether a snapshot status satisfies the requested wait condition."""
 
-    status_value = status.value if isinstance(status, SnapshotStatus) else str(status)
     wait_value = (
         wait_until.value
         if isinstance(wait_until, SnapshotWaitCondition)
@@ -156,11 +159,11 @@ def snapshot_satisfies_wait_condition(
     )
 
     if wait_value == SnapshotWaitCondition.LOCAL_READY.value:
-        return status_value in (
-            SnapshotStatus.LOCAL_READY.value,
-            SnapshotStatus.COMPLETED.value,
+        return status in (
+            SnapshotStatus.LOCAL_READY,
+            SnapshotStatus.COMPLETED,
         )
-    return status_value == SnapshotStatus.COMPLETED.value
+    return status == SnapshotStatus.COMPLETED
 
 
 class SnapshotType(str, Enum):
@@ -872,22 +875,53 @@ class ListSandboxPoolsResponse(BaseModel):
 
 # --- Snapshot models ---
 
+SnapshotResponseT = TypeVar("SnapshotResponseT", bound="_SnapshotResponse")
 
-class CreateSnapshotResponse(BaseModel):
+
+class _SnapshotResponse(BaseModel):
+    status: SnapshotStatus
+    raw: dict[str, Any] = Field(default_factory=dict, repr=False, exclude=True)
+
+    @classmethod
+    def from_response(
+        cls: type[SnapshotResponseT], payload: dict | str
+    ) -> SnapshotResponseT:
+        raw = json.loads(payload) if isinstance(payload, str) else payload
+        if not isinstance(raw, dict):
+            raise ValueError("snapshot response must be a JSON object")
+        if raw.get("status") is None:
+            raise ValueError("snapshot response must include status")
+        return cls.model_validate(
+            {
+                **raw,
+                "status": SnapshotStatus.from_response(raw["status"]),
+                "raw": dict(raw),
+            }
+        )
+
+    def __eq__(self, other: object) -> bool:
+        if type(self) is not type(other):
+            return NotImplemented
+        return all(
+            getattr(self, name) == getattr(other, name)
+            for name in type(self).model_fields
+            if name != "raw"
+        )
+
+
+class CreateSnapshotResponse(_SnapshotResponse):
     """Response from creating a snapshot."""
 
     snapshot_id: str
-    status: SnapshotStatus | str
 
 
-class SnapshotInfo(BaseModel):
+class SnapshotInfo(_SnapshotResponse):
     """Full snapshot information."""
 
     snapshot_id: str = Field(alias="id")
     namespace: str
     sandbox_id: str
     base_image: str | None = None
-    status: SnapshotStatus | str
     snapshot_type: SnapshotType | None = None
     error: str | None = None
     snapshot_uri: str | None = None
@@ -902,7 +936,21 @@ class SnapshotInfo(BaseModel):
 class ListSnapshotsResponse(BaseModel):
     """Response from listing snapshots (internal use)."""
 
-    snapshots: list[SnapshotInfo]
+    snapshots: list[SnapshotInfo] = Field(default_factory=list)
+
+    @classmethod
+    def from_response(cls, payload: dict | str) -> "ListSnapshotsResponse":
+        raw = json.loads(payload) if isinstance(payload, str) else payload
+        if raw is None:
+            raw = {}
+        if not isinstance(raw, dict):
+            raise ValueError("snapshot response must contain a snapshots list")
+        snapshots = raw.get("snapshots")
+        if snapshots is None:
+            snapshots = []
+        if not isinstance(snapshots, list):
+            raise ValueError("snapshot response must contain a snapshots list")
+        return cls(snapshots=[SnapshotInfo.from_response(item) for item in snapshots])
 
 
 class SandboxLogLevel(str, Enum):

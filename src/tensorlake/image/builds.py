@@ -20,6 +20,10 @@ request. The legacy functions in :mod:`tensorlake.image.sandbox_builder`
 keep their own requests, results, errors, callback handling and interruption
 behavior.
 
+Response enum fields map unfamiliar wire values to ``UNKNOWN``. ``raw`` is
+diagnostic only and excluded from equality, hashing, and SDK serialization
+(``to_dict()`` for build records). Events retain their original wire strings.
+
 **Build ids are the immutable record.** An image name and its ``image_`` id
 name the *current* image; a rebuild replaces what they point at. A build id
 and its result (``ImageBuildInfo.result``) never change, so
@@ -58,10 +62,11 @@ import json
 import os
 import tempfile
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, Callable
 
+from tensorlake._enums import ResponseEnum
 from tensorlake._tracing import USER_AGENT
 
 from ._dockerfile import image_to_dockerfile
@@ -83,6 +88,11 @@ EmitFn = Callable[[dict], None]
 
 __all__ = [
     "CancelBuildOutcome",
+    "ImageBuildStatus",
+    "ImageBuildPhase",
+    "ImageBuildKind",
+    "ImageBuildCancellationOutcome",
+    "ImageBuildErrorCode",
     "ImageBuildCancelledError",
     "ImageBuildError",
     "ImageBuildFailedError",
@@ -100,6 +110,61 @@ __all__ = [
 ]
 
 
+class ImageBuildStatus(ResponseEnum):
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    UNKNOWN = "unknown"
+
+
+class ImageBuildPhase(ResponseEnum):
+    AWAITING_CONTEXT = "awaiting_context"
+    STARTING_BUILDER = "starting_builder"
+    EXECUTING = "executing"
+    SNAPSHOTTING = "snapshotting"
+    PUBLISHING = "publishing"
+    FINISHED = "finished"
+    UNKNOWN = "unknown"
+
+
+class ImageBuildKind(ResponseEnum):
+    DOCKERFILE = "dockerfile"
+    IMPORT = "import"
+    DIRECT = "direct"
+    UNKNOWN = "unknown"
+
+
+class ImageBuildCancellationOutcome(ResponseEnum):
+    CANCELLED = "cancelled"
+    ALREADY_CANCELLED = "already_cancelled"
+    ALREADY_COMPLETED = "already_completed"
+    ALREADY_FAILED = "already_failed"
+    NOT_ADMITTED = "not_admitted"
+    UNCONFIRMED = "unconfirmed"
+    UNKNOWN = "unknown"
+
+    @property
+    def confirmed(self) -> bool:
+        return self in (self.CANCELLED, self.ALREADY_CANCELLED, self.ALREADY_FAILED)
+
+
+class ImageBuildErrorCode(ResponseEnum):
+    USAGE = "usage"
+    AUTH = "auth"
+    NOT_FOUND = "not_found"
+    IMAGE_BUILD_IN_PROGRESS = "image_build_in_progress"
+    CLIENT_REQUEST_ID_MISMATCH = "client_request_id_mismatch"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    TIMEOUT = "timeout"
+    INTERRUPTED = "interrupted"
+    SERVICE = "service"
+    INTERNAL = "internal"
+    UNKNOWN = "unknown"
+
+
 # --- Exceptions -------------------------------------------------------------
 
 
@@ -113,13 +178,33 @@ class ImageBuildError(SandboxImageBuildError):
             ``timeout``, ``interrupted``, ``service``, ``internal``).
         build_id: The build this error is about, when known.
         client_request_id: The admission's request id, when relevant.
-        details: The full structured payload from the Rust core.
+        details: Additional structured error fields; ``info`` retains its
+            response dictionary while failure/cancellation errors expose a
+            parsed record on ``info``.
+        raw: The original response from the Rust core, for diagnostics.
     """
 
-    def __init__(self, message: str, *, code: str = "internal", **details: Any):
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: ImageBuildErrorCode = ImageBuildErrorCode.INTERNAL,
+        **details: Any,
+    ):
         super().__init__(message)
-        self.code = code
+        self.code = ImageBuildErrorCode(code)
+        self.raw: dict = {}
         self.details = details
+        for name, enum in _RESPONSE_ENUMS[ImageBuildError].items():
+            if name in details and details[name] is not None:
+                details[name] = enum(details[name])
+        if "confirmed" in details:
+            outcome = details.get("outcome")
+            details["confirmed"] = (
+                details["confirmed"] is True
+                and isinstance(outcome, ImageBuildCancellationOutcome)
+                and outcome.confirmed
+            )
         self.build_id: str | None = details.get("build_id")
         self.client_request_id: str | None = details.get("client_request_id")
 
@@ -132,6 +217,12 @@ class ImageBuildNotFoundError(ImageBuildError):
     ``get_build``, ``wait_build`` and ``cancel_build`` raise this error.
     """
 
+    def __init__(self, message: str, **details: Any):
+        code = ImageBuildErrorCode(details.pop("code", ImageBuildErrorCode.NOT_FOUND))
+        if code is not ImageBuildErrorCode.NOT_FOUND:
+            raise ValueError("ImageBuildNotFoundError code must be NOT_FOUND")
+        super().__init__(message, code=ImageBuildErrorCode.NOT_FOUND, **details)
+
 
 class ImageBuildInProgressError(ImageBuildError):
     """The image name already has an unfinished build or import.
@@ -141,18 +232,20 @@ class ImageBuildInProgressError(ImageBuildError):
     """
 
     def __init__(self, message: str, **details: Any):
-        super().__init__(message, code="image_build_in_progress", **details)
+        super().__init__(
+            message, code=ImageBuildErrorCode.IMAGE_BUILD_IN_PROGRESS, **details
+        )
         self.image_name: str | None = details.get("image_name")
         self.active_build_id: str | None = details.get("active_build_id")
-        self.active_kind: str | None = details.get("active_kind")
-        self.active_status: str | None = details.get("active_status")
+        self.active_kind: ImageBuildKind | None = self.details.get("active_kind")
+        self.active_status: ImageBuildStatus | None = self.details.get("active_status")
 
 
 class ImageBuildFailedError(ImageBuildError):
     """The service reports the build failed. ``error`` is its message."""
 
     def __init__(self, message: str, **details: Any):
-        super().__init__(message, code="failed", **details)
+        super().__init__(message, code=ImageBuildErrorCode.FAILED, **details)
         self.error: str = details.get("error") or "no error recorded"
         self.info: ImageBuildInfo | None = _info_or_none(details.get("info"))
 
@@ -161,7 +254,7 @@ class ImageBuildCancelledError(ImageBuildError):
     """The service reports the build was cancelled (a distinct outcome)."""
 
     def __init__(self, message: str, **details: Any):
-        super().__init__(message, code="cancelled", **details)
+        super().__init__(message, code=ImageBuildErrorCode.CANCELLED, **details)
         self.info: ImageBuildInfo | None = _info_or_none(details.get("info"))
 
 
@@ -170,7 +263,7 @@ class ImageBuildTimeoutError(ImageBuildError):
     neither failed nor cancelled."""
 
     def __init__(self, message: str, **details: Any):
-        super().__init__(message, code="timeout", **details)
+        super().__init__(message, code=ImageBuildErrorCode.TIMEOUT, **details)
 
 
 class ImageBuildInterruptedError(ImageBuildError):
@@ -182,23 +275,32 @@ class ImageBuildInterruptedError(ImageBuildError):
     """
 
     def __init__(self, message: str, **details: Any):
-        super().__init__(message, code="interrupted", **details)
-        self.outcome: str = details.get("outcome") or "unconfirmed"
-        self.confirmed: bool = bool(details.get("confirmed"))
+        super().__init__(message, code=ImageBuildErrorCode.INTERRUPTED, **details)
+        self.outcome: ImageBuildCancellationOutcome = (
+            self.details.get("outcome") or ImageBuildCancellationOutcome.UNCONFIRMED
+        )
+        self.confirmed: bool = self.details.get("confirmed") is True
         self.result: dict | None = details.get("result")
 
 
 def _info_or_none(raw: Any) -> ImageBuildInfo | None:
-    return ImageBuildInfo.from_dict(raw) if isinstance(raw, dict) else None
+    if isinstance(raw, ImageBuildInfo):
+        return raw
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return ImageBuildInfo.from_dict(raw)
+    except ImageBuildError:
+        return None
 
 
-_TYPED_ERRORS: dict[str, type[ImageBuildError]] = {
-    "not_found": ImageBuildNotFoundError,
-    "image_build_in_progress": ImageBuildInProgressError,
-    "failed": ImageBuildFailedError,
-    "cancelled": ImageBuildCancelledError,
-    "timeout": ImageBuildTimeoutError,
-    "interrupted": ImageBuildInterruptedError,
+_TYPED_ERRORS: dict[ImageBuildErrorCode, type[ImageBuildError]] = {
+    ImageBuildErrorCode.NOT_FOUND: ImageBuildNotFoundError,
+    ImageBuildErrorCode.IMAGE_BUILD_IN_PROGRESS: ImageBuildInProgressError,
+    ImageBuildErrorCode.FAILED: ImageBuildFailedError,
+    ImageBuildErrorCode.CANCELLED: ImageBuildCancelledError,
+    ImageBuildErrorCode.TIMEOUT: ImageBuildTimeoutError,
+    ImageBuildErrorCode.INTERRUPTED: ImageBuildInterruptedError,
 }
 
 
@@ -208,24 +310,34 @@ def _typed_build_error(exc: BaseException) -> ImageBuildError | None:
     if len(args) != 3 or args[0] != "image_build" or not isinstance(args[2], str):
         return None
     try:
-        payload = json.loads(args[2])
-    except json.JSONDecodeError:
+        payload = _decode_response(args[2], ImageBuildError)
+    except ImageBuildError:
         return None
-    if not isinstance(payload, dict):
-        return None
-    code = str(payload.get("code") or "internal")
+    code = payload["code"]
     message = str(payload.get("message") or exc)
-    details = {key: value for key, value in payload.items() if key not in ("message",)}
+    details = {
+        key: value
+        for key, value in payload.items()
+        if key not in ("message", "code", "raw")
+    }
     cls = _TYPED_ERRORS.get(code)
-    if cls is not None:
-        details.pop("code", None)
-        return cls(message, **details)
-    return ImageBuildError(message, **details)
+    error = (
+        cls(message, **details)
+        if cls
+        else ImageBuildError(message, code=code, **details)
+    )
+    error.raw = payload["raw"]
+    return error
 
 
 def _raise_typed(exc: BaseException) -> None:
     typed = _typed_build_error(exc)
     if typed is not None:
+        if isinstance(typed, ImageBuildInterruptedError) and isinstance(
+            typed.result, dict
+        ):
+            typed.result = _snake_case_keys(typed.result)
+            typed.details["result"] = typed.result
         raise typed from exc
     raise ImageBuildError(f"{type(exc).__name__}: {exc}") from exc
 
@@ -249,15 +361,15 @@ class ImageBuildInfo:
     """
 
     build_id: str
-    status: str
-    kind: str | None = None
+    status: ImageBuildStatus
+    kind: ImageBuildKind | None = None
     name: str | None = None
-    phase: str | None = None
+    phase: ImageBuildPhase | None = None
     attempt_no: int = 0
     client_request_id: str | None = None
     builder_sandbox_id: str | None = None
     error: str | None = None
-    result: dict | None = None
+    result: dict | None = field(default=None, hash=False)
     operation_deadline_ms: int | None = None
     created_at_ms: int | None = None
     updated_at_ms: int | None = None
@@ -265,21 +377,26 @@ class ImageBuildInfo:
 
     @property
     def is_terminal(self) -> bool:
-        return self.status in ("succeeded", "failed", "cancelled")
+        return self.status in (
+            ImageBuildStatus.SUCCEEDED,
+            ImageBuildStatus.FAILED,
+            ImageBuildStatus.CANCELLED,
+        )
 
     @classmethod
-    def from_dict(cls, raw: dict) -> "ImageBuildInfo":
+    def from_dict(cls, raw: dict | str) -> "ImageBuildInfo":
+        raw = _decode_response(raw, cls)
         result = raw.get("result")
         # The core hands the result over in the template shape (camelCase);
         # the Python SDK presents snake_case keys everywhere.
         normalized = _snake_case_keys(result) if isinstance(result, dict) else None
         return cls(
-            build_id=str(raw.get("build_id", "")),
-            status=str(raw.get("status", "")),
+            build_id=str(raw.get("build_id") or ""),
+            status=raw["status"],
             kind=raw.get("kind"),
             name=raw.get("name"),
             phase=raw.get("phase"),
-            attempt_no=int(raw.get("attempt_no") or 0),
+            attempt_no=raw["attempt_no"],
             client_request_id=raw.get("client_request_id"),
             builder_sandbox_id=raw.get("builder_sandbox_id"),
             error=raw.get("error"),
@@ -287,8 +404,12 @@ class ImageBuildInfo:
             operation_deadline_ms=raw.get("operation_deadline_ms"),
             created_at_ms=raw.get("created_at_ms"),
             updated_at_ms=raw.get("updated_at_ms"),
-            raw={**raw, "result": normalized} if normalized is not None else dict(raw),
+            raw=raw["raw"],
         )
+
+    def to_dict(self) -> dict:
+        """Serialize model fields; diagnostic raw data is never sent back."""
+        return {f.name: getattr(self, f.name) for f in fields(self) if f.name != "raw"}
 
 
 @dataclass(frozen=True)
@@ -302,21 +423,89 @@ class CancelBuildOutcome:
     about a delayed admission). ``build`` is the observed record when any.
     """
 
-    outcome: str
+    outcome: ImageBuildCancellationOutcome
     build: ImageBuildInfo | None = None
+    raw: dict = field(default_factory=dict, repr=False, compare=False)
 
     @property
     def confirmed(self) -> bool:
         """Whether the build is known not to publish."""
-        return self.outcome in ("cancelled", "already_cancelled", "already_failed")
+        return self.outcome.confirmed
 
     @classmethod
-    def from_dict(cls, raw: dict) -> "CancelBuildOutcome":
-        build = raw.get("build")
+    def from_dict(cls, raw: dict | str) -> "CancelBuildOutcome":
+        raw = _decode_response(raw, cls)
         return cls(
-            outcome=str(raw.get("outcome", "")),
-            build=ImageBuildInfo.from_dict(build) if isinstance(build, dict) else None,
+            outcome=raw["outcome"],
+            build=_info_or_none(raw.get("build")),
+            raw=raw["raw"],
         )
+
+    def to_dict(self) -> dict:
+        return {
+            "outcome": self.outcome,
+            "build": self.build.to_dict() if self.build else None,
+        }
+
+
+_RESPONSE_ENUMS = {
+    ImageBuildInfo: {
+        "status": ImageBuildStatus,
+        "kind": ImageBuildKind,
+        "phase": ImageBuildPhase,
+    },
+    CancelBuildOutcome: {"outcome": ImageBuildCancellationOutcome},
+    ImageBuildError: {
+        "code": ImageBuildErrorCode,
+        "active_kind": ImageBuildKind,
+        "active_status": ImageBuildStatus,
+        "outcome": ImageBuildCancellationOutcome,
+    },
+}
+
+
+def _decode_response(response: dict | str, model: type = dict) -> dict:
+    """Decode native JSON once. raw is diagnostic and never reconstructs state."""
+    try:
+        raw = json.loads(response) if isinstance(response, str) else response
+        if not isinstance(raw, dict):
+            raise ValueError("expected a JSON object")
+        family = next((base for base in model.__mro__ if base in _RESPONSE_ENUMS), None)
+        if family is None:
+            return raw
+        if family is ImageBuildInfo and raw.get("status") is None:
+            raise ValueError("build response must include status")
+        enums = _RESPONSE_ENUMS[family]
+        decoded = {**raw, "raw": dict(raw)}
+        for name, enum in enums.items():
+            optional = name in ("kind", "phase", "active_kind", "active_status") or (
+                family is ImageBuildError and name == "outcome"
+            )
+            if optional and name not in raw:
+                continue
+            value = raw.get(name)
+            if name == "code":
+                value = value or "internal"
+            decoded[name] = (
+                None if optional and not value else enum.from_response(value)
+            )
+        if family is ImageBuildInfo:
+            attempt = raw.get("attempt_no")
+            if attempt is None:
+                attempt = 0
+            if isinstance(attempt, bool) or not isinstance(attempt, (int, float, str)):
+                raise ValueError("attempt_no must be a safe integer")
+            number = float(attempt)
+            if not number.is_integer() or abs(number) > 2**53 - 1:
+                raise ValueError("attempt_no must be a safe integer")
+            decoded["attempt_no"] = int(number)
+        return decoded
+    except (ValueError, TypeError, OverflowError) as exc:
+        error = ImageBuildError(
+            f"Invalid image-build response: {exc}", code=ImageBuildErrorCode.SERVICE
+        )
+        error.raw = {"response": response}
+        raise error from exc
 
 
 # --- Native delegation -------------------------------------------------------
@@ -360,9 +549,11 @@ def _credentials() -> tuple[str, str, str]:
             raise ImageBuildError(
                 "Sandbox image SDKs require TENSORLAKE_API_KEY. "
                 "Personal access tokens are CLI-only.",
-                code="auth",
+                code=ImageBuildErrorCode.AUTH,
             )
-        raise ImageBuildError("Missing TENSORLAKE_API_KEY credentials.", code="auth")
+        raise ImageBuildError(
+            "Missing TENSORLAKE_API_KEY credentials.", code=ImageBuildErrorCode.AUTH
+        )
     return ctx.api_url, token, ctx.namespace
 
 
@@ -370,26 +561,40 @@ def _reject_legacy_reference(build_id: str) -> None:
     """New operations never reinterpret legacy references; fail before any
     request so no Image Service or platform call is made."""
     if not isinstance(build_id, str) or not build_id.strip():
-        raise ImageBuildError("build_id must be a non-empty string", code="usage")
+        raise ImageBuildError(
+            "build_id must be a non-empty string", code=ImageBuildErrorCode.USAGE
+        )
     if build_id.startswith("sandbox_template_"):
         raise ImageBuildError(
             f"'{build_id}' is a legacy sandbox template id; legacy images have no "
             "build operation to get, wait for or cancel",
-            code="usage",
+            code=ImageBuildErrorCode.USAGE,
             build_id=build_id,
         )
     if build_id.startswith("image_"):
         raise ImageBuildError(
             f"'{build_id}' is an image id, not a build id; look the image up with "
             "find_sandbox_image_by_name or use the build id admission returned",
-            code="usage",
+            code=ImageBuildErrorCode.USAGE,
             build_id=build_id,
         )
 
 
 def _decode_started(result_json: str) -> tuple[ImageBuildInfo, str | None]:
-    payload = json.loads(result_json)
-    info = ImageBuildInfo.from_dict(payload.get("build") or {})
+    payload = _decode_response(result_json)
+    build = payload.get("build")
+    if (
+        not isinstance(build, dict)
+        or not isinstance(build.get("build_id"), str)
+        or not build["build_id"].strip()
+    ):
+        error = ImageBuildError(
+            "Invalid image-build admission: expected a build with a non-empty build_id",
+            code=ImageBuildErrorCode.SERVICE,
+        )
+        error.raw = {"response": payload}
+        raise error
+    info = ImageBuildInfo.from_dict(build)
     return info, payload.get("client_request_id")
 
 
@@ -452,7 +657,7 @@ class ImageBuildHandle:
             )
         except Exception as exc:  # noqa: BLE001 - re-raised typed below
             _raise_typed(exc)
-        self._info = ImageBuildInfo.from_dict(json.loads(raw))
+        self._info = ImageBuildInfo.from_dict(raw)
         return self._info
 
     def wait(
@@ -508,9 +713,13 @@ class ImageBuildHandle:
             raise
         except Exception as exc:  # noqa: BLE001 - re-raised typed below
             _raise_typed(exc)
-        result = _snake_case_keys(json.loads(raw))
-        self._info = ImageBuildInfo.from_dict(
-            {**self._info.raw, "status": "succeeded", "result": result}
+        result_raw = _decode_response(raw)
+        result = _snake_case_keys(result_raw)
+        self._info = replace(
+            self._info,
+            status=ImageBuildStatus.SUCCEEDED,
+            result=result,
+            raw={**self._info.raw, "status": "succeeded", "result": result_raw},
         )
         return result
 
@@ -726,7 +935,7 @@ def get_build(build_id: str) -> ImageBuildHandle:
     except Exception as exc:  # noqa: BLE001 - re-raised typed below
         _raise_typed(exc)
     return ImageBuildHandle(
-        ImageBuildInfo.from_dict(json.loads(raw)),
+        ImageBuildInfo.from_dict(raw),
         _credentials=(api_url, token, namespace),
     )
 
@@ -768,7 +977,7 @@ def wait_build(
         raise
     except Exception as exc:  # noqa: BLE001 - re-raised typed below
         _raise_typed(exc)
-    return _snake_case_keys(json.loads(raw))
+    return _snake_case_keys(_decode_response(raw))
 
 
 def cancel_build(
@@ -788,7 +997,8 @@ def cancel_build(
     """
     if (build_id is None) == (client_request_id is None):
         raise ImageBuildError(
-            "pass exactly one of build_id or client_request_id", code="usage"
+            "pass exactly one of build_id or client_request_id",
+            code=ImageBuildErrorCode.USAGE,
         )
     if build_id is not None:
         _reject_legacy_reference(build_id)
@@ -807,4 +1017,4 @@ def cancel_build(
         )
     except Exception as exc:  # noqa: BLE001 - re-raised typed below
         _raise_typed(exc)
-    return CancelBuildOutcome.from_dict(json.loads(raw))
+    return CancelBuildOutcome.from_dict(raw)

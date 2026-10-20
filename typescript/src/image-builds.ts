@@ -1,4 +1,5 @@
 import path from "node:path";
+import { enumValue, withRaw } from "./enum.js";
 import os from "node:os";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import type { SandboxTemplate } from "./cloud-models.js";
@@ -25,6 +26,10 @@ import {
  * the legacy functions in `sandbox-image.ts` keep their own requests,
  * results, errors and interruption behavior.
  *
+ * Response enum fields map unfamiliar wire values to `UNKNOWN`. `raw` is
+ * diagnostic only and excluded from equality, hashing, and SDK serialization
+ * (`JSON.stringify`). Events retain their original wire strings.
+ *
  * **Build ids are the immutable record.** An image name and its `image_` id
  * name the *current* image; a rebuild replaces what they point at. A build id
  * and its result never change, so `wait` returns this build's own result even
@@ -44,21 +49,78 @@ import {
  * promise, losing the process or dropping a handle never cancels the build.
  */
 
+export enum ImageBuildStatus {
+  PENDING = "pending",
+  RUNNING = "running",
+  SUCCEEDED = "succeeded",
+  FAILED = "failed",
+  CANCELLED = "cancelled",
+  UNKNOWN = "unknown",
+}
+
+export enum ImageBuildPhase {
+  AWAITING_CONTEXT = "awaiting_context",
+  STARTING_BUILDER = "starting_builder",
+  EXECUTING = "executing",
+  SNAPSHOTTING = "snapshotting",
+  PUBLISHING = "publishing",
+  FINISHED = "finished",
+  UNKNOWN = "unknown",
+}
+
+export enum ImageBuildKind {
+  DOCKERFILE = "dockerfile",
+  IMPORT = "import",
+  DIRECT = "direct",
+  UNKNOWN = "unknown",
+}
+
+export enum ImageBuildCancellationOutcome {
+  CANCELLED = "cancelled",
+  ALREADY_CANCELLED = "already_cancelled",
+  ALREADY_COMPLETED = "already_completed",
+  ALREADY_FAILED = "already_failed",
+  NOT_ADMITTED = "not_admitted",
+  UNCONFIRMED = "unconfirmed",
+  UNKNOWN = "unknown",
+}
+
+function isConfirmedCancellation(outcome: ImageBuildCancellationOutcome | null | undefined): boolean {
+  return outcome === ImageBuildCancellationOutcome.CANCELLED ||
+    outcome === ImageBuildCancellationOutcome.ALREADY_CANCELLED ||
+    outcome === ImageBuildCancellationOutcome.ALREADY_FAILED;
+}
+
+export enum ImageBuildErrorCode {
+  USAGE = "usage",
+  AUTH = "auth",
+  NOT_FOUND = "not_found",
+  IMAGE_BUILD_IN_PROGRESS = "image_build_in_progress",
+  CLIENT_REQUEST_ID_MISMATCH = "client_request_id_mismatch",
+  FAILED = "failed",
+  CANCELLED = "cancelled",
+  TIMEOUT = "timeout",
+  INTERRUPTED = "interrupted",
+  SERVICE = "service",
+  INTERNAL = "internal",
+  UNKNOWN = "unknown",
+}
+
 // --- Errors ------------------------------------------------------------------
 
 /** Structured payload the native binding attaches to image-build failures. */
 export interface ImageBuildErrorDetails {
-  code: string;
+  code: ImageBuildErrorCode;
   message: string;
   buildId?: string | null;
   clientRequestId?: string | null;
   imageName?: string | null;
   activeBuildId?: string | null;
-  activeKind?: string | null;
-  activeStatus?: string | null;
+  activeKind?: ImageBuildKind | null;
+  activeStatus?: ImageBuildStatus | null;
   error?: string | null;
-  info?: Record<string, unknown> | null;
-  outcome?: string | null;
+  info?: ImageBuildInfo | null;
+  outcome?: ImageBuildCancellationOutcome | null;
   confirmed?: boolean | null;
   result?: Record<string, unknown> | null;
   waitedSecs?: number | null;
@@ -67,16 +129,21 @@ export interface ImageBuildErrorDetails {
 
 /** An Image Service build operation failed. `code` is stable. */
 export class ImageBuildError extends Error {
-  readonly code: string;
+  readonly code: ImageBuildErrorCode;
   readonly buildId?: string;
   readonly clientRequestId?: string;
   readonly details: ImageBuildErrorDetails;
+  declare readonly raw: Readonly<Record<string, unknown>>;
 
   constructor(details: ImageBuildErrorDetails) {
     super(details.message);
     this.name = "ImageBuildError";
     this.code = details.code;
-    this.details = details;
+    this.details = { ...details };
+    withRaw(this, {});
+    if ("confirmed" in details) {
+      this.details.confirmed = details.confirmed === true && isConfirmedCancellation(details.outcome);
+    }
     if (details.buildId) this.buildId = details.buildId;
     if (details.clientRequestId) this.clientRequestId = details.clientRequestId;
   }
@@ -101,8 +168,8 @@ export class ImageBuildNotFoundError extends ImageBuildError {
 export class ImageBuildInProgressError extends ImageBuildError {
   readonly imageName?: string;
   readonly activeBuildId?: string;
-  readonly activeKind?: string;
-  readonly activeStatus?: string;
+  readonly activeKind?: ImageBuildKind;
+  readonly activeStatus?: ImageBuildStatus;
 
   constructor(details: ImageBuildErrorDetails) {
     super(details);
@@ -123,7 +190,7 @@ export class ImageBuildFailedError extends ImageBuildError {
     super(details);
     this.name = "ImageBuildFailedError";
     this.error = details.error ?? "no error recorded";
-    if (details.info) this.info = parseBuildInfo(details.info);
+    if (details.info) this.info = details.info;
   }
 }
 
@@ -134,7 +201,7 @@ export class ImageBuildCancelledError extends ImageBuildError {
   constructor(details: ImageBuildErrorDetails) {
     super(details);
     this.name = "ImageBuildCancelledError";
-    if (details.info) this.info = parseBuildInfo(details.info);
+    if (details.info) this.info = details.info;
   }
 }
 
@@ -153,15 +220,15 @@ export class ImageBuildTimeoutError extends ImageBuildError {
  * not to publish. `not_admitted` is an observation, not a cancellation.
  */
 export class ImageBuildInterruptedError extends ImageBuildError {
-  readonly outcome: string;
+  readonly outcome: ImageBuildCancellationOutcome;
   readonly confirmed: boolean;
   readonly result?: Record<string, unknown>;
 
   constructor(details: ImageBuildErrorDetails) {
     super(details);
     this.name = "ImageBuildInterruptedError";
-    this.outcome = details.outcome ?? "unconfirmed";
-    this.confirmed = details.confirmed === true;
+    this.outcome = details.outcome ?? ImageBuildCancellationOutcome.UNCONFIRMED;
+    this.confirmed = this.details.confirmed === true;
     if (details.result) this.result = details.result;
   }
 }
@@ -188,36 +255,22 @@ export function toImageBuildError(error: unknown): unknown {
     if (key === "category") continue;
     details[camelize(key)] = value;
   }
+  details.code = enumValue(ImageBuildErrorCode, details.code || ImageBuildErrorCode.INTERNAL);
+  if ("activeKind" in details) details.activeKind = details.activeKind ? enumValue(ImageBuildKind, details.activeKind) : null;
+  if ("activeStatus" in details) details.activeStatus = details.activeStatus ? enumValue(ImageBuildStatus, details.activeStatus) : null;
+  if ("outcome" in details) details.outcome = details.outcome ? enumValue(ImageBuildCancellationOutcome, details.outcome) : null;
+  if ("info" in details) details.info = buildInfoOrNull(details.info);
   const typed = details as unknown as ImageBuildErrorDetails;
-  switch (typed.code) {
-    case "not_found":
-      return new ImageBuildNotFoundError(typed);
-    case "image_build_in_progress":
-      return new ImageBuildInProgressError(typed);
-    case "failed":
-      return new ImageBuildFailedError(typed);
-    case "cancelled":
-      return new ImageBuildCancelledError(typed);
-    case "timeout":
-      return new ImageBuildTimeoutError(typed);
-    case "interrupted":
-      return new ImageBuildInterruptedError(typed);
-    default:
-      return new ImageBuildError(typed);
-  }
+  const errors = {
+    not_found: ImageBuildNotFoundError, image_build_in_progress: ImageBuildInProgressError,
+    failed: ImageBuildFailedError, cancelled: ImageBuildCancelledError,
+    timeout: ImageBuildTimeoutError, interrupted: ImageBuildInterruptedError,
+  };
+  const ErrorClass = errors[typed.code as keyof typeof errors] ?? ImageBuildError;
+  return withRaw(new ErrorClass(typed), payload);
 }
 
 // --- Models ------------------------------------------------------------------
-
-export type ImageBuildStatus = "pending" | "running" | "succeeded" | "failed" | "cancelled" | string;
-export type ImageBuildPhase =
-  | "awaiting_context"
-  | "starting_builder"
-  | "executing"
-  | "snapshotting"
-  | "publishing"
-  | "finished"
-  | string;
 
 /**
  * The published image of a succeeded build, in the sandbox-template shape
@@ -235,7 +288,7 @@ export type ImageBuildResult = SandboxTemplate;
 export interface ImageBuildInfo {
   buildId: string;
   clientRequestId?: string | null;
-  kind: string;
+  kind?: ImageBuildKind | null;
   name?: string | null;
   status: ImageBuildStatus;
   phase?: ImageBuildPhase | null;
@@ -257,10 +310,11 @@ export interface ImageBuildInfo {
  * request id: not a cancellation and no promise about a delayed admission).
  */
 export interface CancelImageBuildOutcome {
-  outcome: string;
+  outcome: ImageBuildCancellationOutcome;
   build: ImageBuildInfo | null;
   /** Whether the build is known not to publish. */
   confirmed: boolean;
+  raw: Record<string, unknown>;
 }
 
 function camelizeRecord(value: Record<string, unknown>): Record<string, unknown> {
@@ -269,32 +323,58 @@ function camelizeRecord(value: Record<string, unknown>): Record<string, unknown>
   return out;
 }
 
-function parseBuildInfo(raw: Record<string, unknown>): ImageBuildInfo {
+function buildInfoOrNull(value: unknown): ImageBuildInfo | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  try { return parseBuildInfo(value); } catch (error) {
+    if (error instanceof ImageBuildError) return null;
+    throw error;
+  }
+}
+
+function decodeResponse(value: unknown): Record<string, unknown> {
+  try {
+    const raw = typeof value === "string" ? JSON.parse(value) : value;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new TypeError("expected a response object");
+    return raw as Record<string, unknown>;
+  } catch (error) {
+    throw withRaw(new ImageBuildError({ code: ImageBuildErrorCode.SERVICE, message: `Invalid image-build response: ${String(error)}` }), { response: value });
+  }
+}
+
+function parseBuildInfo(value: unknown): ImageBuildInfo {
+  const raw = decodeResponse(value);
+  if (raw.status == null) {
+    throw withRaw(new ImageBuildError({ code: ImageBuildErrorCode.SERVICE, message: "Invalid image-build response: missing status" }), { response: value });
+  }
+  const attempt = raw.attempt_no ?? 0;
+  const attemptNo = Number(attempt);
+  if ((typeof attempt !== "number" && typeof attempt !== "string") ||
+      (typeof attempt === "string" && attempt.trim() === "") ||
+      !Number.isSafeInteger(attemptNo)) {
+    throw withRaw(new ImageBuildError({ code: ImageBuildErrorCode.SERVICE, message: "Invalid image-build attempt_no" }), { response: value });
+  }
   const camel = camelizeRecord(raw);
-  const result =
-    raw.result && typeof raw.result === "object"
-      ? (camelizeRecord(raw.result as Record<string, unknown>) as unknown as ImageBuildResult)
-      : null;
-  return {
+  const result = raw.result && typeof raw.result === "object"
+    ? camelizeRecord(raw.result as Record<string, unknown>) as unknown as ImageBuildResult : null;
+  return withRaw({
     buildId: String(raw.build_id ?? ""),
     clientRequestId: (camel.clientRequestId as string | null | undefined) ?? null,
-    kind: String(raw.kind ?? ""),
+    kind: raw.kind ? enumValue(ImageBuildKind, raw.kind) : null,
     name: (raw.name as string | null | undefined) ?? null,
-    status: String(raw.status ?? ""),
-    phase: (raw.phase as string | null | undefined) ?? null,
-    attemptNo: Number(raw.attempt_no ?? 0),
+    status: enumValue(ImageBuildStatus, raw.status),
+    phase: raw.phase ? enumValue(ImageBuildPhase, raw.phase) : null,
+    attemptNo,
     builderSandboxId: (camel.builderSandboxId as string | null | undefined) ?? null,
     error: (raw.error as string | null | undefined) ?? null,
     result,
     operationDeadlineMs: (camel.operationDeadlineMs as number | null | undefined) ?? null,
     createdAtMs: (camel.createdAtMs as number | null | undefined) ?? null,
     updatedAtMs: (camel.updatedAtMs as number | null | undefined) ?? null,
-    raw,
-  };
+  }, raw);
 }
 
 function parseResult(json: string): ImageBuildResult {
-  return camelizeRecord(JSON.parse(json) as Record<string, unknown>) as unknown as ImageBuildResult;
+  return camelizeRecord(decodeResponse(json)) as unknown as ImageBuildResult;
 }
 
 // --- Native plumbing -----------------------------------------------------------
@@ -343,12 +423,12 @@ function credentialsFromEnv(): Credentials {
   if (!context.apiKey) {
     if (context.personalAccessToken) {
       throw new ImageBuildError({
-        code: "auth",
+        code: ImageBuildErrorCode.AUTH,
         message:
           "Sandbox image SDKs require TENSORLAKE_API_KEY. Personal access tokens are CLI-only.",
       });
     }
-    throw new ImageBuildError({ code: "auth", message: "Missing TENSORLAKE_API_KEY credentials." });
+    throw new ImageBuildError({ code: ImageBuildErrorCode.AUTH, message: "Missing TENSORLAKE_API_KEY credentials." });
   }
   return { apiUrl: context.apiUrl, bearerToken: context.apiKey, namespace: context.namespace };
 }
@@ -368,18 +448,18 @@ function clientOptions(credentials: Credentials) {
  */
 function rejectLegacyReference(buildId: string): void {
   if (typeof buildId !== "string" || buildId.trim().length === 0) {
-    throw new ImageBuildError({ code: "usage", message: "buildId must be a non-empty string" });
+    throw new ImageBuildError({ code: ImageBuildErrorCode.USAGE, message: "buildId must be a non-empty string" });
   }
   if (buildId.startsWith("sandbox_template_")) {
     throw new ImageBuildError({
-      code: "usage",
+      code: ImageBuildErrorCode.USAGE,
       message: `'${buildId}' is a legacy sandbox template id; legacy images have no build operation to get, wait for or cancel`,
       buildId,
     });
   }
   if (buildId.startsWith("image_")) {
     throw new ImageBuildError({
-      code: "usage",
+      code: ImageBuildErrorCode.USAGE,
       message: `'${buildId}' is an image id, not a build id; look the image up with findSandboxImageByName or use the build id admission returned`,
       buildId,
     });
@@ -487,7 +567,7 @@ export class ImageBuildHandle {
     } catch (error) {
       throw toImageBuildError(error);
     }
-    this.#info = parseBuildInfo(JSON.parse(json) as Record<string, unknown>);
+    this.#info = parseBuildInfo(json);
     return this.#info;
   }
 
@@ -508,8 +588,10 @@ export class ImageBuildHandle {
       ),
     );
     emitter.rethrow();
-    const result = parseResult(json);
-    this.#info = { ...this.#info, status: "succeeded", result };
+    const raw = decodeResponse(json);
+    const result = camelizeRecord(raw) as unknown as ImageBuildResult;
+    this.#info = withRaw({ ...this.#info, status: ImageBuildStatus.SUCCEEDED, result },
+      { ...this.#info.raw, status: "succeeded", result: raw });
     return result;
   }
 
@@ -549,8 +631,16 @@ export interface StartImageImportOptions {
 }
 
 function decodeStarted(json: string, credentials: Credentials): ImageBuildHandle {
-  const payload = JSON.parse(json) as { build: Record<string, unknown>; client_request_id?: string | null };
-  return new ImageBuildHandle(parseBuildInfo(payload.build ?? {}), credentials, payload.client_request_id);
+  const payload = decodeResponse(json);
+  const build = payload.build as Record<string, unknown> | null | undefined;
+  if (!build || typeof build !== "object" || Array.isArray(build) ||
+      typeof build.build_id !== "string" || !build.build_id.trim()) {
+    throw withRaw(new ImageBuildError({
+      code: ImageBuildErrorCode.SERVICE,
+      message: "Invalid image-build admission: expected a build with a non-empty build_id",
+    }), { response: payload });
+  }
+  return new ImageBuildHandle(parseBuildInfo(build), credentials, payload.client_request_id as string | null | undefined);
 }
 
 /**
@@ -686,7 +776,7 @@ export async function getImageBuild(buildId: string): Promise<ImageBuildHandle> 
   } catch (error) {
     throw toImageBuildError(error);
   }
-  return new ImageBuildHandle(parseBuildInfo(JSON.parse(json) as Record<string, unknown>), credentials);
+  return new ImageBuildHandle(parseBuildInfo(json), credentials);
 }
 
 /**
@@ -741,13 +831,9 @@ async function cancelImageBuildWith(
   } catch (error) {
     throw toImageBuildError(error);
   }
-  const payload = JSON.parse(json) as { outcome: string; build?: Record<string, unknown> | null };
-  const outcome = String(payload.outcome ?? "");
-  return {
-    outcome,
-    build: payload.build ? parseBuildInfo(payload.build) : null,
-    confirmed: ["cancelled", "already_cancelled", "already_failed"].includes(outcome),
-  };
+  const payload = decodeResponse(json);
+  const outcome = enumValue(ImageBuildCancellationOutcome, payload.outcome);
+  return withRaw({ outcome, build: buildInfoOrNull(payload.build), confirmed: isConfirmedCancellation(outcome) }, payload);
 }
 
 /** Cancel a build. Exactly one selector; the build id alone is sufficient. */
@@ -758,7 +844,7 @@ export async function cancelImageBuild(
   const hasRequest = selector.clientRequestId != null;
   if (hasBuild === hasRequest) {
     throw new ImageBuildError({
-      code: "usage",
+      code: ImageBuildErrorCode.USAGE,
       message: "pass exactly one of buildId or clientRequestId",
     });
   }

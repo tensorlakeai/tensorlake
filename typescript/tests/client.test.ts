@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { isDeepStrictEqual } from "node:util";
 import {
   RemoteAPIError,
   SandboxError,
@@ -1826,6 +1827,115 @@ describe("SandboxClient", () => {
   });
 
   describe("snapshots", () => {
+    it("omits diagnostic raw from snapshot equality and serialization", async () => {
+      const raw = { id: "s", namespace: "n", sandbox_id: "b", status: "future_one" };
+      const getSnapshot = vi.fn()
+        .mockResolvedValueOnce({ traceId: "t", json: JSON.stringify(raw) })
+        .mockResolvedValueOnce({ traceId: "t", json: JSON.stringify({ ...raw, status: "future_two" }) });
+      installNativeStub({ client: { getSnapshot } });
+      const client = SandboxClient.forLocalhost();
+      try {
+        const a = await client.getSnapshot("s");
+        const b = await client.getSnapshot("s");
+        // SnapshotInfo carries known fields; diagnostic raw is non-enumerable.
+        expect(Object.keys(a)).not.toContain("raw");
+        expect(JSON.parse(JSON.stringify(a))).not.toHaveProperty("raw");
+        expect(a.raw).not.toEqual(b.raw);
+        expect(isDeepStrictEqual(a, b)).toBe(true);
+      } finally { client.close(); }
+    });
+    it.each([...Object.values(SnapshotStatus), "future_status"])(
+      "normalizes snapshot status %s through create, get and list",
+      async (status) => {
+        const info = { id: "snap-1", namespace: "default", sandbox_id: "sbx-1", status };
+        installNativeStub({ client: {
+          createSnapshot: vi.fn(async () => ({ traceId: "create-trace", json: JSON.stringify({ snapshot_id: "snap-1", status }) })),
+          getSnapshot: vi.fn(async () => ({ traceId: "get-trace", json: JSON.stringify(info) })),
+          listSnapshots: vi.fn(async () => ({ traceId: "list-trace", json: JSON.stringify({ snapshots: [info] }) })),
+        } });
+        const client = SandboxClient.forLocalhost();
+        try {
+          const expected = status === "future_status" ? SnapshotStatus.UNKNOWN : status;
+          const created = await client.snapshot("sbx-1");
+          expect(created.status).toBe(expected);
+          expect(created.raw).toEqual({ snapshot_id: "snap-1", status });
+          const snapshot = await client.getSnapshot("snap-1");
+          expect(snapshot.status).toBe(expected);
+          expect(snapshot.raw).toEqual(info);
+          expect(JSON.parse(JSON.stringify(snapshot))).not.toHaveProperty("raw");
+          expect(snapshot.traceId).toBe("get-trace");
+          const snapshots = await client.listSnapshots();
+          expect(snapshots[0]?.status).toBe(expected);
+          expect(snapshots[0]?.raw).toEqual(info);
+          expect(snapshots.traceId).toBe("list-trace");
+        } finally {
+          client.close();
+        }
+      },
+    );
+
+    it.each([{}, null, { snapshots: null }])("returns an empty list for an empty snapshot response %j", async (payload) => {
+      installNativeStub({ client: {
+        listSnapshots: vi.fn(async () => ({ traceId: "t", json: JSON.stringify(payload) })),
+      } });
+      const client = SandboxClient.forLocalhost();
+      try {
+        expect(await client.listSnapshots()).toHaveLength(0);
+      } finally {
+        client.close();
+      }
+    });
+
+    it.each([{ snapshots: {} }, { snapshots: "bad" }, [], "bad"])(
+      "rejects malformed snapshot lists with SandboxError: %j", async (payload) => {
+        installNativeStub({ client: {
+          listSnapshots: vi.fn(async () => ({ traceId: "t", json: JSON.stringify(payload) })),
+        } });
+        const client = SandboxClient.forLocalhost();
+        try {
+          await expect(client.listSnapshots()).rejects.toBeInstanceOf(SandboxError);
+        } finally {
+          client.close();
+        }
+      },
+    );
+
+    it.each([{ snapshot_id: "s" }, { snapshot_id: "s", status: null }])("rejects a missing or null snapshot status before polling: %j", async (payload) => {
+      const getSnapshot = vi.fn();
+      installNativeStub({ client: {
+        createSnapshot: vi.fn(async () => ({ traceId: "t", json: JSON.stringify(payload) })),
+        getSnapshot,
+      } });
+      const client = SandboxClient.forLocalhost();
+      try {
+        await expect(client.snapshotAndWait("sbx-1", { pollInterval: 0 })).rejects.toThrow("missing status");
+        expect(getSnapshot).not.toHaveBeenCalled();
+      } finally {
+        client.close();
+      }
+    });
+
+    it("keeps waiting when the snapshot has an unknown status", async () => {
+      const getSnapshot = vi.fn();
+      for (const status of ["future_status", "completed"]) {
+        getSnapshot.mockResolvedValueOnce({ traceId: "t", json: JSON.stringify({
+          id: "snap-1", namespace: "default", sandbox_id: "sbx-1", status,
+        }) });
+      }
+      installNativeStub({ client: {
+        createSnapshot: vi.fn(async () => ({ traceId: "t", json: JSON.stringify({ snapshot_id: "snap-1", status: "in_progress" }) })),
+        getSnapshot,
+      } });
+      const client = SandboxClient.forLocalhost();
+      try {
+        const info = await client.snapshotAndWait("sbx-1", { pollInterval: 0 });
+        expect(info.status).toBe(SnapshotStatus.COMPLETED);
+        expect(getSnapshot).toHaveBeenCalledTimes(2);
+      } finally {
+        client.close();
+      }
+    });
+
     it("creates a snapshot", async () => {
       const stub = installNativeStub({
         client: {

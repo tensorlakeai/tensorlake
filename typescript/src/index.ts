@@ -22,6 +22,11 @@ export {
   listSandboxImages,
 } from "./sandbox-image.js";
 export {
+  ImageBuildCancellationOutcome,
+  ImageBuildErrorCode,
+  ImageBuildKind,
+  ImageBuildPhase,
+  ImageBuildStatus,
   ImageBuildHandle,
   ImageBuildError,
   ImageBuildNotFoundError,
@@ -39,8 +44,6 @@ export {
 export type {
   ImageBuildInfo,
   ImageBuildResult,
-  ImageBuildStatus,
-  ImageBuildPhase,
   ImageBuildEvent,
   ImageBuildWaitOptions,
   StartImageBuildOptions,

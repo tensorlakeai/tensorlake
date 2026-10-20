@@ -268,6 +268,8 @@ jobs:
             tests.sandbox.test_ready_timeout \
             tests.sandbox.test_resource_resize \
             tests.image.test_sandbox_builder \
+            tests.image.test_builds \
+            tests.image.test_builds_native \
             tests.image.test_docker_config_native \
             tests.function_agent.test_runner
 
