@@ -370,6 +370,67 @@ class TestBuildOperationsNative(unittest.TestCase):
             },
         )()
 
+    def test_upload_failures_never_expose_the_capability_url(self):
+        """The context-upload capability is a signed URL. A storage error
+        body that echoes it and a transport error that carries it both
+        surface as an exception without any of its material."""
+        secret_query = (
+            "X-Amz-Algorithm=AWS4-HMAC-SHA256"
+            "&X-Amz-Credential=AKIATESTKEY%2F20261015%2Fus-east-1%2Fs3%2Faws4_request"
+            "&X-Amz-Signature=deadbeefcafef00d"
+        )
+        for failure in ("storage_error", "reset"):
+            with (
+                self.subTest(failure=failure),
+                ScriptedService() as service,
+                _env(),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
+                dockerfile = Path(tmp) / "Dockerfile"
+                dockerfile.write_text("FROM scratch\n")
+                upload_path = f"/upload/build-1?{secret_query}"
+                admitted = _build(kind="dockerfile")
+                admitted["context_upload"] = {
+                    "url": service.url + upload_path,
+                    "max_bytes": 10_000_000,
+                }
+                service.handlers[("POST", "/images/v4/builds")] = (201, admitted)
+                if failure == "storage_error":
+                    service.handlers[("PUT", upload_path)] = (
+                        500,
+                        {
+                            "Code": "SignatureDoesNotMatch",
+                            "StringToSign": f"AWS4-HMAC-SHA256 {service.url}{upload_path}",
+                            "Resource": upload_path,
+                        },
+                    )
+                else:
+                    service.handlers[("PUT", upload_path)] = ("reset", None)
+                with patch.object(
+                    builds,
+                    "_build_context_from_env",
+                    return_value=self._ctx(service.url),
+                ):
+                    with self.assertRaises(builds.ImageBuildError) as raised:
+                        builds.start_build(
+                            str(dockerfile), registered_name="img", context_dir=tmp
+                        )
+                text = str(raised.exception)
+                self.assertIn("context upload failed", text)
+                # The object path is not a credential; everything that signs
+                # it is, and none of it may survive (the signature, the access
+                # key, any X-Amz-* parameter, the signing scope).
+                for secret in (
+                    "deadbeefcafef00d",
+                    "AKIATESTKEY",
+                    "X-Amz-",
+                    "aws4_request",
+                    secret_query,
+                ):
+                    self.assertNotIn(secret, text)
+                self.assertEqual(len(service.recorded("PUT", upload_path)), 1)
+                self.assertEqual(len(service.recorded("POST", "/images/v4/builds")), 1)
+
     def test_start_import_keeps_one_request_id_across_a_transient_retry(self):
         with ScriptedService() as service, _env():
             answers = iter([(503, {"error": "deploying"}), (201, _build())])
