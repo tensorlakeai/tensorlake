@@ -2,10 +2,10 @@
 
 from typing import TypedDict, cast
 
-from tensorlake._enums import UnknownStrEnum
+from tensorlake._enums import ResponseEnum
 
 
-class ImageBuildStatus(UnknownStrEnum):
+class ImageBuildStatus(ResponseEnum):
     PENDING = "pending"
     RUNNING = "running"
     SUCCEEDED = "succeeded"
@@ -14,7 +14,7 @@ class ImageBuildStatus(UnknownStrEnum):
     UNKNOWN = "unknown"
 
 
-class ImageBuildPhase(UnknownStrEnum):
+class ImageBuildPhase(ResponseEnum):
     AWAITING_CONTEXT = "awaiting_context"
     STARTING_BUILDER = "starting_builder"
     EXECUTING = "executing"
@@ -24,14 +24,14 @@ class ImageBuildPhase(UnknownStrEnum):
     UNKNOWN = "unknown"
 
 
-class ImageBuildKind(UnknownStrEnum):
+class ImageBuildKind(ResponseEnum):
     DOCKERFILE = "dockerfile"
     IMPORT = "import"
     DIRECT = "direct"
     UNKNOWN = "unknown"
 
 
-class ImageBuildCancellationOutcome(UnknownStrEnum):
+class ImageBuildCancellationOutcome(ResponseEnum):
     CANCELLED = "cancelled"
     ALREADY_CANCELLED = "already_cancelled"
     ALREADY_COMPLETED = "already_completed"
@@ -45,7 +45,7 @@ class ImageBuildCancellationOutcome(UnknownStrEnum):
         return self in (self.CANCELLED, self.ALREADY_CANCELLED, self.ALREADY_FAILED)
 
 
-class ImageBuildErrorCode(UnknownStrEnum):
+class ImageBuildErrorCode(ResponseEnum):
     USAGE = "usage"
     AUTH = "auth"
     NOT_FOUND = "not_found"
@@ -60,7 +60,7 @@ class ImageBuildErrorCode(UnknownStrEnum):
     UNKNOWN = "unknown"
 
 
-class ImageBuildEventType(UnknownStrEnum):
+class ImageBuildEventType(ResponseEnum):
     STATUS = "status"
     BUILD_LOG = "build_log"
     WARNING = "warning"
@@ -69,6 +69,7 @@ class ImageBuildEventType(UnknownStrEnum):
     BUILD_TERMINAL = "build_terminal"
     INTERRUPTED = "interrupted"
     IMAGE_REGISTERED = "image_registered"
+    DONE = "done"
     UNKNOWN = "unknown"
 
 
@@ -83,20 +84,24 @@ class ImageBuildEvent(TypedDict, total=False):
     attempt: int
     outcome: ImageBuildCancellationOutcome
     confirmed: bool
+    raw: dict
 
 
 def normalize_build_event(event: dict) -> ImageBuildEvent:
-    normalized = dict(event)
+    normalized = {**event, "raw": dict(event)}
     for name, enum in (
         ("type", ImageBuildEventType),
         ("status", ImageBuildStatus),
         ("phase", ImageBuildPhase),
         ("outcome", ImageBuildCancellationOutcome),
     ):
-        if normalized.get(name) is not None:
-            normalized[name] = enum(normalized[name])
-    if normalized.get("outcome") is not None and "confirmed" in normalized:
+        if name in normalized and (name == "type" or normalized[name] is not None):
+            normalized[name] = enum.from_response(normalized[name])
+    if "confirmed" in normalized:
+        outcome = normalized.get("outcome")
         normalized["confirmed"] = (
-            normalized["confirmed"] is True and normalized["outcome"].confirmed
+            normalized["confirmed"] is True
+            and outcome is not None
+            and outcome.confirmed
         )
     return cast(ImageBuildEvent, normalized)

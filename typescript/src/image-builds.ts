@@ -1,7 +1,7 @@
 import path from "node:path";
 import os from "node:os";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
-import { enumValue } from "./enum.js";
+import { enumValue, requireEnumValue } from "./enum.js";
 import {
   ImageBuildCancellationOutcome,
   ImageBuildErrorCode,
@@ -10,6 +10,7 @@ import {
   ImageBuildPhase,
   ImageBuildStatus,
   isConfirmedCancellation,
+  normalizeBuildEvent,
 } from "./image-build-enums.js";
 
 export {
@@ -97,27 +98,27 @@ export class ImageBuildError extends Error {
   /** Original decoded error fields, before enum normalization. */
   readonly rawDetails: Readonly<Record<string, unknown>>;
 
-  constructor(details: ImageBuildErrorDetails) {
+  constructor(details: ImageBuildErrorDetails, rawDetails: Readonly<Record<string, unknown>> = { ...details }) {
     super(details.message);
     this.name = "ImageBuildError";
-    this.rawDetails = { ...details };
-    this.code = enumValue(ImageBuildErrorCode, details.code);
+    this.rawDetails = { ...rawDetails };
+    this.code = requireEnumValue(ImageBuildErrorCode, details.code);
     this.details = { ...details, code: this.code };
     if (details.activeKind != null) {
-      this.details.activeKind = enumValue(ImageBuildKind, details.activeKind);
+      this.details.activeKind = requireEnumValue(ImageBuildKind, details.activeKind);
     }
     if (details.activeStatus != null) {
-      this.details.activeStatus = enumValue(ImageBuildStatus, details.activeStatus);
+      this.details.activeStatus = requireEnumValue(ImageBuildStatus, details.activeStatus);
     }
     if (details.outcome != null) {
-      this.details.outcome = enumValue(ImageBuildCancellationOutcome, details.outcome);
-      if (details.confirmed != null) {
-        this.details.confirmed = details.confirmed === true &&
-          isConfirmedCancellation(this.details.outcome);
-      }
+      this.details.outcome = requireEnumValue(ImageBuildCancellationOutcome, details.outcome);
     }
-    if (details.info != null) {
-      this.details.info = parseBuildInfo(details.info as unknown as Record<string, unknown>);
+    if ("confirmed" in details) {
+      this.details.confirmed = details.confirmed === true && this.details.outcome != null &&
+        isConfirmedCancellation(this.details.outcome);
+    }
+    if ("info" in details) {
+      this.details.info = isBuildInfo(details.info) ? details.info : null;
     }
     if (details.buildId) this.buildId = details.buildId;
     if (details.clientRequestId) this.clientRequestId = details.clientRequestId;
@@ -130,8 +131,8 @@ export class ImageBuildError extends Error {
  * build of the image or deleting the image retires it.
  */
 export class ImageBuildNotFoundError extends ImageBuildError {
-  constructor(details: ImageBuildErrorDetails) {
-    super(details);
+  constructor(details: ImageBuildErrorDetails, rawDetails?: Readonly<Record<string, unknown>>) {
+    super(details, rawDetails);
     this.name = "ImageBuildNotFoundError";
   }
 }
@@ -146,8 +147,8 @@ export class ImageBuildInProgressError extends ImageBuildError {
   readonly activeKind?: ImageBuildKind;
   readonly activeStatus?: ImageBuildStatus;
 
-  constructor(details: ImageBuildErrorDetails) {
-    super(details);
+  constructor(details: ImageBuildErrorDetails, rawDetails?: Readonly<Record<string, unknown>>) {
+    super(details, rawDetails);
     this.name = "ImageBuildInProgressError";
     if (details.imageName) this.imageName = details.imageName;
     if (details.activeBuildId) this.activeBuildId = details.activeBuildId;
@@ -161,8 +162,8 @@ export class ImageBuildFailedError extends ImageBuildError {
   readonly error: string;
   readonly info?: ImageBuildInfo;
 
-  constructor(details: ImageBuildErrorDetails) {
-    super(details);
+  constructor(details: ImageBuildErrorDetails, rawDetails?: Readonly<Record<string, unknown>>) {
+    super(details, rawDetails);
     this.name = "ImageBuildFailedError";
     this.error = details.error ?? "no error recorded";
     if (this.details.info) this.info = this.details.info;
@@ -173,8 +174,8 @@ export class ImageBuildFailedError extends ImageBuildError {
 export class ImageBuildCancelledError extends ImageBuildError {
   readonly info?: ImageBuildInfo;
 
-  constructor(details: ImageBuildErrorDetails) {
-    super(details);
+  constructor(details: ImageBuildErrorDetails, rawDetails?: Readonly<Record<string, unknown>>) {
+    super(details, rawDetails);
     this.name = "ImageBuildCancelledError";
     if (this.details.info) this.info = this.details.info;
   }
@@ -182,8 +183,8 @@ export class ImageBuildCancelledError extends ImageBuildError {
 
 /** The caller stopped waiting. The build may still be running. */
 export class ImageBuildTimeoutError extends ImageBuildError {
-  constructor(details: ImageBuildErrorDetails) {
-    super(details);
+  constructor(details: ImageBuildErrorDetails, rawDetails?: Readonly<Record<string, unknown>>) {
+    super(details, rawDetails);
     this.name = "ImageBuildTimeoutError";
   }
 }
@@ -199,8 +200,8 @@ export class ImageBuildInterruptedError extends ImageBuildError {
   readonly confirmed: boolean;
   readonly result?: Record<string, unknown>;
 
-  constructor(details: ImageBuildErrorDetails) {
-    super(details);
+  constructor(details: ImageBuildErrorDetails, rawDetails?: Readonly<Record<string, unknown>>) {
+    super(details, rawDetails);
     this.name = "ImageBuildInterruptedError";
     this.outcome = this.details.outcome ?? ImageBuildCancellationOutcome.UNCONFIRMED;
     this.confirmed = this.details.confirmed === true && isConfirmedCancellation(this.outcome);
@@ -230,22 +231,28 @@ export function toImageBuildError(error: unknown): unknown {
     if (key === "category") continue;
     details[camelize(key)] = value;
   }
-  const typed = details as unknown as ImageBuildErrorDetails;
+  const normalized = { ...details };
+  normalized.code = enumValue(ImageBuildErrorCode, details.code);
+  if (details.activeKind != null) normalized.activeKind = enumValue(ImageBuildKind, details.activeKind);
+  if (details.activeStatus != null) normalized.activeStatus = enumValue(ImageBuildStatus, details.activeStatus);
+  if (details.outcome != null) normalized.outcome = enumValue(ImageBuildCancellationOutcome, details.outcome);
+  if ("info" in details) normalized.info = isRecord(details.info) ? parseBuildInfo(details.info) : null;
+  const typed = normalized as unknown as ImageBuildErrorDetails;
   switch (typed.code) {
     case "not_found":
-      return new ImageBuildNotFoundError(typed);
+      return new ImageBuildNotFoundError(typed, details);
     case "image_build_in_progress":
-      return new ImageBuildInProgressError(typed);
+      return new ImageBuildInProgressError(typed, details);
     case "failed":
-      return new ImageBuildFailedError(typed);
+      return new ImageBuildFailedError(typed, details);
     case "cancelled":
-      return new ImageBuildCancelledError(typed);
+      return new ImageBuildCancelledError(typed, details);
     case "timeout":
-      return new ImageBuildTimeoutError(typed);
+      return new ImageBuildTimeoutError(typed, details);
     case "interrupted":
-      return new ImageBuildInterruptedError(typed);
+      return new ImageBuildInterruptedError(typed, details);
     default:
-      return new ImageBuildError(typed);
+      return new ImageBuildError(typed, details);
   }
 }
 
@@ -293,6 +300,8 @@ export interface CancelImageBuildOutcome {
   build: ImageBuildInfo | null;
   /** Whether the build is known not to publish. */
   confirmed: boolean;
+  /** Original cancellation response, including unfamiliar values. */
+  raw: Record<string, unknown>;
 }
 
 function camelizeRecord(value: Record<string, unknown>): Record<string, unknown> {
@@ -301,29 +310,36 @@ function camelizeRecord(value: Record<string, unknown>): Record<string, unknown>
   return out;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isBuildInfo(value: unknown): value is ImageBuildInfo {
+  return isRecord(value) && typeof value.buildId === "string" &&
+    typeof value.attemptNo === "number" && isRecord(value.raw) &&
+    Object.values(ImageBuildStatus).includes(value.status as ImageBuildStatus);
+}
+
 function parseBuildInfo(raw: Record<string, unknown>): ImageBuildInfo {
-  const camel = camelizeRecord(raw);
   const result =
     raw.result && typeof raw.result === "object"
       ? (camelizeRecord(raw.result as Record<string, unknown>) as unknown as ImageBuildResult)
       : null;
   return {
-    buildId: String(camel.buildId ?? ""),
-    clientRequestId: (camel.clientRequestId as string | null | undefined) ?? null,
+    buildId: String(raw.build_id ?? ""),
+    clientRequestId: (raw.client_request_id as string | null | undefined) ?? null,
     kind: raw.kind == null ? raw.kind : enumValue(ImageBuildKind, raw.kind),
     name: (raw.name as string | null | undefined) ?? null,
     status: enumValue(ImageBuildStatus, raw.status),
     phase: raw.phase == null ? raw.phase : enumValue(ImageBuildPhase, raw.phase),
-    attemptNo: Number(camel.attemptNo ?? 0),
-    builderSandboxId: (camel.builderSandboxId as string | null | undefined) ?? null,
+    attemptNo: Number(raw.attempt_no ?? 0),
+    builderSandboxId: (raw.builder_sandbox_id as string | null | undefined) ?? null,
     error: (raw.error as string | null | undefined) ?? null,
     result,
-    operationDeadlineMs: (camel.operationDeadlineMs as number | null | undefined) ?? null,
-    createdAtMs: (camel.createdAtMs as number | null | undefined) ?? null,
-    updatedAtMs: (camel.updatedAtMs as number | null | undefined) ?? null,
-    raw: typeof raw.buildId === "string" && raw.raw && typeof raw.raw === "object"
-      ? raw.raw as Record<string, unknown>
-      : raw,
+    operationDeadlineMs: (raw.operation_deadline_ms as number | null | undefined) ?? null,
+    createdAtMs: (raw.created_at_ms as number | null | undefined) ?? null,
+    updatedAtMs: (raw.updated_at_ms as number | null | undefined) ?? null,
+    raw,
   };
 }
 
@@ -335,6 +351,7 @@ function parseResult(json: string): ImageBuildResult {
 
 export interface ImageBuildEvent {
   type: ImageBuildEventType;
+  raw: Record<string, unknown>;
   message?: string;
   stream?: string;
   build_id?: string;
@@ -452,9 +469,10 @@ export async function __runWithInterrupt<T>(
 }
 
 function makeEmitter(options: { emit?: (event: ImageBuildEvent) => void; verbose?: boolean }) {
-  const emit =
+  const target =
     options.emit ??
     (options.verbose ? __imageBuildInternals.stderrEmit : __imageBuildInternals.noopEmit);
+  const emit = (event: Record<string, unknown>) => target(normalizeBuildEvent(event) as ImageBuildEvent);
   let emitError: unknown;
   const forward = (event: {
     eventType: string;
@@ -469,7 +487,7 @@ function makeEmitter(options: { emit?: (event: ImageBuildEvent) => void; verbose
     confirmed?: boolean | null;
   }) => {
     try {
-      emit(__imageBuildInternals.eventToEmitDict(event) as ImageBuildEvent);
+      emit(__imageBuildInternals.eventToEmitDict(event));
     } catch (error) {
       emitError ??= error;
     }
@@ -779,8 +797,9 @@ async function cancelImageBuildWith(
   const outcome = enumValue(ImageBuildCancellationOutcome, payload.outcome);
   return {
     outcome,
-    build: payload.build ? parseBuildInfo(payload.build) : null,
+    build: isRecord(payload.build) ? parseBuildInfo(payload.build) : null,
     confirmed: isConfirmedCancellation(outcome),
+    raw: payload,
   };
 }
 

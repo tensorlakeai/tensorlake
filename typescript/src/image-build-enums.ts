@@ -66,20 +66,22 @@ export enum ImageBuildEventType {
   BUILD_TERMINAL = "build_terminal",
   INTERRUPTED = "interrupted",
   IMAGE_REGISTERED = "image_registered",
+  DONE = "done",
   UNKNOWN = "unknown",
 }
 
 export function normalizeBuildEvent(event: Record<string, unknown>): Record<string, unknown> {
-  const result = { ...event };
-  if (event.type != null) result.type = enumValue(ImageBuildEventType, event.type);
+  const result: Record<string, unknown> = { ...event, raw: { ...event } };
+  if ("type" in event) result.type = enumValue(ImageBuildEventType, event.type);
   if (event.status != null) result.status = enumValue(ImageBuildStatus, event.status);
   if (event.phase != null) result.phase = enumValue(ImageBuildPhase, event.phase);
   if (event.outcome != null) {
     const outcome = enumValue(ImageBuildCancellationOutcome, event.outcome);
     result.outcome = outcome;
-    if ("confirmed" in event) {
-      result.confirmed = event.confirmed === true && isConfirmedCancellation(outcome);
-    }
+  }
+  if ("confirmed" in event) {
+    result.confirmed = event.confirmed === true &&
+      isConfirmedCancellation(result.outcome as ImageBuildCancellationOutcome);
   }
   return result;
 }

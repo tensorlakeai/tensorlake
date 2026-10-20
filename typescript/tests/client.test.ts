@@ -1837,12 +1837,17 @@ describe("SandboxClient", () => {
         } });
         const client = SandboxClient.forLocalhost();
         const expected = status === "future_status" ? SnapshotStatus.UNKNOWN : status;
-        expect((await client.snapshot("sbx-1")).status).toBe(expected);
+        const created = await client.snapshot("sbx-1");
+        expect(created.status).toBe(expected);
+        expect(created.raw).toEqual({ snapshot_id: "snap-1", status });
         const snapshot = await client.getSnapshot("snap-1");
         expect(snapshot.status).toBe(expected);
+        expect(snapshot.raw).toEqual(info);
+        expect(JSON.parse(JSON.stringify(snapshot)).raw.status).toBe(status);
         expect(snapshot.traceId).toBe("get-trace");
         const snapshots = await client.listSnapshots();
         expect(snapshots[0]?.status).toBe(expected);
+        expect(snapshots[0]?.raw).toEqual(info);
         expect(snapshots.traceId).toBe("list-trace");
         client.close();
       },

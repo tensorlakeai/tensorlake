@@ -339,7 +339,11 @@ function noopEmit(_event: Record<string, unknown>): void {}
 
 function stderrEmit(event: Record<string, unknown>): void {
   const message = typeof event.message === "string" ? event.message : "";
-  const type = typeof event.type === "string" ? event.type : "";
+  let type = typeof event.type === "string" ? event.type : "";
+  if (type === "unknown") {
+    const raw = event.raw as Record<string, unknown> | undefined;
+    if (typeof raw?.type === "string") type = raw.type;
+  }
   if (type === "build_log") {
     const stream = typeof event.stream === "string" ? event.stream : "stdout";
     process.stderr.write(`[${stream}] ${message}\n`);
@@ -368,7 +372,14 @@ function eventToEmitDict(event: NativeBindingEvent): Record<string, unknown> {
   if (event.attempt != null) out.attempt = event.attempt;
   if (event.outcome != null) out.outcome = event.outcome;
   if (event.confirmed != null) out.confirmed = event.confirmed;
-  return normalizeBuildEvent(out);
+  return out;
+}
+
+function makeImageEmitter(options: { cas?: boolean; verbose?: boolean }, deps: CreateSandboxImageDeps) {
+  const emit = deps.emit ?? (options.verbose ? stderrEmit : noopEmit);
+  return options.cas
+    ? (event: Record<string, unknown>) => emit(normalizeBuildEvent(event))
+    : emit;
 }
 
 /**
@@ -461,7 +472,7 @@ export async function createSandboxImage(
   options: CreateSandboxImageOptions = {},
   deps: CreateSandboxImageDeps = {},
 ): Promise<Record<string, unknown>> {
-  const emit = deps.emit ?? (options.verbose ? stderrEmit : noopEmit);
+  const emit = makeImageEmitter(options, deps);
   const context = buildContextFromEnv();
 
   let dockerfilePath: string;
@@ -631,7 +642,7 @@ export async function importSandboxImage(
   options: ImportSandboxImageOptions = {},
   deps: CreateSandboxImageDeps = {},
 ): Promise<Record<string, unknown>> {
-  const emit = deps.emit ?? (options.verbose ? stderrEmit : noopEmit);
+  const emit = makeImageEmitter(options, deps);
 
   if (typeof imageReference !== "string" || imageReference.trim().length === 0) {
     throw new Error("image reference to import must not be empty");

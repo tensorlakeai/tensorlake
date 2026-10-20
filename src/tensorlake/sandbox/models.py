@@ -1,9 +1,10 @@
 """Pydantic models for sandbox operations."""
 
+import json
 import warnings
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, TypeVar
 from urllib.parse import urlparse, urlunparse
 
 from pydantic import (
@@ -16,7 +17,7 @@ from pydantic import (
     model_serializer,
 )
 
-from tensorlake._enums import UnknownStrEnum
+from tensorlake._enums import ResponseEnum
 
 _SANDBOX_MANAGEMENT_PORT = 9501
 
@@ -126,7 +127,7 @@ TERMINATION_REASON_CANCELLED = "cancelled"
 """A pending sandbox was deleted before it ran."""
 
 
-class SnapshotStatus(UnknownStrEnum):
+class SnapshotStatus(ResponseEnum):
     """Status of a snapshot; future server values map to UNKNOWN."""
 
     IN_PROGRESS = "in_progress"
@@ -874,22 +875,40 @@ class ListSandboxPoolsResponse(BaseModel):
 
 # --- Snapshot models ---
 
+SnapshotResponseT = TypeVar("SnapshotResponseT", bound="_SnapshotResponse")
 
-class CreateSnapshotResponse(BaseModel):
+
+class _SnapshotResponse(BaseModel):
+    status: SnapshotStatus
+    raw: dict[str, Any] = Field(default_factory=dict, repr=False)
+
+    @classmethod
+    def from_response(
+        cls: type[SnapshotResponseT], payload: dict | str
+    ) -> SnapshotResponseT:
+        data = json.loads(payload) if isinstance(payload, str) else payload
+        return cls.model_validate(
+            {
+                **data,
+                "status": SnapshotStatus.from_response(data.get("status")),
+                "raw": dict(data),
+            }
+        )
+
+
+class CreateSnapshotResponse(_SnapshotResponse):
     """Response from creating a snapshot."""
 
     snapshot_id: str
-    status: SnapshotStatus
 
 
-class SnapshotInfo(BaseModel):
+class SnapshotInfo(_SnapshotResponse):
     """Full snapshot information."""
 
     snapshot_id: str = Field(alias="id")
     namespace: str
     sandbox_id: str
     base_image: str | None = None
-    status: SnapshotStatus
     snapshot_type: SnapshotType | None = None
     error: str | None = None
     snapshot_uri: str | None = None
@@ -905,6 +924,13 @@ class ListSnapshotsResponse(BaseModel):
     """Response from listing snapshots (internal use)."""
 
     snapshots: list[SnapshotInfo]
+
+    @classmethod
+    def from_response(cls, payload: dict | str) -> "ListSnapshotsResponse":
+        data = json.loads(payload) if isinstance(payload, str) else payload
+        return cls(
+            snapshots=[SnapshotInfo.from_response(item) for item in data["snapshots"]]
+        )
 
 
 class SandboxLogLevel(str, Enum):

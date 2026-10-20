@@ -2167,8 +2167,8 @@ class TestSnapshotStatusCompatibility(unittest.TestCase):
                 "status": "future_status",
             }
             for mode, info in (
-                ("python", model.model_validate(payload)),
-                ("json", model.model_validate_json(json.dumps(payload))),
+                ("python", model.from_response(payload)),
+                ("json", model.from_response(json.dumps(payload))),
             ):
                 with self.subTest(model=model.__name__, mode=mode):
                     self.assertIs(info.status, SnapshotStatus.UNKNOWN)
@@ -2176,6 +2176,23 @@ class TestSnapshotStatusCompatibility(unittest.TestCase):
                     self.assertEqual(
                         json.loads(info.model_dump_json())["status"], "unknown"
                     )
+                    self.assertEqual(info.raw, payload)
+                    self.assertEqual(
+                        json.loads(info.model_dump_json())["raw"]["status"],
+                        "future_status",
+                    )
+
+    def test_constructing_snapshot_models_rejects_status_typos(self):
+        for model in (CreateSnapshotResponse, SnapshotInfo):
+            with self.subTest(model=model.__name__), self.assertRaises(ValueError):
+                model.model_validate(
+                    {
+                        "snapshot_id": "snap-1",
+                        "namespace": "default",
+                        "sandbox_id": "sbx-1",
+                        "status": "in_progres",
+                    }
+                )
 
 
 class TestSandboxFailureCompatibility(unittest.TestCase):

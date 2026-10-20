@@ -62,9 +62,10 @@ import json
 import os
 import tempfile
 import warnings
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from tensorlake._tracing import USER_AGENT
 
@@ -156,12 +157,15 @@ class ImageBuildError(SandboxImageBuildError):
         ):
             if self.details.get(name) is not None:
                 self.details[name] = enum(self.details[name])
-        if self.details.get("outcome") is not None and "confirmed" in self.details:
+        if "confirmed" in self.details:
+            outcome = self.details.get("outcome")
             self.details["confirmed"] = (
-                self.details["confirmed"] is True and self.details["outcome"].confirmed
+                self.details["confirmed"] is True
+                and outcome is not None
+                and outcome.confirmed
             )
-        if isinstance(self.details.get("info"), dict):
-            self.details["info"] = ImageBuildInfo.from_dict(self.details["info"])
+        if "info" in self.details:
+            self.details["info"] = _info_or_none(self.details["info"])
         self.build_id: str | None = details.get("build_id")
         self.client_request_id: str | None = details.get("client_request_id")
 
@@ -260,14 +264,25 @@ def _typed_build_error(exc: BaseException) -> ImageBuildError | None:
         return None
     if not isinstance(payload, dict):
         return None
-    code = str(payload.get("code") or "internal")
+    code = ImageBuildErrorCode.from_response(payload.get("code", "internal"))
     message = str(payload.get("message") or exc)
     details = {key: value for key, value in payload.items() if key not in ("message",)}
-    cls = _TYPED_ERRORS.get(ImageBuildErrorCode(code))
-    if cls is not None:
-        details.pop("code", None)
-        return cls(message, **details)
-    return ImageBuildError(message, **details)
+    details.pop("code", None)
+    for name, enum in (
+        ("active_kind", ImageBuildKind),
+        ("active_status", ImageBuildStatus),
+        ("outcome", ImageBuildCancellationOutcome),
+    ):
+        if details.get(name) is not None:
+            details[name] = enum.from_response(details[name])
+    cls = _TYPED_ERRORS.get(code)
+    error = (
+        cls(message, **details)
+        if cls
+        else ImageBuildError(message, code=code, **details)
+    )
+    error.raw_details = dict(payload)
+    return error
 
 
 def _raise_typed(exc: BaseException) -> None:
@@ -280,8 +295,7 @@ def _raise_typed(exc: BaseException) -> None:
 # --- Models -----------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class ImageBuildInfo:
+class ImageBuildInfo(BaseModel):
     """One build or import as the Image Service reports it.
 
     Unknown fields are kept in :attr:`raw`. ``status`` is ``pending``,
@@ -294,6 +308,8 @@ class ImageBuildInfo:
     returns for that image. The service exposes no cleanup state, phase
     deadline, content digest or upload capability on a build.
     """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     build_id: str
     status: ImageBuildStatus
@@ -308,14 +324,7 @@ class ImageBuildInfo:
     operation_deadline_ms: int | None = None
     created_at_ms: int | None = None
     updated_at_ms: int | None = None
-    raw: dict = field(default_factory=dict, repr=False, compare=False)
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "status", ImageBuildStatus(self.status))
-        if self.kind is not None:
-            object.__setattr__(self, "kind", ImageBuildKind(self.kind))
-        if self.phase is not None:
-            object.__setattr__(self, "phase", ImageBuildPhase(self.phase))
+    raw: dict = Field(default_factory=dict, repr=False)
 
     @property
     def is_terminal(self) -> bool:
@@ -333,10 +342,18 @@ class ImageBuildInfo:
         normalized = _snake_case_keys(result) if isinstance(result, dict) else None
         return cls(
             build_id=str(raw.get("build_id", "")),
-            status=ImageBuildStatus(raw.get("status", "")),
-            kind=raw.get("kind"),
+            status=ImageBuildStatus.from_response(raw.get("status")),
+            kind=(
+                ImageBuildKind.from_response(raw["kind"])
+                if raw.get("kind") is not None
+                else None
+            ),
             name=raw.get("name"),
-            phase=raw.get("phase"),
+            phase=(
+                ImageBuildPhase.from_response(raw["phase"])
+                if raw.get("phase") is not None
+                else None
+            ),
             attempt_no=int(raw.get("attempt_no") or 0),
             client_request_id=raw.get("client_request_id"),
             builder_sandbox_id=raw.get("builder_sandbox_id"),
@@ -349,8 +366,7 @@ class ImageBuildInfo:
         )
 
 
-@dataclass(frozen=True)
-class CancelBuildOutcome:
+class CancelBuildOutcome(BaseModel):
     """The service's answer to a cancellation.
 
     ``outcome`` is ``cancelled`` (durable), ``already_cancelled``,
@@ -360,11 +376,11 @@ class CancelBuildOutcome:
     about a delayed admission). ``build`` is the observed record when any.
     """
 
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
     outcome: ImageBuildCancellationOutcome
     build: ImageBuildInfo | None = None
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "outcome", ImageBuildCancellationOutcome(self.outcome))
+    raw: dict = Field(default_factory=dict, repr=False)
 
     @property
     def confirmed(self) -> bool:
@@ -373,11 +389,28 @@ class CancelBuildOutcome:
 
     @classmethod
     def from_dict(cls, raw: dict) -> "CancelBuildOutcome":
-        build = raw.get("build")
         return cls(
-            outcome=ImageBuildCancellationOutcome(raw.get("outcome", "")),
-            build=ImageBuildInfo.from_dict(build) if isinstance(build, dict) else None,
+            outcome=ImageBuildCancellationOutcome.from_response(raw.get("outcome")),
+            build=_info_or_none(raw.get("build")),
+            raw=dict(raw),
         )
+
+
+def _info_or_none(raw: Any) -> ImageBuildInfo | None:
+    if isinstance(raw, ImageBuildInfo):
+        return raw
+    if isinstance(raw, dict):
+        try:
+            return ImageBuildInfo.from_dict(raw)
+        except (ValueError, TypeError):
+            pass
+    return None
+
+
+def _resolve_emit(emit: EmitFn | None, verbose: bool) -> Callable[[dict], None]:
+    if emit is None:
+        emit = _stderr_emit if verbose else _noop_emit
+    return _forwarder(emit, cas=True)
 
 
 # --- Native delegation -------------------------------------------------------
@@ -552,9 +585,7 @@ class ImageBuildHandle:
             ImageBuildTimeoutError: ``timeout`` expired.
             KeyboardInterrupt: After the remote cancellation handshake ran.
         """
-        if emit is None:
-            emit = _stderr_emit if verbose else _noop_emit
-        emit = _forwarder(emit)
+        emit = _resolve_emit(emit, verbose)
         api_url, token, namespace = self._credentials_or_env()
         try:
             raw = _rust_wait_image_build(
@@ -666,9 +697,7 @@ def start_build(
             cancel ``active_build_id`` first.
         SandboxImageLoadError, SandboxImageBuildError: Source problems.
     """
-    if emit is None:
-        emit = _stderr_emit if verbose else _noop_emit
-    emit = _forwarder(emit)
+    emit = _resolve_emit(emit, verbose)
     with contextlib.ExitStack() as stack:
         dockerfile_path, dockerfile_text, rust_context_dir, name = _prepare_source(
             source, registered_name, context_dir, stack
@@ -736,9 +765,7 @@ def start_import(
 
     See :func:`start_build`; there is no Dockerfile and no context.
     """
-    if emit is None:
-        emit = _stderr_emit if verbose else _noop_emit
-    emit = _forwarder(emit)
+    emit = _resolve_emit(emit, verbose)
     if not isinstance(image_reference, str) or not image_reference.strip():
         raise SandboxImageBuildError("image reference to import must not be empty")
     reference = image_reference.strip()
@@ -825,9 +852,7 @@ def wait_build(
     id, and ``timeout`` bounds the lookup too.
     """
     _reject_legacy_reference(build_id)
-    if emit is None:
-        emit = _stderr_emit if verbose else _noop_emit
-    emit = _forwarder(emit)
+    emit = _resolve_emit(emit, verbose)
     api_url, token, namespace = _credentials()
     try:
         raw = _rust_wait_image_build(

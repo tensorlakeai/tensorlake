@@ -56,6 +56,14 @@ import { explicitProxyUrlOverride } from "./url.js";
 /** Seconds between `GET /sandboxes/{id}` polls while waiting for a sandbox to run (ADR 0086). */
 export const DEFAULT_WAIT_POLL_INTERVAL_SEC = 2;
 
+function parseSnapshot<T extends CreateSnapshotResponse>(raw: Record<string, unknown>): T {
+  return {
+    ...fromSnakeKeys(raw, "snapshotId") as Record<string, unknown>,
+    status: enumValue(SnapshotStatus, raw.status),
+    raw,
+  } as T;
+}
+
 const GPU_MODELS = new Set<string>([
   "A100-40GB",
   "A100-80GB",
@@ -964,24 +972,20 @@ export class SandboxClient {
     sandboxId: string,
     options?: SnapshotOptions,
   ): Promise<CreateSnapshotResponse> {
-    const response = await this.plainJson<CreateSnapshotResponse>(
+    const { json } = await callNative(
       () =>
         this.native.createSnapshot(sandboxId, options?.snapshotType ?? null),
-      "snapshotId",
       { sandboxId, notFoundKind: "sandbox" },
     );
-    response.status = enumValue(SnapshotStatus, response.status);
-    return response;
+    return parseSnapshot<CreateSnapshotResponse>(JSON.parse(json));
   }
 
   /** Get current status and metadata for a snapshot by ID. */
   async getSnapshot(snapshotId: string): Promise<Traced<SnapshotInfo>> {
-    const info = await this.tracedJson<SnapshotInfo>(
+    const { traceId, json } = await callNative(
       () => this.native.getSnapshot(snapshotId),
-      "snapshotId",
     );
-    info.status = enumValue(SnapshotStatus, info.status);
-    return info;
+    return Object.assign(parseSnapshot<SnapshotInfo>(JSON.parse(json)), { traceId });
   }
 
   /** List all snapshots in the namespace. */
@@ -992,13 +996,7 @@ export class SandboxClient {
     const parsed = JSON.parse(json) as {
       snapshots?: Record<string, unknown>[];
     };
-    const snapshots = (parsed.snapshots ?? []).map(
-      (s) => {
-        const info = fromSnakeKeys(s, "snapshotId") as SnapshotInfo;
-        info.status = enumValue(SnapshotStatus, info.status);
-        return info;
-      },
-    );
+    const snapshots = (parsed.snapshots ?? []).map((s) => parseSnapshot<SnapshotInfo>(s));
     return Object.assign(snapshots, { traceId });
   }
 
