@@ -622,7 +622,7 @@ impl SandboxesClient {
     pub async fn get(&self, sandbox_id: &str) -> Result<Traced<SandboxInfo>, SdkError> {
         let uri = self.endpoint(&format!("sandboxes/{sandbox_id}"));
         let req = self.client.request(Method::GET, &uri).build()?;
-        self.client.execute_json(req).await
+        self.client.execute_read_json(req).await
     }
 
     /// [`Self::get`] with the HTTP timeout set to `timeout` (never above the
@@ -643,7 +643,7 @@ impl SandboxesClient {
             .request(Method::GET, &uri)
             .timeout(timeout)
             .build()?;
-        self.client.execute_json(req).await
+        self.client.execute_read_json_once(req).await
     }
 
     pub async fn list(&self) -> Result<Traced<Vec<SandboxInfo>>, SdkError> {
@@ -651,7 +651,7 @@ impl SandboxesClient {
         let req = self.client.request(Method::GET, &uri).build()?;
         Ok(self
             .client
-            .execute_json::<ListSandboxesResponse>(req)
+            .execute_read_json::<ListSandboxesResponse>(req)
             .await?
             .map(|r| r.sandboxes))
     }
@@ -682,7 +682,7 @@ impl SandboxesClient {
             request_builder = request_builder.query(&query);
         }
         let req = request_builder.build()?;
-        self.client.execute_json(req).await
+        self.client.execute_read_json(req).await
     }
 
     pub async fn get_archived(
@@ -691,7 +691,7 @@ impl SandboxesClient {
     ) -> Result<Traced<ArchivedSandboxInfo>, SdkError> {
         let uri = self.endpoint(&format!("archived-sandboxes/{sandbox_id}"));
         let req = self.client.request(Method::GET, &uri).build()?;
-        self.client.execute_json(req).await
+        self.client.execute_read_json(req).await
     }
 
     pub async fn get_logs(
@@ -847,7 +847,7 @@ impl SandboxesClient {
     pub async fn get_snapshot(&self, snapshot_id: &str) -> Result<Traced<SnapshotInfo>, SdkError> {
         let uri = self.endpoint(&format!("snapshots/{snapshot_id}"));
         let req = self.client.request(Method::GET, &uri).build()?;
-        self.client.execute_json(req).await
+        self.client.execute_read_json(req).await
     }
 
     pub async fn list_snapshots(&self) -> Result<Traced<Vec<SnapshotInfo>>, SdkError> {
@@ -855,7 +855,7 @@ impl SandboxesClient {
         let req = self.client.request(Method::GET, &uri).build()?;
         Ok(self
             .client
-            .execute_json::<ListSnapshotsResponse>(req)
+            .execute_read_json::<ListSnapshotsResponse>(req)
             .await?
             .map(|r| r.snapshots))
     }
@@ -892,7 +892,7 @@ impl SandboxesClient {
     pub async fn get_pool(&self, pool_id: &str) -> Result<Traced<SandboxPoolInfo>, SdkError> {
         let uri = self.endpoint(&format!("sandbox-pools/{pool_id}"));
         let req = self.client.request(Method::GET, &uri).build()?;
-        self.client.execute_json(req).await
+        self.client.execute_read_json(req).await
     }
 
     pub async fn list_pools(&self) -> Result<Traced<Vec<SandboxPoolInfo>>, SdkError> {
@@ -900,7 +900,7 @@ impl SandboxesClient {
         let req = self.client.request(Method::GET, &uri).build()?;
         Ok(self
             .client
-            .execute_json::<ListSandboxPoolsResponse>(req)
+            .execute_read_json::<ListSandboxPoolsResponse>(req)
             .await?
             .map(|r| r.pools))
     }
@@ -1031,7 +1031,7 @@ impl SandboxProxyClient {
         let req = self.request(Method::GET, "/api/v1/processes").build()?;
         Ok(self
             .client
-            .execute_json::<ListProcessesResponse>(req)
+            .execute_read_json::<ListProcessesResponse>(req)
             .await?
             .map(|r| r.processes))
     }
@@ -1044,7 +1044,7 @@ impl SandboxProxyClient {
         let req = self
             .request(Method::GET, &format!("/api/v1/processes/{seg}"))
             .build()?;
-        self.client.execute_json(req).await
+        self.client.execute_read_json(req).await
     }
 
     pub async fn kill_process(
@@ -1454,7 +1454,7 @@ impl SandboxProxyClient {
             .request(Method::GET, "/api/v1/files/list")
             .query(&[("path", path)])
             .build()?;
-        self.client.execute_json(req).await
+        self.client.execute_read_json(req).await
     }
 
     pub async fn create_pty_session(&self, payload: &Value) -> Result<Traced<Value>, SdkError> {
@@ -1474,12 +1474,12 @@ impl SandboxProxyClient {
 
     pub async fn health(&self) -> Result<Traced<HealthResponse>, SdkError> {
         let req = self.request(Method::GET, "/api/v1/health").build()?;
-        self.client.execute_json(req).await
+        self.client.execute_read_json(req).await
     }
 
     pub async fn info(&self) -> Result<Traced<DaemonInfo>, SdkError> {
         let req = self.request(Method::GET, "/api/v1/info").build()?;
-        self.client.execute_json(req).await
+        self.client.execute_read_json(req).await
     }
 
     /// Ask the sandbox proxy to mint a builder-compatible blob signing spec.

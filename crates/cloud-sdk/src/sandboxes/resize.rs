@@ -291,7 +291,9 @@ impl SandboxesClient {
             } else {
                 self.get_within(sandbox_id, remaining).await
             };
-            match observation {
+            // This poller owns a separate resize deadline. Preserve the
+            // underlying failure classification after a bounded read attempt.
+            match observation.map_err(SdkError::into_original) {
                 Ok(info) => {
                     if resize_complete(sandbox_id, generation, &info)? {
                         return Ok(info);

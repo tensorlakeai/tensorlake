@@ -235,6 +235,9 @@ Rust callers must now supply the additional `Option<String>` argument:
 or `Some(contents)` for explicit configuration. Python and TypeScript callers that
 omit the option continue to work unchanged.
 
+Sandbox metadata reads automatically retry transient connection failures with a
+bounded deadline and address failover. See [read resilience and timeout behavior](docs/sdk-read-resilience.md).
+
 ### Snapshots
 
 Save the state of a sandbox and restore it later:
