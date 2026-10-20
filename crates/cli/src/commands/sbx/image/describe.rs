@@ -1,66 +1,17 @@
 use crate::auth::context::CliContext;
 use crate::error::{CliError, Result};
 
+/// `tl sbx image describe <name|id>`: one lookup through the merged catalog.
+/// A `sandbox_template_` id is a legacy image, an `image_` id a CAS image,
+/// anything else a name resolved in the Image Service first and then the
+/// platform registry.
 pub async fn run(ctx: &CliContext, name_or_id: &str) -> Result<()> {
-    let base_url = super::templates_base_url(ctx)?;
-    let client = ctx.client()?;
-    let direct_url = format!("{}/{}", base_url, name_or_id);
-
-    if ctx.debug {
-        eprintln!("DEBUG image describe: trying direct GET {}", direct_url);
-    }
-
-    let resp = client
-        .get(&direct_url)
-        .send()
-        .await
-        .map_err(CliError::Http)?;
-
-    let item = if resp.status().is_success() {
-        if ctx.debug {
-            eprintln!("DEBUG image describe: direct lookup succeeded");
-        }
-        resp.json::<serde_json::Value>()
-            .await
-            .map_err(CliError::Http)?
-    } else if resp.status().as_u16() == 404 {
-        if ctx.debug {
-            eprintln!(
-                "DEBUG image describe: direct lookup returned 404, falling back to paginated list"
-            );
-        }
-        match super::find_image_item_in_paginated_list(ctx, &client, &base_url, name_or_id).await? {
-            Some(item) => item,
-            None => {
-                // Not a platform snapshot template: CAS images (Cloud
-                // Hypervisor) live in the Image Service, reached through the
-                // same authenticated ingress as `ls`.
-                if ctx.debug {
-                    eprintln!(
-                        "DEBUG image describe: not a snapshot template, trying Image Service"
-                    );
-                }
-                let item = super::resolve_cas_image(ctx, &client, name_or_id)
-                    .await?
-                    .ok_or_else(|| {
-                        CliError::Other(anyhow::anyhow!("image '{}' not found", name_or_id))
-                    })?;
-                print_cas_image_details(&item);
-                return Ok(());
-            }
-        }
-    } else {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(CliError::Other(anyhow::anyhow!(
-            "failed to fetch image '{}' (HTTP {}): {}",
-            name_or_id,
-            status,
-            body
-        )));
-    };
-
-    print_image_details(&item);
+    let catalog = super::sandbox_image_catalog(ctx)?;
+    let image = catalog
+        .find(name_or_id)
+        .await?
+        .ok_or_else(|| CliError::Other(anyhow::anyhow!("image '{}' not found", name_or_id)))?;
+    print_image_details(&serde_json::to_value(&image)?);
     Ok(())
 }
 
@@ -71,10 +22,15 @@ fn print_image_details(item: &serde_json::Value) {
         .get("snapshotId")
         .and_then(|v| v.as_str())
         .unwrap_or("-");
+    let format = super::format_image_family(
+        item.get("snapshotFormatVersion")
+            .and_then(serde_json::Value::as_str),
+    );
 
     println!("Name:        {}", name);
     println!("ID:          {}", id);
     println!("Snapshot ID: {}", snapshot_id);
+    println!("Format:      {}", format);
 
     // Print additional fields, skipping the ones already shown above.
     // Dockerfile gets special multi-line formatting.
@@ -83,7 +39,9 @@ fn print_image_details(item: &serde_json::Value) {
             match key.as_str() {
                 "name" | "id" | "snapshotId" => {}
                 "dockerfile" => {
-                    if let Some(df) = value.as_str() {
+                    if let Some(df) = value.as_str()
+                        && !df.is_empty()
+                    {
                         print_dockerfile(df);
                     }
                 }
@@ -98,27 +56,6 @@ fn print_image_details(item: &serde_json::Value) {
             }
         }
     }
-}
-
-fn print_cas_image_details(item: &serde_json::Value) {
-    let field = |key: &str| {
-        item.get(key)
-            .map(|value| match value {
-                serde_json::Value::String(s) => s.clone(),
-                other => other.to_string(),
-            })
-            .unwrap_or_else(|| "-".to_string())
-    };
-    println!("Name:        {}", field("name"));
-    println!("Type:        CAS");
-    println!("Image ID:    {}", field("image_id"));
-    println!("Reference:   {}", field("image"));
-    println!("Scope:       {}", field("image_scope"));
-    println!("Project:     {}", field("project"));
-    println!("Size bytes:  {}", field("size_bytes"));
-    println!("Disk bytes:  {}", field("virtual_size_bytes"));
-    println!("Build ID:    {}", field("build_id"));
-    println!("Created ms:  {}", field("created_at_ms"));
 }
 
 fn print_dockerfile(dockerfile: &str) {
