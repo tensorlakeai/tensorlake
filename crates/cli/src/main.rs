@@ -1942,8 +1942,9 @@ enum ImageBuildCommands {
 
     /// Wait for a build to publish and print its result. Works after the
     /// original command disconnected and returns that build's own result
-    /// even if the image was since rebuilt or deleted. Ctrl+C cancels the
-    /// build; a timeout only stops waiting.
+    /// while the record exists: a later build of the image or deleting the
+    /// image retires it, after which the build is not found. Ctrl+C cancels
+    /// the build; a timeout only stops waiting.
     Wait {
         /// Build ID
         build_id: String,

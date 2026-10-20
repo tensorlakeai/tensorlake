@@ -216,8 +216,9 @@ pub async fn get(ctx: &CliContext, build_id: &str, output_json: bool) -> Result<
 }
 
 /// `tl sbx image build wait BUILD_ID [--json] [--timeout SECS]`: wait for
-/// the operation's own result, which stands even after the image was
-/// rebuilt or deleted. Ctrl+C cancels the build.
+/// the operation's own result. The record stands until a later build of the
+/// image publishes or the image is deleted, which retires it (then the build
+/// is not found). Ctrl+C cancels the build.
 pub async fn wait(
     ctx: &CliContext,
     build_id: &str,

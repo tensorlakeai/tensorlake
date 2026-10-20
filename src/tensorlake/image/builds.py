@@ -125,7 +125,12 @@ class ImageBuildError(SandboxImageBuildError):
 
 
 class ImageBuildNotFoundError(ImageBuildError):
-    """No such build is visible to the project (unknown or foreign)."""
+    """No such build is visible to the project: unknown, foreign or retired.
+
+    A finished build is kept only while it is its image's current build; a
+    later build of the image or deleting the image retires it, after which
+    ``get_build``, ``wait_build`` and ``cancel_build`` raise this error.
+    """
 
 
 class ImageBuildInProgressError(ImageBuildError):
