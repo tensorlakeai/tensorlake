@@ -85,3 +85,35 @@ Benchmark body wall times were 1.72 and 1.53 seconds. CPU utilization and peak
 memory were not measured. The new fault tests additionally verify stalled
 A/AAAA queries, late family answers, and recovery after a two-second connection
 timeout within one three-second HTTP attempt.
+
+## Pool retirement and retry quota fixes — 2026-10-19
+
+Measured implementation: `d12277a45149d510d92ff85cead5cc2525ed4515`, using
+`just bench-sdk-resilience` on the same Mac17,6 / Apple M5 Max, 18 logical CPUs,
+48 GiB RAM, Darwin 25.5.0 arm64, Rust 1.98.1 and unoptimized test profile.
+Request timings exclude DNS, as in the earlier measurements.
+
+| Round | Baseline, 1,000 reads (ms) | Resilient, 1,000 reads (ms) |
+| --- | ---: | ---: |
+| 0 | 135.404 | 147.570 |
+| 1 | 129.518 | 146.284 |
+| 2 | 128.534 | 148.154 |
+| 3 | 129.008 | 147.825 |
+| 4 | 130.728 | 149.142 |
+| Mean | 130.638 | 147.795 |
+
+Mean latency was 130.638 → 147.795 microseconds/read (+17.157 microseconds,
+13.1%), corresponding to about 7,655 and 6,766 sequential reads/second.
+The resilient mean remains within the 146.590–168.737 microseconds/read range
+of the preceding two runs. Warm local resolution averaged another 15.243
+microseconds per lookup; platform resolution averaged 114.835 microseconds.
+This is a local debug-profile comparison, not a production latency estimate.
+
+Exactly two TCP connections served all 10,020 reads. The benchmark body took
+1.53 seconds; Cargo preparation took 0.13 seconds and is excluded. CPU
+utilization and peak memory were not measured. The concurrency regression
+also verifies that two failed streams on an old HTTP/2 connection leave its
+healthy replacement available for reuse: four requests use two TCP connections,
+instead of the three connections observed in the original review probe. The
+quota regression verifies that 20 responses whose `Retry-After` exceeds the
+deadline consume zero retry tokens and leave a subsequent read able to recover.
