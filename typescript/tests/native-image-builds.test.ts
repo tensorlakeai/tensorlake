@@ -34,30 +34,22 @@ describe.skipIf(process.env.TENSORLAKE_TEST_NATIVE_CLOUD !== "1")("native image 
       attempt_no: 1,
       builder_sandbox_id: null,
       result: null,
-      cleanup_pending: false,
       operation_deadline_ms: null,
       ...extra,
     };
   }
 
+  /** The Image Service's trimmed tenant record (what the service sends). */
   function result() {
     return {
       id: "image_ok",
       name: "img",
       snapshot_id: "snap-cas",
-      snapshot_uri: "snapshot://snap-cas",
-      snapshot_sandbox_id: null,
-      snapshot_format_version: "content_addressed_streaming_v1",
-      snapshot_size_bytes: 42,
-      rootfs_disk_bytes: 10737418240,
-      rootfs_node_kind: "base",
-      public: false,
-      dockerfile: "",
-      created_by_user_id: null,
+      global: false,
+      physical_size_bytes: 42,
+      logical_size_bytes: 10737418240,
       created_at: "2026-10-15T00:00:00Z",
       updated_at: "2026-10-15T00:00:00Z",
-      image_id: "a".repeat(64),
-      build_id: "build-1",
     };
   }
 

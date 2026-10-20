@@ -17,19 +17,11 @@ const CAS_RECORD: &str = r#"{
     "id": "image_abc123",
     "name": "team/app",
     "snapshot_id": "snap123",
-    "snapshot_uri": "snapshot://snap123",
-    "snapshot_sandbox_id": null,
-    "snapshot_format_version": "content_addressed_streaming_v1",
-    "snapshot_size_bytes": 42,
-    "rootfs_disk_bytes": 10737418240,
-    "rootfs_node_kind": "base",
-    "public": false,
-    "dockerfile": "",
-    "created_by_user_id": null,
+    "global": false,
+    "physical_size_bytes": 42,
+    "logical_size_bytes": 10737418240,
     "created_at": "2026-10-15T00:00:00.000Z",
-    "updated_at": "2026-10-15T00:00:00.000Z",
-    "image_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-    "build_id": "build-1"
+    "updated_at": "2026-10-15T00:00:00.000Z"
 }"#;
 
 const LEGACY_RECORD: &str = r#"{
@@ -119,7 +111,7 @@ async fn names_resolve_in_the_image_service_first_and_fall_through_on_404() {
     assert_eq!(image.snapshot_id.as_deref(), Some("snap123"));
     assert_eq!(
         server.await.unwrap(),
-        vec!["GET /images/v4/names/team/app HTTP/1.1"]
+        vec!["GET /images/v4/images/name/team/app HTTP/1.1"]
     );
 
     let (catalog, server) = scripted_server(vec![
@@ -132,7 +124,7 @@ async fn names_resolve_in_the_image_service_first_and_fall_through_on_404() {
     assert_eq!(
         server.await.unwrap(),
         vec![
-            "GET /images/v4/names/team/app HTTP/1.1",
+            "GET /images/v4/images/name/team/app HTTP/1.1",
             "GET /platform/v1/organizations/org-1/projects/proj-1/sandbox-templates/by-name/team%2Fapp HTTP/1.1",
         ]
     );
@@ -207,7 +199,7 @@ async fn not_found_only_when_both_catalogs_miss() {
     assert_eq!(
         server.await.unwrap(),
         vec![
-            "DELETE /images/v4/names/team/app HTTP/1.1",
+            "DELETE /images/v4/images/name/team/app HTTP/1.1",
             "DELETE /platform/v1/organizations/org-1/projects/proj-1/sandbox-templates/by-name/team%2Fapp HTTP/1.1",
         ]
     );

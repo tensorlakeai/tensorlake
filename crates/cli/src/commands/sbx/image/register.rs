@@ -126,10 +126,11 @@ fn parse_snapshot_registration_metadata(
 /// completed legacy snapshot through the platform template registry, with
 /// the Dockerfile stored when one is given.
 ///
-/// A CAS registration that the service answers with 202 continues as a
-/// build operation: the CLI reports its id, waits for durable publication
-/// (Ctrl+C cancels it) and prints the same final output. Legacy registration
-/// is unchanged and never touches the Image Service.
+/// A CAS registration the service answers with `503 publication_pending`
+/// is still running as a build operation: the CLI reports its id, retries
+/// the identical request under the same key until it publishes (Ctrl+C
+/// cancels it) and prints the same final output. Legacy registration is
+/// unchanged and never touches the Image Service.
 pub async fn run(
     ctx: &CliContext,
     image_name: &str,

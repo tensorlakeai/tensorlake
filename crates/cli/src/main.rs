@@ -1930,7 +1930,7 @@ enum ImageCommands {
 #[derive(Subcommand)]
 enum ImageBuildCommands {
     /// Show a build: status, phase, image name, attempt, builder sandbox,
-    /// timestamps and deadlines, pending cleanup, result or error
+    /// timestamps and deadline, result or error
     Get {
         /// Build ID printed at admission (e.g. by `tl sbx image create --cas`)
         build_id: String,

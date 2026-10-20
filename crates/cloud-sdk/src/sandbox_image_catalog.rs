@@ -16,21 +16,18 @@
 //! timestamps); this module maps it onto [`SandboxTemplate`] so callers see
 //! one record kind for both families.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 
 use chrono::{DateTime, TimeZone, Utc};
 use reqwest::{Method, StatusCode};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use tokio::time::Instant;
 
 use crate::{
     Traced,
     client::Client,
     error::SdkError,
-    image_builds::{
-        ImageBuildError, ImageBuildInfo, ImageBuildWaitOptions, InterruptSignal,
-        new_client_request_id,
-    },
+    image_builds::{DEFAULT_WAIT_LIMIT, ImageBuildError, InterruptSignal, new_client_request_id},
     sandbox_images::{SandboxImageBuildEvent, cas_image_service_url, client_builder},
     sandbox_templates::{SandboxTemplatesClient, models::SandboxTemplate},
 };
@@ -219,36 +216,27 @@ pub fn sort_merged_images(images: &mut [SandboxTemplate]) {
 // Image Service wire types
 // ---------------------------------------------------------------------------
 
-/// One logical image as the Image Service answers it (ADR 0107 D18): the
-/// platform template shape in snake_case plus the content digest and build
-/// provenance legacy templates lack. Also the immutable result a build
-/// publishes (`crate::image_builds::ImageBuildResult`).
+/// One logical image as the Image Service answers it (ADR 0107 as amended
+/// by the API trim): the identity clients key on, its visibility, its sizes
+/// and its timestamps. The platform template shape callers of both image
+/// families receive is derived locally by [`Self::into_template`]; the
+/// service sends no digest, parent pins, publisher provenance or template
+/// placeholders.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImageServiceImage {
     /// The mutable `image_` id: names the current image under `name`.
     pub id: String,
     pub name: String,
+    /// The engine row the image is registered against; a rebuild changes it.
     pub snapshot_id: String,
-    pub snapshot_uri: String,
-    #[serde(default)]
-    pub snapshot_sandbox_id: Option<String>,
-    pub snapshot_format_version: String,
-    pub snapshot_size_bytes: u64,
-    pub rootfs_disk_bytes: u64,
-    pub rootfs_node_kind: String,
-    pub public: bool,
-    #[serde(default)]
-    pub dockerfile: String,
-    #[serde(default)]
-    pub created_by_user_id: Option<String>,
+    /// Visible to every project.
+    pub global: bool,
+    /// Stored CAS bytes of the content.
+    pub physical_size_bytes: u64,
+    /// Guest-visible size of the rootfs block device.
+    pub logical_size_bytes: u64,
     pub created_at: String,
     pub updated_at: String,
-    /// The content digest of the published image.
-    #[serde(default)]
-    pub image_id: Option<String>,
-    /// Provenance: the build that published this image.
-    #[serde(default)]
-    pub build_id: Option<String>,
 }
 
 impl ImageServiceImage {
@@ -260,29 +248,27 @@ impl ImageServiceImage {
 
 impl From<ImageServiceImage> for SandboxTemplate {
     fn from(image: ImageServiceImage) -> Self {
-        let mut extra = BTreeMap::new();
-        if let Some(image_id) = image.image_id {
-            extra.insert("imageId".to_string(), Value::String(image_id));
-        }
-        if let Some(build_id) = image.build_id {
-            extra.insert("buildId".to_string(), Value::String(build_id));
-        }
+        // Every Image Service record is content-addressed by construction;
+        // the handle, format label, node kind and the legacy template
+        // placeholders are supplied here so the merged catalog, `is_cas_image`
+        // and the CAS-first sort keep one record shape. No `imageId` or
+        // `buildId` extras: the service exposes neither.
         SandboxTemplate {
             id: Some(image.id),
             name: Some(image.name),
+            snapshot_uri: Some(format!("snapshot://{}", image.snapshot_id)),
             snapshot_id: Some(image.snapshot_id),
-            snapshot_sandbox_id: image.snapshot_sandbox_id,
-            snapshot_uri: Some(image.snapshot_uri),
-            snapshot_format_version: Some(image.snapshot_format_version),
-            snapshot_size_bytes: Some(image.snapshot_size_bytes),
-            rootfs_disk_bytes: Some(image.rootfs_disk_bytes),
-            rootfs_node_kind: Some(image.rootfs_node_kind),
-            public: Some(image.public),
-            dockerfile: Some(image.dockerfile),
-            created_by_user_id: image.created_by_user_id,
+            snapshot_sandbox_id: None,
+            snapshot_format_version: Some(CAS_SNAPSHOT_FORMAT_VERSION.to_string()),
+            snapshot_size_bytes: Some(image.physical_size_bytes),
+            rootfs_disk_bytes: Some(image.logical_size_bytes),
+            rootfs_node_kind: Some("base".to_string()),
+            public: Some(image.global),
+            dockerfile: Some(String::new()),
+            created_by_user_id: None,
             created_at: Some(image.created_at),
             updated_at: Some(image.updated_at),
-            extra,
+            extra: BTreeMap::new(),
         }
     }
 }
@@ -388,7 +374,7 @@ impl ImageServiceCatalog {
     /// The image registered under `name` in the caller's project, or a global
     /// image of that name. `Ok(None)` only on a clean 404.
     pub async fn get_by_name(&self, name: &str) -> Result<Option<SandboxTemplate>, SdkError> {
-        self.get_optional(&format!("/names/{name}")).await
+        self.get_optional(&format!("/images/name/{name}")).await
     }
 
     /// The image with the `image_` id `image_id`, when it is the caller's or
@@ -416,7 +402,7 @@ impl ImageServiceCatalog {
     /// Deleting removes the published image only; a name whose only state is
     /// an unfinished first build has no image and answers 404.
     pub async fn delete_by_name(&self, name: &str) -> Result<bool, SdkError> {
-        self.delete_optional(&format!("/names/{name}")).await
+        self.delete_optional(&format!("/images/name/{name}")).await
     }
 
     /// Delete the project's image with the `image_` id `image_id`; the same
@@ -446,11 +432,13 @@ impl ImageServiceCatalog {
     ///
     /// The request is admitted under a fresh client request id
     /// (`Idempotency-Key`), retained across its transport retries. The
-    /// service answers 201 with the published image, or 202 with a
-    /// [`ImageBuildInfo`] when the bounded inline wait expired; the caller
-    /// then waits on that operation ([`Self::adopt_snapshot_and_wait`] does
-    /// both). A 409 `image_build_in_progress` names the active operation to
-    /// cancel first. Transport acceptance is never reported as completion.
+    /// service answers 201 with the published image, or `503
+    /// publication_pending` naming the build when its bounded inline wait
+    /// expired; the caller then retries the identical request under the same
+    /// key ([`Self::adopt_snapshot_and_wait`] does so up to its registration
+    /// wait bound). A 409 `image_build_in_progress` names the active
+    /// operation to cancel first. Transport acceptance is never reported as
+    /// completion.
     pub async fn adopt_snapshot(
         &self,
         name: &str,
@@ -458,25 +446,59 @@ impl ImageServiceCatalog {
         public: bool,
     ) -> Result<SnapshotAdoption, ImageBuildError> {
         let request_id = new_client_request_id();
+        let wait = RegistrationWait::new(RegistrationWaitPolicy::default());
         self.adopt_snapshot_with_request_id(
             name,
             snapshot_id,
             public,
             &request_id,
+            &wait,
             &InterruptSignal::new(),
         )
         .await
     }
 
-    /// [`Self::adopt_snapshot`], then wait for a 202 operation to publish.
-    /// Returns the published image in the template shape either way, so
-    /// registration flows keep their completed-image result. `interrupt`
-    /// cancels a pending Direct operation through the bounded handshake.
+    /// [`Self::adopt_snapshot`], retrying a pending registration under the
+    /// same key until it publishes or the registration wait bound expires.
+    /// Returns the published image in the template shape, so registration
+    /// flows keep their completed-image result. `interrupt` cancels a pending
+    /// Direct operation through the bounded handshake.
     pub async fn adopt_snapshot_and_wait<F>(
         &self,
         name: &str,
         snapshot_id: &str,
         public: bool,
+        interrupt: &InterruptSignal,
+        emit: F,
+    ) -> Result<SandboxTemplate, ImageBuildError>
+    where
+        F: FnMut(SandboxImageBuildEvent),
+    {
+        self.adopt_snapshot_and_wait_with(
+            name,
+            snapshot_id,
+            public,
+            RegistrationWaitPolicy::default(),
+            interrupt,
+            emit,
+        )
+        .await
+    }
+
+    /// [`Self::adopt_snapshot_and_wait`] under an explicit wait policy. A
+    /// `publication_pending` answer is progress, not unavailability: it
+    /// resets the per-request reconnect budget and the loop re-POSTs the
+    /// identical request under the same key after `poll_interval`, every
+    /// request and sleep clamped to the absolute registration deadline, so a
+    /// request still in flight at the deadline is abandoned there. Expiry is
+    /// [`ImageBuildError::Timeout`] naming the pending build (or the request
+    /// id while no answer named one); the operation keeps running.
+    pub(crate) async fn adopt_snapshot_and_wait_with<F>(
+        &self,
+        name: &str,
+        snapshot_id: &str,
+        public: bool,
+        policy: RegistrationWaitPolicy,
         interrupt: &InterruptSignal,
         mut emit: F,
     ) -> Result<SandboxTemplate, ImageBuildError>
@@ -484,35 +506,52 @@ impl ImageServiceCatalog {
         F: FnMut(SandboxImageBuildEvent),
     {
         let request_id = new_client_request_id();
-        match self
-            .adopt_snapshot_with_request_id(name, snapshot_id, public, &request_id, interrupt)
-            .await?
-        {
-            SnapshotAdoption::Published(image) => Ok((*image).into_template()),
-            SnapshotAdoption::Accepted(info) => {
-                emit(SandboxImageBuildEvent::Status(format!(
-                    "Registration of '{name}' continues as build {}; waiting for publication...",
-                    info.build_id
-                )));
-                let build_id = info.build_id.clone();
-                let client_request_id = info.client_request_id.clone();
-                let terminal = crate::image_service_builds::wait_for_terminal(
-                    &self.client,
-                    None,
-                    &build_id,
-                    client_request_id.as_deref(),
-                    Some(*info),
-                    &ImageBuildWaitOptions {
-                        timeout: None,
-                        // A Direct operation runs no builder sandbox.
-                        follow_logs: false,
-                    },
+        let mut wait = RegistrationWait::new(policy);
+        loop {
+            match self
+                .adopt_snapshot_with_request_id(
+                    name,
+                    snapshot_id,
+                    public,
+                    &request_id,
+                    &wait,
                     interrupt,
-                    &mut emit,
                 )
-                .await?;
-                let result = crate::image_service_builds::terminal_result(&terminal)?;
-                Ok(result.into_template())
+                .await?
+            {
+                SnapshotAdoption::Published(image) => return Ok((*image).into_template()),
+                SnapshotAdoption::Pending { build_id } => {
+                    if wait.build_id.is_none() {
+                        emit(SandboxImageBuildEvent::Accepted {
+                            build_id: build_id.clone(),
+                            client_request_id: Some(request_id.clone()),
+                        });
+                    }
+                    wait.build_id = Some(build_id.clone());
+                    emit(SandboxImageBuildEvent::Status(format!(
+                        "Registration of '{name}' pending (build {build_id}); waiting for \
+                         publication..."
+                    )));
+                    let now = Instant::now();
+                    if now >= wait.deadline {
+                        return Err(wait.timeout(&request_id));
+                    }
+                    let delay = wait.policy.poll_interval.min(wait.deadline - now);
+                    tokio::select! {
+                        biased;
+                        _ = interrupt.triggered() => {
+                            let report = crate::image_service_builds::interruption_for_build(
+                                &self.client,
+                                &build_id,
+                                Some(&request_id),
+                            )
+                            .await;
+                            emit(SandboxImageBuildEvent::Interrupted(report.clone()));
+                            return Err(ImageBuildError::Interrupted(report));
+                        }
+                        _ = tokio::time::sleep(delay) => {}
+                    }
+                }
             }
         }
     }
@@ -523,6 +562,7 @@ impl ImageServiceCatalog {
         snapshot_id: &str,
         public: bool,
         request_id: &str,
+        wait: &RegistrationWait,
         interrupt: &InterruptSignal,
     ) -> Result<SnapshotAdoption, ImageBuildError> {
         let body = serde_json::to_value(AdoptSnapshotRequest {
@@ -535,6 +575,7 @@ impl ImageServiceCatalog {
             "/images/from-snapshot",
             &body,
             request_id,
+            wait,
             interrupt,
         )
         .await
@@ -547,8 +588,65 @@ impl ImageServiceCatalog {
 pub enum SnapshotAdoption {
     /// 201: the image is published.
     Published(Box<ImageServiceImage>),
-    /// 202: poll the build (its `result` carries the image once published).
-    Accepted(Box<ImageBuildInfo>),
+    /// 503 `publication_pending`: the operation is admitted and still
+    /// running. Retry the identical request under the same key to join it;
+    /// `build_id` is the operation to inspect or cancel meanwhile.
+    Pending { build_id: String },
+}
+
+/// How long a registration keeps retrying `publication_pending` answers
+/// before giving up on waiting (the operation itself keeps running), and how
+/// long it pauses between identical POSTs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegistrationWaitPolicy {
+    pub limit: Duration,
+    pub poll_interval: Duration,
+}
+
+impl Default for RegistrationWaitPolicy {
+    /// The same bound every build wait has without a service deadline or a
+    /// caller timeout, and the build poll interval.
+    fn default() -> Self {
+        Self {
+            limit: DEFAULT_WAIT_LIMIT,
+            poll_interval: crate::image_service_builds::BUILD_POLL_INTERVAL,
+        }
+    }
+}
+
+/// One registration's absolute deadline and what it has learnt so far.
+#[derive(Debug, Clone)]
+pub(crate) struct RegistrationWait {
+    pub(crate) policy: RegistrationWaitPolicy,
+    pub(crate) started: Instant,
+    pub(crate) deadline: Instant,
+    /// The build a `publication_pending` answer named, once one did.
+    pub(crate) build_id: Option<String>,
+}
+
+impl RegistrationWait {
+    pub(crate) fn new(policy: RegistrationWaitPolicy) -> Self {
+        let started = Instant::now();
+        Self {
+            policy,
+            started,
+            deadline: started + policy.limit,
+            build_id: None,
+        }
+    }
+
+    /// The timeout the wait reports: the pending build when an answer named
+    /// one, otherwise the request id, so the caller can still find the
+    /// operation with the cancel route's request-id selector.
+    pub(crate) fn timeout(&self, request_id: &str) -> ImageBuildError {
+        ImageBuildError::Timeout {
+            build_id: self
+                .build_id
+                .clone()
+                .unwrap_or_else(|| format!("(request {request_id})")),
+            waited: self.started.elapsed(),
+        }
+    }
 }
 
 /// Both catalogs behind one lookup, delete and list.
@@ -841,38 +939,52 @@ mod tests {
 
     #[test]
     fn image_service_records_map_onto_the_template_shape() {
+        // The service answers the trimmed eight fields; the template shape
+        // (handle, format label, node kind, placeholders) is derived here.
         let image: ImageServiceImage = serde_json::from_value(serde_json::json!({
             "id": "image_abc",
             "name": "team/app",
             "snapshot_id": "snap123",
-            "snapshot_uri": "snapshot://snap123",
-            "snapshot_sandbox_id": null,
-            "snapshot_format_version": CAS_SNAPSHOT_FORMAT_VERSION,
-            "snapshot_size_bytes": 42,
-            "rootfs_disk_bytes": 10_737_418_240_u64,
-            "rootfs_node_kind": "base",
-            "public": false,
-            "dockerfile": "",
-            "created_by_user_id": null,
+            "global": true,
+            "physical_size_bytes": 42,
+            "logical_size_bytes": 10_737_418_240_u64,
             "created_at": "2026-10-15T00:00:00.000Z",
             "updated_at": "2026-10-15T00:00:00.000Z",
-            "image_id": "c".repeat(64),
-            "build_id": "build-1",
         }))
         .unwrap();
         let template: SandboxTemplate = image.into();
         let json = serde_json::to_value(&template).unwrap();
-        assert_eq!(json["id"], "image_abc");
-        assert_eq!(json["snapshotId"], "snap123");
-        assert_eq!(json["snapshotUri"], "snapshot://snap123");
-        assert_eq!(json["snapshotFormatVersion"], CAS_SNAPSHOT_FORMAT_VERSION);
-        assert_eq!(json["rootfsDiskBytes"], 10_737_418_240_u64);
-        assert_eq!(json["public"], false);
-        assert_eq!(json["dockerfile"], "");
-        assert_eq!(json["createdAt"], "2026-10-15T00:00:00.000Z");
-        assert_eq!(json["imageId"], "c".repeat(64));
-        assert_eq!(json["buildId"], "build-1");
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "id": "image_abc",
+                "name": "team/app",
+                "snapshotId": "snap123",
+                "snapshotSandboxId": null,
+                "snapshotUri": "snapshot://snap123",
+                "snapshotFormatVersion": CAS_SNAPSHOT_FORMAT_VERSION,
+                "snapshotSizeBytes": 42,
+                "rootfsDiskBytes": 10_737_418_240_u64,
+                "rootfsNodeKind": "base",
+                "public": true,
+                "dockerfile": "",
+                "createdAt": "2026-10-15T00:00:00.000Z",
+                "updatedAt": "2026-10-15T00:00:00.000Z",
+            }),
+            "no imageId or buildId extras"
+        );
         assert!(is_cas_image(&template));
+        // A pre-trim record is not a current record.
+        assert!(
+            serde_json::from_value::<ImageServiceImage>(serde_json::json!({
+                "id": "image_abc",
+                "name": "team/app",
+                "snapshot_id": "snap123",
+                "public": true,
+                "rootfs_disk_bytes": 10_737_418_240_u64,
+            }))
+            .is_err()
+        );
     }
 
     #[test]

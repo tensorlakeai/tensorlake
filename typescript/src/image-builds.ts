@@ -215,27 +215,19 @@ export type ImageBuildPhase =
   | "finished"
   | string;
 
-/** The published image record of a succeeded build (service shape). */
-export interface ImageBuildResult {
-  id: string;
-  name: string;
-  snapshotId: string;
-  snapshotUri: string;
-  snapshotSandboxId?: string | null;
-  snapshotFormatVersion: string;
-  snapshotSizeBytes: number;
-  rootfsDiskBytes: number;
-  rootfsNodeKind: string;
-  public: boolean;
-  dockerfile: string;
-  createdByUserId?: string | null;
-  createdAt: string;
-  updatedAt: string;
-  imageId?: string | null;
-  buildId?: string | null;
-}
+/**
+ * The published image of a succeeded build, in the sandbox-template shape
+ * the merged catalog answers (derived by the core from the Image Service's
+ * trimmed record): one image representation for `findSandboxImageByName`,
+ * `listSandboxImages` and build results.
+ */
+export type ImageBuildResult = SandboxTemplate;
 
-/** One build or import as the Image Service reports it. */
+/**
+ * One build or import as the Image Service reports it (the twelve-field
+ * `BuildInfo`; the service exposes no cleanup state, phase deadline,
+ * content digest or upload capability on a build).
+ */
 export interface ImageBuildInfo {
   buildId: string;
   clientRequestId?: string | null;
@@ -245,12 +237,8 @@ export interface ImageBuildInfo {
   phase?: ImageBuildPhase | null;
   attemptNo: number;
   builderSandboxId?: string | null;
-  imageId?: string | null;
-  publicId?: string | null;
   error?: string | null;
   result?: ImageBuildResult | null;
-  cleanupPending: boolean;
-  phaseDeadlineMs?: number | null;
   operationDeadlineMs?: number | null;
   createdAtMs?: number | null;
   updatedAtMs?: number | null;
@@ -292,12 +280,8 @@ function parseBuildInfo(raw: Record<string, unknown>): ImageBuildInfo {
     phase: (raw.phase as string | null | undefined) ?? null,
     attemptNo: Number(raw.attempt_no ?? 0),
     builderSandboxId: (camel.builderSandboxId as string | null | undefined) ?? null,
-    imageId: (camel.imageId as string | null | undefined) ?? null,
-    publicId: (camel.publicId as string | null | undefined) ?? null,
     error: (raw.error as string | null | undefined) ?? null,
     result,
-    cleanupPending: raw.cleanup_pending === true,
-    phaseDeadlineMs: (camel.phaseDeadlineMs as number | null | undefined) ?? null,
     operationDeadlineMs: (camel.operationDeadlineMs as number | null | undefined) ?? null,
     createdAtMs: (camel.createdAtMs as number | null | undefined) ?? null,
     updatedAtMs: (camel.updatedAtMs as number | null | undefined) ?? null,

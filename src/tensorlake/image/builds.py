@@ -75,6 +75,7 @@ from .sandbox_builder import (
     _default_registered_name_from_image,
     _image_requires_context,
     _noop_emit,
+    _snake_case_keys,
     _stderr_emit,
 )
 
@@ -235,7 +236,11 @@ class ImageBuildInfo:
     ``running``, ``succeeded``, ``failed`` or ``cancelled``; ``phase`` is
     ``awaiting_context``, ``starting_builder``, ``executing``,
     ``snapshotting``, ``publishing`` or ``finished`` when known. ``result``
-    is the published image record (snake_case) of a succeeded build.
+    is the published image of a succeeded build in the sandbox-template
+    shape with snake_case keys: the same dict
+    :func:`tensorlake.image.sandbox_builder.find_sandbox_image_by_name`
+    returns for that image. The service exposes no cleanup state, phase
+    deadline, content digest or upload capability on a build.
     """
 
     build_id: str
@@ -246,12 +251,8 @@ class ImageBuildInfo:
     attempt_no: int = 0
     client_request_id: str | None = None
     builder_sandbox_id: str | None = None
-    image_id: str | None = None
-    public_id: str | None = None
     error: str | None = None
     result: dict | None = None
-    cleanup_pending: bool = False
-    phase_deadline_ms: int | None = None
     operation_deadline_ms: int | None = None
     created_at_ms: int | None = None
     updated_at_ms: int | None = None
@@ -263,6 +264,10 @@ class ImageBuildInfo:
 
     @classmethod
     def from_dict(cls, raw: dict) -> "ImageBuildInfo":
+        result = raw.get("result")
+        # The core hands the result over in the template shape (camelCase);
+        # the Python SDK presents snake_case keys everywhere.
+        normalized = _snake_case_keys(result) if isinstance(result, dict) else None
         return cls(
             build_id=str(raw.get("build_id", "")),
             status=str(raw.get("status", "")),
@@ -272,16 +277,12 @@ class ImageBuildInfo:
             attempt_no=int(raw.get("attempt_no") or 0),
             client_request_id=raw.get("client_request_id"),
             builder_sandbox_id=raw.get("builder_sandbox_id"),
-            image_id=raw.get("image_id"),
-            public_id=raw.get("public_id"),
             error=raw.get("error"),
-            result=raw.get("result") if isinstance(raw.get("result"), dict) else None,
-            cleanup_pending=bool(raw.get("cleanup_pending", False)),
-            phase_deadline_ms=raw.get("phase_deadline_ms"),
+            result=normalized,
             operation_deadline_ms=raw.get("operation_deadline_ms"),
             created_at_ms=raw.get("created_at_ms"),
             updated_at_ms=raw.get("updated_at_ms"),
-            raw=dict(raw),
+            raw={**raw, "result": normalized} if normalized is not None else dict(raw),
         )
 
 
@@ -470,8 +471,10 @@ class ImageBuildHandle:
                 and propagates; it does not cancel the build.
 
         Returns:
-            The published image record (``ImageBuildInfo.result``,
-            snake_case keys) of this build.
+            The published image of this build in the sandbox-template shape
+            with snake_case keys (``ImageBuildInfo.result``): the same dict
+            :func:`tensorlake.image.sandbox_builder.find_sandbox_image_by_name`
+            returns for it.
 
         Raises:
             ImageBuildFailedError, ImageBuildCancelledError: Terminal
@@ -500,7 +503,7 @@ class ImageBuildHandle:
             raise
         except Exception as exc:  # noqa: BLE001 - re-raised typed below
             _raise_typed(exc)
-        result = json.loads(raw)
+        result = _snake_case_keys(json.loads(raw))
         self._info = ImageBuildInfo.from_dict(
             {**self._info.raw, "status": "succeeded", "result": result}
         )

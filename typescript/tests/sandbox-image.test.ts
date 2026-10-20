@@ -712,7 +712,6 @@ describe("sandbox image catalog", () => {
     rootfsDiskBytes: 1024,
     public: false,
     createdAt: "2026-10-15T00:00:00.000Z",
-    imageId: "c".repeat(64),
   };
 
   it("lists both families through the native catalog", async () => {

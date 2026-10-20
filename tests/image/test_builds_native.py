@@ -35,7 +35,6 @@ from tensorlake.image import builds
 def _build(build_id="build-1", status="pending", **extra):
     record = {
         "build_id": build_id,
-        "client_request_id": None,
         "kind": "import",
         "name": "img",
         "status": status,
@@ -43,7 +42,6 @@ def _build(build_id="build-1", status="pending", **extra):
         "attempt_no": 1,
         "builder_sandbox_id": None,
         "result": None,
-        "cleanup_pending": False,
         "operation_deadline_ms": None,
     }
     record.update(extra)
@@ -51,23 +49,17 @@ def _build(build_id="build-1", status="pending", **extra):
 
 
 def _result(public_id="image_ok", name="img"):
+    """The Image Service's trimmed tenant record (what the service sends;
+    the SDK derives the template shape from it)."""
     return {
         "id": public_id,
         "name": name,
         "snapshot_id": "snap-cas",
-        "snapshot_uri": "snapshot://snap-cas",
-        "snapshot_sandbox_id": None,
-        "snapshot_format_version": "content_addressed_streaming_v1",
-        "snapshot_size_bytes": 42,
-        "rootfs_disk_bytes": 10 * 1024**3,
-        "rootfs_node_kind": "base",
-        "public": False,
-        "dockerfile": "",
-        "created_by_user_id": None,
+        "global": False,
+        "physical_size_bytes": 42,
+        "logical_size_bytes": 10 * 1024**3,
         "created_at": "2026-10-15T00:00:00Z",
         "updated_at": "2026-10-15T00:00:00Z",
-        "image_id": "a" * 64,
-        "build_id": "build-1",
     }
 
 
@@ -435,6 +427,8 @@ class TestBuildOperationsNative(unittest.TestCase):
         self.assertFalse(outcome.confirmed)
 
     def test_wait_returns_the_result_and_timeout_leaves_the_build_running(self):
+        from tensorlake.image import sandbox_builder as sbm
+
         with ScriptedService() as service, _env():
             statuses = iter(
                 [_build(status="running"), _build(status="succeeded", result=_result())]
@@ -443,11 +437,34 @@ class TestBuildOperationsNative(unittest.TestCase):
                 200,
                 next(statuses),
             )
-            with patch.object(
-                builds, "_build_context_from_env", return_value=self._ctx(service.url)
+            service.handlers[("GET", "/images/v4/images/name/img")] = (
+                200,
+                _result(),
+            )
+            with (
+                patch.object(
+                    builds,
+                    "_build_context_from_env",
+                    return_value=self._ctx(service.url),
+                ),
+                patch.object(
+                    sbm, "_build_context_from_env", return_value=self._ctx(service.url)
+                ),
             ):
                 result = builds.wait_build("build-1")
+                looked_up = sbm.find_sandbox_image_by_name("img")
             self.assertEqual(result["id"], "image_ok")
+            # One image representation through the real binding: the build
+            # result and the catalog lookup are the same snake_case template
+            # dict derived from the trimmed service record.
+            self.assertEqual(result, looked_up)
+            self.assertEqual(
+                result["snapshot_format_version"], "content_addressed_streaming_v1"
+            )
+            self.assertEqual(result["snapshot_uri"], "snapshot://snap-cas")
+            self.assertEqual(result["public"], False)
+            self.assertNotIn("image_id", result)
+            self.assertNotIn("build_id", result)
 
         with ScriptedService() as service, _env():
             service.handlers[("GET", "/images/v4/builds/build-1")] = (
