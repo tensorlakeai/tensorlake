@@ -320,6 +320,12 @@ pub(crate) struct DockerfileBuildPlan {
     /// never resolved against the template registry (import always pulls from
     /// the registry, producing a fresh base rootfs).
     pub(crate) import_image_reference: Option<String>,
+    /// `ARG NAME[=default]` instructions declared before the first `FROM`,
+    /// in order: the only build args a `FROM` reference may expand. CAS
+    /// builds expand `$VAR` references from the supplied build args, then
+    /// these defaults, before resolving parents (ADR 0107 D31); the legacy
+    /// path forwards the Dockerfile unchanged and never expands.
+    pub(crate) global_build_args: Vec<(String, Option<String>)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -445,6 +451,8 @@ where
             options.common.registered_name.as_deref(),
         )?
     };
+    crate::sandbox_image_catalog::validate_registered_name(&plan.registered_name)
+        .map_err(SandboxImageBuildError::usage)?;
     if options.common.cas {
         // CAS images build through the Image Service: the SDK resolves the
         // plan's references and submits them; the service reconciler drives
@@ -500,6 +508,8 @@ where
         &options.image_reference,
         options.common.registered_name.as_deref(),
     )?;
+    crate::sandbox_image_catalog::validate_registered_name(&plan.registered_name)
+        .map_err(SandboxImageBuildError::usage)?;
     if options.common.cas {
         return crate::image_service_builds::run_image_service_build(
             plan,
@@ -529,20 +539,14 @@ pub fn cas_image_service_url(api_url: &str) -> String {
     crate::image_service_builds::image_service_url(api_url)
 }
 
-/// Shared build pipeline: provision the rootfs-builder sandbox, materialize the
-/// filesystem from `plan`, and register the resulting snapshot. Both the
-/// Dockerfile build and registry import paths funnel through here once they
-/// have produced a [`DockerfileBuildPlan`].
-async fn run_build_plan<F>(
-    plan: DockerfileBuildPlan,
-    options: CommonBuildOptions,
-    context_files: Vec<SandboxImageContextFile>,
-    registry_credentials_json: Option<String>,
-    mut emit: F,
-) -> Result<Value>
-where
-    F: FnMut(SandboxImageBuildEvent),
-{
+/// The planning summary every build mode prints the same way (ADR 0107
+/// D28): the selected name, the Dockerfile instructions that run at build
+/// time but do not shape a running sandbox, and the references the SDK could
+/// not resolve against a Tensorlake catalog.
+pub(crate) fn emit_plan_warnings(
+    plan: &DockerfileBuildPlan,
+    emit: &mut impl FnMut(SandboxImageBuildEvent),
+) {
     emit(SandboxImageBuildEvent::Status(format!(
         "Selected image name: {}",
         plan.registered_name
@@ -572,6 +576,23 @@ where
             unresolvable.line_number, unresolvable.reference, detail, unresolvable.reference,
         )));
     }
+}
+
+/// Shared build pipeline: provision the rootfs-builder sandbox, materialize the
+/// filesystem from `plan`, and register the resulting snapshot. Both the
+/// Dockerfile build and registry import paths funnel through here once they
+/// have produced a [`DockerfileBuildPlan`].
+async fn run_build_plan<F>(
+    plan: DockerfileBuildPlan,
+    options: CommonBuildOptions,
+    context_files: Vec<SandboxImageContextFile>,
+    registry_credentials_json: Option<String>,
+    mut emit: F,
+) -> Result<Value>
+where
+    F: FnMut(SandboxImageBuildEvent),
+{
+    emit_plan_warnings(&plan, &mut emit);
     if options.docker_compat {
         emit(SandboxImageBuildEvent::Warning(
             "Docker compatibility mode is enabled. This uses Docker/BuildKit export for rootfs \
@@ -835,7 +856,7 @@ pub(crate) fn resolve_build_context(options: CommonBuildOptions) -> Result<Resol
     })
 }
 
-fn platform_client(ctx: &ResolvedBuildContext) -> Result<Client> {
+pub(crate) fn platform_client(ctx: &ResolvedBuildContext) -> Result<Client> {
     client_builder(
         &ctx.api_url,
         &ctx.bearer_token,
@@ -846,6 +867,29 @@ fn platform_client(ctx: &ResolvedBuildContext) -> Result<Client> {
     )
     .build()
     .map_err(Into::into)
+}
+
+/// The platform template registry client for a build context: explicitly
+/// addressed for PAT scope, token-scoped for API keys.
+pub(crate) fn sandbox_templates_client_for(
+    ctx: &ResolvedBuildContext,
+    client: Client,
+) -> Result<crate::sandbox_templates::SandboxTemplatesClient> {
+    match (&ctx.organization_id, &ctx.project_id) {
+        (Some(organization_id), Some(project_id)) => {
+            Ok(crate::sandbox_templates::SandboxTemplatesClient::new(
+                client,
+                organization_id.clone(),
+                project_id.clone(),
+            ))
+        }
+        (None, None) => {
+            Ok(crate::sandbox_templates::SandboxTemplatesClient::new_api_key_scoped(client))
+        }
+        _ => Err(SandboxImageBuildError::auth(
+            "Sandbox image build scope is incomplete",
+        )),
+    }
 }
 
 pub(crate) fn sandbox_lifecycle_client(ctx: &ResolvedBuildContext) -> Result<Client> {
@@ -998,23 +1042,7 @@ async fn prepare_rootfs_build(
     // registry. The final-stage FROM is treated separately so its resolution
     // becomes the lineage parent; the additional references (earlier stages,
     // COPY --from, RUN --mount=,from) become preload-only local images.
-    let templates = match (&ctx.organization_id, &ctx.project_id) {
-        (Some(organization_id), Some(project_id)) => {
-            crate::sandbox_templates::SandboxTemplatesClient::new(
-                client.clone(),
-                organization_id.clone(),
-                project_id.clone(),
-            )
-        }
-        (None, None) => {
-            crate::sandbox_templates::SandboxTemplatesClient::new_api_key_scoped(client.clone())
-        }
-        _ => {
-            return Err(SandboxImageBuildError::auth(
-                "Sandbox image build scope is incomplete",
-            ));
-        }
-    };
+    let templates = sandbox_templates_client_for(ctx, client.clone())?;
 
     // Skip the lookup when the final-stage FROM is `FROM <stage-alias>` —
     // the value is an internal reference to an earlier-defined stage, not
@@ -2587,6 +2615,7 @@ fn plan_image_import(
         unresolvable_image_references: Vec::new(),
         ignored_instructions: Vec::new(),
         import_image_reference: Some(image_ref.to_string()),
+        global_build_args: Vec::new(),
     })
 }
 
@@ -2666,9 +2695,16 @@ fn load_dockerfile_text_plan(
         std::collections::HashSet::new();
     let mut unresolvable_image_references: Vec<UnresolvableImageReference> = Vec::new();
     let mut ignored_instructions: Vec<(usize, String)> = Vec::new();
+    let mut global_build_args: Vec<(String, Option<String>)> = Vec::new();
 
     for (line_number, line) in logical_dockerfile_lines(&dockerfile_text) {
         let (keyword, value) = split_instruction(&line, line_number)?;
+        if keyword == "ARG" && final_from_image.is_none() && stage_aliases.is_empty() {
+            // Only ARGs declared before the first FROM are visible to FROM
+            // references (Docker's global build-arg scope).
+            global_build_args.extend(parse_arg_declarations(&value));
+            continue;
+        }
         if keyword == "FROM" {
             let (image, alias) = parse_from_value_with_alias(&value, line_number)?;
             // If a prior FROM had set the "final image" candidate, demote it
@@ -2770,7 +2806,28 @@ fn load_dockerfile_text_plan(
         unresolvable_image_references,
         ignored_instructions,
         import_image_reference: None,
+        global_build_args,
     })
+}
+
+/// Parse the declarations of one `ARG` instruction: `NAME`, `NAME=value`,
+/// `NAME="quoted value"`, several per instruction.
+fn parse_arg_declarations(value: &str) -> Vec<(String, Option<String>)> {
+    let tokens = shlex_split(value).unwrap_or_else(|| {
+        value
+            .split_whitespace()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    });
+    tokens
+        .into_iter()
+        .filter(|token| !token.is_empty())
+        .map(|token| match token.split_once('=') {
+            Some((name, default)) => (name.to_string(), Some(default.to_string())),
+            None => (token, None),
+        })
+        .filter(|(name, _)| !name.is_empty())
+        .collect()
 }
 
 fn default_registered_name(dockerfile_path: &Path) -> String {
@@ -4157,6 +4214,7 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
             unresolvable_image_references: Vec::new(),
             ignored_instructions: Vec::new(),
             import_image_reference: None,
+            global_build_args: Vec::new(),
         };
 
         let spec = build_rootfs_spec(
@@ -4192,6 +4250,7 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
             unresolvable_image_references: Vec::new(),
             ignored_instructions: Vec::new(),
             import_image_reference: None,
+            global_build_args: Vec::new(),
         };
 
         let spec = build_rootfs_spec(&prepared_spec, &prepared, &plan, None, None, false).unwrap();
