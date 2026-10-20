@@ -377,6 +377,9 @@ def _resolve_build_credentials(*, allow_pat: bool = False) -> tuple[Context, str
 
 
 def _forwarder(emit: EmitFn, *, cas: bool = False) -> EmitFn:
+    if emit is _noop_emit:
+        return emit
+
     def forward_event(event: dict) -> None:
         emit(normalize_build_event(event) if cas else dict(event))
 

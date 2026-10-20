@@ -18,6 +18,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, patch
 
+from tensorlake._enums import ResponseEnum
 from tensorlake._tracing import USER_AGENT
 from tensorlake.image import Image, builds
 from tensorlake.image import sandbox_builder as sbm
@@ -82,6 +83,32 @@ def _native_error(payload: dict) -> Exception:
 
 
 class TestBuildEnums(unittest.TestCase):
+    def test_response_enums_require_unknown_when_the_class_is_defined(self):
+        with self.assertRaisesRegex(TypeError, "UNKNOWN"):
+
+            class MissingUnknown(ResponseEnum):
+                KNOWN = "known"
+
+    def test_diagnostics_do_not_affect_equality_hashing_or_model_dumps(self):
+        info = builds.ImageBuildInfo.from_dict(_build_json())
+        other = builds.ImageBuildInfo.from_dict(_build_json(future_field="new value"))
+        self.assertEqual(info, other)
+        self.assertEqual(hash(info), hash(other))
+        self.assertEqual(len({info, other}), 1)
+        self.assertNotIn("raw", info.model_dump())
+        self.assertNotIn("raw", json.loads(info.model_dump_json()))
+        self.assertNotEqual(info, info.model_copy(update={"name": "different"}))
+        first = builds.CancelBuildOutcome.from_dict(
+            {"outcome": "cancelled", "build": _build_json()}
+        )
+        second = builds.CancelBuildOutcome.from_dict(
+            {"outcome": "cancelled", "build": _build_json(), "future": 42}
+        )
+        self.assertEqual(first, second)
+        self.assertEqual(hash(first), hash(second))
+        self.assertNotIn("raw", first.model_dump())
+        self.assertNotIn("raw", first.model_dump()["build"])
+
     def test_enum_constructors_reject_typos_and_response_decoders_accept_future_values(
         self,
     ):
@@ -172,6 +199,14 @@ class TestBuildEnums(unittest.TestCase):
         self.assertIs(type(error), builds.ImageBuildError)
         self.assertIs(error.code, builds.ImageBuildErrorCode.UNKNOWN)
         self.assertEqual(error.raw_details["code"], "future_code")
+
+    def test_missing_or_null_error_codes_keep_the_internal_default(self):
+        for fields in ({}, {"code": None}, {"code": ""}):
+            with self.subTest(fields=fields):
+                payload = {"message": "m", **fields}
+                error = builds._typed_build_error(_native_error(payload))
+                self.assertIs(error.code, builds.ImageBuildErrorCode.INTERNAL)
+                self.assertEqual(error.raw_details, payload)
 
     def test_nested_error_values_are_normalized(self):
         payload = {
@@ -370,6 +405,16 @@ class TestBuildEnums(unittest.TestCase):
             )
         self.assertEqual(output.getvalue(), "[future_event] diagnosis\n")
 
+    def test_silent_builds_do_not_decode_events(self):
+        with patch.object(
+            sbm,
+            "normalize_build_event",
+            side_effect=AssertionError("unexpected decoding"),
+        ):
+            emit = builds._resolve_emit(None, False)
+            self.assertIs(emit, sbm._noop_emit)
+            emit({"type": "build_log", "message": "line"})
+
 
 class TestStartBuild(unittest.TestCase):
     def test_start_build_forwards_exact_positional_arguments(self):
@@ -516,6 +561,72 @@ class TestStartBuild(unittest.TestCase):
 
 
 class TestGetWaitCancel(unittest.TestCase):
+    def test_malformed_native_responses_remain_build_errors(self):
+        info = builds.ImageBuildInfo.from_dict(_build_json())
+        handle = builds.ImageBuildHandle(
+            info, _credentials=("https://api.tensorlake.test", "k", "default")
+        )
+        malformed = _build_json(name={"future": "shape"})
+        for native, invoke, response in (
+            ("_rust_get_image_build", lambda: builds.get_build("build-1"), malformed),
+            ("_rust_get_image_build", handle.refresh, malformed),
+            (
+                "_rust_start_image_build",
+                lambda: builds.start_build(Image(name="img", base_image="ubuntu")),
+                {"build": malformed},
+            ),
+            (
+                "_rust_start_image_import",
+                lambda: builds.start_import("ubuntu"),
+                {"build": malformed},
+            ),
+            ("_rust_wait_image_build", handle.wait, []),
+            ("_rust_wait_image_build", lambda: builds.wait_build("build-1"), []),
+            ("_rust_cancel_image_build", lambda: builds.cancel_build("build-1"), []),
+        ):
+            body = json.dumps(response)
+            with (
+                self.subTest(operation=invoke, native=native),
+                patch.object(builds, "_build_context_from_env", return_value=_ctx()),
+                patch.object(builds, native, return_value=body),
+                self.assertRaises(builds.ImageBuildError) as raised,
+            ):
+                invoke()
+            self.assertIs(raised.exception.code, builds.ImageBuildErrorCode.SERVICE)
+            self.assertEqual(raised.exception.raw_details["response"], body)
+            self.assertIs(handle.info, info)
+
+    def test_wait_preserves_kwargs_constructed_handle_metadata(self):
+        for raw in ({}, {"name": {"future": "shape"}}):
+            with self.subTest(raw=raw):
+                info = builds.ImageBuildInfo(
+                    build_id="build-1",
+                    status=builds.ImageBuildStatus.RUNNING,
+                    kind=builds.ImageBuildKind.DOCKERFILE,
+                    name="img",
+                    attempt_no=3,
+                    created_at_ms=123,
+                    updated_at_ms=456,
+                    raw=raw,
+                )
+                handle = builds.ImageBuildHandle(
+                    info, _credentials=("https://api.tensorlake.test", "k", "default")
+                )
+                with patch.object(
+                    builds,
+                    "_rust_wait_image_build",
+                    return_value=json.dumps(_result_json()),
+                ):
+                    result = handle.wait()
+                self.assertEqual(handle.build_id, "build-1")
+                self.assertEqual(
+                    handle.info.model_dump(exclude={"status", "result"}),
+                    info.model_dump(exclude={"status", "result"}),
+                )
+                self.assertIs(handle.info.status, builds.ImageBuildStatus.SUCCEEDED)
+                self.assertEqual(handle.info.result, result)
+                self.assertEqual(info.raw, raw)
+
     def test_get_build_returns_a_handle_and_refreshes(self):
         with (
             patch.object(builds, "_build_context_from_env", return_value=_ctx()),

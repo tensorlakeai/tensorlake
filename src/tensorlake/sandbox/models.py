@@ -1,6 +1,5 @@
 """Pydantic models for sandbox operations."""
 
-import json
 import warnings
 from datetime import datetime, timezone
 from enum import Enum
@@ -14,7 +13,10 @@ from pydantic import (
     ConfigDict,
     Field,
     PrivateAttr,
+    ValidationInfo,
+    field_validator,
     model_serializer,
+    model_validator,
 )
 
 from tensorlake._enums import ResponseEnum
@@ -880,20 +882,29 @@ SnapshotResponseT = TypeVar("SnapshotResponseT", bound="_SnapshotResponse")
 
 class _SnapshotResponse(BaseModel):
     status: SnapshotStatus
-    raw: dict[str, Any] = Field(default_factory=dict, repr=False)
+    raw: dict[str, Any] = Field(default_factory=dict, repr=False, exclude=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _capture_response(cls, value: Any, info: ValidationInfo) -> Any:
+        if info.context and info.context.get("response") and isinstance(value, dict):
+            return {**value, "raw": dict(value)}
+        return value
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def _decode_status(cls, value: Any, info: ValidationInfo) -> Any:
+        if info.context and info.context.get("response"):
+            return SnapshotStatus.from_response(value)
+        return value
 
     @classmethod
     def from_response(
         cls: type[SnapshotResponseT], payload: dict | str
     ) -> SnapshotResponseT:
-        data = json.loads(payload) if isinstance(payload, str) else payload
-        return cls.model_validate(
-            {
-                **data,
-                "status": SnapshotStatus.from_response(data.get("status")),
-                "raw": dict(data),
-            }
-        )
+        if isinstance(payload, str):
+            return cls.model_validate_json(payload, context={"response": True})
+        return cls.model_validate(payload, context={"response": True})
 
 
 class CreateSnapshotResponse(_SnapshotResponse):
@@ -923,14 +934,27 @@ class SnapshotInfo(_SnapshotResponse):
 class ListSnapshotsResponse(BaseModel):
     """Response from listing snapshots (internal use)."""
 
-    snapshots: list[SnapshotInfo]
+    snapshots: list[SnapshotInfo] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _empty_response(cls, value: Any, info: ValidationInfo) -> Any:
+        if value is None and info.context and info.context.get("response"):
+            return {}
+        return value
+
+    @field_validator("snapshots", mode="before")
+    @classmethod
+    def _empty_snapshots(cls, value: Any, info: ValidationInfo) -> Any:
+        if value is None and info.context and info.context.get("response"):
+            return []
+        return value
 
     @classmethod
     def from_response(cls, payload: dict | str) -> "ListSnapshotsResponse":
-        data = json.loads(payload) if isinstance(payload, str) else payload
-        return cls(
-            snapshots=[SnapshotInfo.from_response(item) for item in data["snapshots"]]
-        )
+        if isinstance(payload, str):
+            return cls.model_validate_json(payload, context={"response": True})
+        return cls.model_validate(payload, context={"response": True})
 
 
 class SandboxLogLevel(str, Enum):

@@ -57,6 +57,12 @@ import { explicitProxyUrlOverride } from "./url.js";
 export const DEFAULT_WAIT_POLL_INTERVAL_SEC = 2;
 
 function parseSnapshot<T extends CreateSnapshotResponse>(raw: Record<string, unknown>): T {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new SandboxError("Invalid snapshot response: expected an object");
+  }
+  if (!("status" in raw)) {
+    throw new SandboxError("Invalid snapshot response: missing status");
+  }
   return {
     ...fromSnakeKeys(raw, "snapshotId") as Record<string, unknown>,
     status: enumValue(SnapshotStatus, raw.status),
@@ -996,7 +1002,7 @@ export class SandboxClient {
     const parsed = JSON.parse(json) as {
       snapshots?: Record<string, unknown>[];
     };
-    const snapshots = (parsed.snapshots ?? []).map((s) => parseSnapshot<SnapshotInfo>(s));
+    const snapshots = (parsed?.snapshots ?? []).map((s) => parseSnapshot<SnapshotInfo>(s));
     return Object.assign(snapshots, { traceId });
   }
 

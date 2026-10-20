@@ -1853,6 +1853,33 @@ describe("SandboxClient", () => {
       },
     );
 
+    it.each([{}, null, { snapshots: null }])("returns an empty list for an empty snapshot response %j", async (payload) => {
+      installNativeStub({ client: {
+        listSnapshots: vi.fn(async () => ({ traceId: "t", json: JSON.stringify(payload) })),
+      } });
+      const client = SandboxClient.forLocalhost();
+      try {
+        expect(await client.listSnapshots()).toHaveLength(0);
+      } finally {
+        client.close();
+      }
+    });
+
+    it("rejects a missing snapshot status before polling", async () => {
+      const getSnapshot = vi.fn();
+      installNativeStub({ client: {
+        createSnapshot: vi.fn(async () => ({ traceId: "t", json: '{"snapshot_id":"s"}' })),
+        getSnapshot,
+      } });
+      const client = SandboxClient.forLocalhost();
+      try {
+        await expect(client.snapshotAndWait("sbx-1", { pollInterval: 0 })).rejects.toThrow("missing status");
+        expect(getSnapshot).not.toHaveBeenCalled();
+      } finally {
+        client.close();
+      }
+    });
+
     it("keeps waiting when the snapshot has an unknown status", async () => {
       const getSnapshot = vi.fn();
       for (const status of ["future_status", "completed"]) {

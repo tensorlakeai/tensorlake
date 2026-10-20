@@ -1,12 +1,21 @@
 """Strict SDK enums with explicit, tolerant response decoding."""
 
-from enum import Enum
+from enum import Enum, EnumMeta
 from typing import TypeVar
 
 ResponseEnumT = TypeVar("ResponseEnumT", bound="ResponseEnum")
 
 
-class ResponseEnum(str, Enum):
+class _ResponseEnumMeta(EnumMeta):
+    def __new__(metacls, name, bases, namespace, **kwargs):
+        cls = super().__new__(metacls, name, bases, namespace, **kwargs)
+        if any(isinstance(base, _ResponseEnumMeta) for base in bases):
+            if "UNKNOWN" not in cls.__members__:
+                raise TypeError(f"{name} must define an UNKNOWN member")
+        return cls
+
+
+class ResponseEnum(str, Enum, metaclass=_ResponseEnumMeta):
     """Construct strictly; map unfamiliar response values to UNKNOWN."""
 
     @classmethod

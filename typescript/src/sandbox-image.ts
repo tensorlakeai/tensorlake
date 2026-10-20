@@ -377,7 +377,7 @@ function eventToEmitDict(event: NativeBindingEvent): Record<string, unknown> {
 
 function makeImageEmitter(options: { cas?: boolean; verbose?: boolean }, deps: CreateSandboxImageDeps) {
   const emit = deps.emit ?? (options.verbose ? stderrEmit : noopEmit);
-  return options.cas
+  return options.cas && emit !== noopEmit
     ? (event: Record<string, unknown>) => emit(normalizeBuildEvent(event))
     : emit;
 }
@@ -586,6 +586,7 @@ export async function createSandboxImage(
       buildArgs: options.buildArgs,
     };
     const forward = (event: NativeBindingEvent) => {
+      if (emit === noopEmit) return;
       try {
         emit(eventToEmitDict(event));
       } catch (error) {
@@ -710,6 +711,7 @@ export async function importSandboxImage(
     cas: options.cas ?? false,
   };
   const forward = (event: NativeBindingEvent) => {
+    if (emit === noopEmit) return;
     try {
       emit(eventToEmitDict(event));
     } catch (error) {

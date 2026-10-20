@@ -63,7 +63,7 @@ import os
 import tempfile
 import warnings
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -264,7 +264,7 @@ def _typed_build_error(exc: BaseException) -> ImageBuildError | None:
         return None
     if not isinstance(payload, dict):
         return None
-    code = ImageBuildErrorCode.from_response(payload.get("code", "internal"))
+    code = ImageBuildErrorCode.from_response(payload.get("code") or "internal")
     message = str(payload.get("message") or exc)
     details = {key: value for key, value in payload.items() if key not in ("message",)}
     details.pop("code", None)
@@ -295,7 +295,26 @@ def _raise_typed(exc: BaseException) -> None:
 # --- Models -----------------------------------------------------------------
 
 
-class ImageBuildInfo(BaseModel):
+class _BuildResponse(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    raw: dict = Field(default_factory=dict, repr=False, exclude=True)
+
+    def _comparable_values(self) -> tuple:
+        return tuple(
+            getattr(self, name) for name in type(self).model_fields if name != "raw"
+        )
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, _BuildResponse) or type(self) is not type(other):
+            return NotImplemented
+        return self._comparable_values() == other._comparable_values()
+
+    def __hash__(self) -> int:
+        return hash(self._comparable_values())
+
+
+class ImageBuildInfo(_BuildResponse):
     """One build or import as the Image Service reports it.
 
     Unknown fields are kept in :attr:`raw`. ``status`` is ``pending``,
@@ -308,8 +327,6 @@ class ImageBuildInfo(BaseModel):
     returns for that image. The service exposes no cleanup state, phase
     deadline, content digest or upload capability on a build.
     """
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
 
     build_id: str
     status: ImageBuildStatus
@@ -324,7 +341,6 @@ class ImageBuildInfo(BaseModel):
     operation_deadline_ms: int | None = None
     created_at_ms: int | None = None
     updated_at_ms: int | None = None
-    raw: dict = Field(default_factory=dict, repr=False)
 
     @property
     def is_terminal(self) -> bool:
@@ -336,6 +352,8 @@ class ImageBuildInfo(BaseModel):
 
     @classmethod
     def from_dict(cls, raw: dict) -> "ImageBuildInfo":
+        if not isinstance(raw, dict):
+            raise ValueError("build info must be an object")
         result = raw.get("result")
         # The core hands the result over in the template shape (camelCase);
         # the Python SDK presents snake_case keys everywhere.
@@ -366,7 +384,7 @@ class ImageBuildInfo(BaseModel):
         )
 
 
-class CancelBuildOutcome(BaseModel):
+class CancelBuildOutcome(_BuildResponse):
     """The service's answer to a cancellation.
 
     ``outcome`` is ``cancelled`` (durable), ``already_cancelled``,
@@ -376,11 +394,8 @@ class CancelBuildOutcome(BaseModel):
     about a delayed admission). ``build`` is the observed record when any.
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
     outcome: ImageBuildCancellationOutcome
     build: ImageBuildInfo | None = None
-    raw: dict = Field(default_factory=dict, repr=False)
 
     @property
     def confirmed(self) -> bool:
@@ -389,6 +404,8 @@ class CancelBuildOutcome(BaseModel):
 
     @classmethod
     def from_dict(cls, raw: dict) -> "CancelBuildOutcome":
+        if not isinstance(raw, dict):
+            raise ValueError("cancellation response must be an object")
         return cls(
             outcome=ImageBuildCancellationOutcome.from_response(raw.get("outcome")),
             build=_info_or_none(raw.get("build")),
@@ -402,7 +419,7 @@ def _info_or_none(raw: Any) -> ImageBuildInfo | None:
     if isinstance(raw, dict):
         try:
             return ImageBuildInfo.from_dict(raw)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, OverflowError):
             pass
     return None
 
@@ -411,6 +428,26 @@ def _resolve_emit(emit: EmitFn | None, verbose: bool) -> Callable[[dict], None]:
     if emit is None:
         emit = _stderr_emit if verbose else _noop_emit
     return _forwarder(emit, cas=True)
+
+
+BuildResponseT = TypeVar("BuildResponseT")
+
+
+def _decode_response(
+    response: str, decode: Callable[[dict], BuildResponseT]
+) -> BuildResponseT:
+    """Keep malformed service responses within the public build error hierarchy."""
+    try:
+        payload = json.loads(response)
+        if not isinstance(payload, dict):
+            raise ValueError("expected a JSON object")
+        return decode(payload)
+    except (ValueError, TypeError, OverflowError) as exc:
+        raise ImageBuildError(
+            f"Invalid image-build response: {exc}",
+            code=ImageBuildErrorCode.SERVICE,
+            response=response,
+        ) from exc
 
 
 # --- Native delegation -------------------------------------------------------
@@ -485,8 +522,7 @@ def _reject_legacy_reference(build_id: str) -> None:
         )
 
 
-def _decode_started(result_json: str) -> tuple[ImageBuildInfo, str | None]:
-    payload = json.loads(result_json)
+def _decode_started(payload: dict) -> tuple[ImageBuildInfo, str | None]:
     info = ImageBuildInfo.from_dict(payload.get("build") or {})
     return info, payload.get("client_request_id")
 
@@ -550,7 +586,7 @@ class ImageBuildHandle:
             )
         except Exception as exc:  # noqa: BLE001 - re-raised typed below
             _raise_typed(exc)
-        self._info = ImageBuildInfo.from_dict(json.loads(raw))
+        self._info = _decode_response(raw, ImageBuildInfo.from_dict)
         return self._info
 
     def wait(
@@ -605,9 +641,13 @@ class ImageBuildHandle:
             raise
         except Exception as exc:  # noqa: BLE001 - re-raised typed below
             _raise_typed(exc)
-        result = _snake_case_keys(json.loads(raw))
-        self._info = ImageBuildInfo.from_dict(
-            {**self._info.raw, "status": "succeeded", "result": result}
+        result = _decode_response(raw, _snake_case_keys)
+        self._info = self._info.model_copy(
+            update={
+                "status": ImageBuildStatus.SUCCEEDED,
+                "result": result,
+                "raw": {**self._info.raw, "status": "succeeded", "result": result},
+            }
         )
         return result
 
@@ -741,7 +781,7 @@ def start_build(
             raise
         except Exception as exc:  # noqa: BLE001 - re-raised typed below
             _raise_typed(exc)
-    info, client_request_id = _decode_started(raw)
+    info, client_request_id = _decode_response(raw, _decode_started)
     return ImageBuildHandle(
         info,
         client_request_id=client_request_id,
@@ -806,7 +846,7 @@ def start_import(
         raise
     except Exception as exc:  # noqa: BLE001 - re-raised typed below
         _raise_typed(exc)
-    info, client_request_id = _decode_started(raw)
+    info, client_request_id = _decode_response(raw, _decode_started)
     return ImageBuildHandle(
         info,
         client_request_id=client_request_id,
@@ -831,7 +871,7 @@ def get_build(build_id: str) -> ImageBuildHandle:
     except Exception as exc:  # noqa: BLE001 - re-raised typed below
         _raise_typed(exc)
     return ImageBuildHandle(
-        ImageBuildInfo.from_dict(json.loads(raw)),
+        _decode_response(raw, ImageBuildInfo.from_dict),
         _credentials=(api_url, token, namespace),
     )
 
@@ -872,7 +912,7 @@ def wait_build(
         raise
     except Exception as exc:  # noqa: BLE001 - re-raised typed below
         _raise_typed(exc)
-    return _snake_case_keys(json.loads(raw))
+    return _decode_response(raw, _snake_case_keys)
 
 
 def cancel_build(
@@ -912,4 +952,4 @@ def cancel_build(
         )
     except Exception as exc:  # noqa: BLE001 - re-raised typed below
         _raise_typed(exc)
-    return CancelBuildOutcome.from_dict(json.loads(raw))
+    return _decode_response(raw, CancelBuildOutcome.from_dict)

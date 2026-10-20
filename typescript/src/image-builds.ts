@@ -232,11 +232,11 @@ export function toImageBuildError(error: unknown): unknown {
     details[camelize(key)] = value;
   }
   const normalized = { ...details };
-  normalized.code = enumValue(ImageBuildErrorCode, details.code);
+  normalized.code = enumValue(ImageBuildErrorCode, details.code || ImageBuildErrorCode.INTERNAL);
   if (details.activeKind != null) normalized.activeKind = enumValue(ImageBuildKind, details.activeKind);
   if (details.activeStatus != null) normalized.activeStatus = enumValue(ImageBuildStatus, details.activeStatus);
   if (details.outcome != null) normalized.outcome = enumValue(ImageBuildCancellationOutcome, details.outcome);
-  if ("info" in details) normalized.info = isRecord(details.info) ? parseBuildInfo(details.info) : null;
+  if ("info" in details) normalized.info = buildInfoOrNull(details.info);
   const typed = normalized as unknown as ImageBuildErrorDetails;
   switch (typed.code) {
     case "not_found":
@@ -316,11 +316,30 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isBuildInfo(value: unknown): value is ImageBuildInfo {
   return isRecord(value) && typeof value.buildId === "string" &&
-    typeof value.attemptNo === "number" && isRecord(value.raw) &&
+    Number.isSafeInteger(value.attemptNo) && isRecord(value.raw) &&
     Object.values(ImageBuildStatus).includes(value.status as ImageBuildStatus);
 }
 
+function buildInfoOrNull(value: unknown): ImageBuildInfo | null {
+  if (!isRecord(value)) return null;
+  try {
+    return parseBuildInfo(value);
+  } catch (error) {
+    if (error instanceof ImageBuildError) return null;
+    throw error;
+  }
+}
+
 function parseBuildInfo(raw: Record<string, unknown>): ImageBuildInfo {
+  const value = raw.attempt_no ?? 0;
+  const attemptNo = typeof value === "number" || (typeof value === "string" && value.trim() !== "")
+    ? Number(value) : NaN;
+  if (!Number.isSafeInteger(attemptNo)) {
+    throw new ImageBuildError({
+      code: ImageBuildErrorCode.SERVICE,
+      message: "Invalid image-build response: attempt_no must be an integer",
+    }, { response: raw });
+  }
   const result =
     raw.result && typeof raw.result === "object"
       ? (camelizeRecord(raw.result as Record<string, unknown>) as unknown as ImageBuildResult)
@@ -332,7 +351,7 @@ function parseBuildInfo(raw: Record<string, unknown>): ImageBuildInfo {
     name: (raw.name as string | null | undefined) ?? null,
     status: enumValue(ImageBuildStatus, raw.status),
     phase: raw.phase == null ? raw.phase : enumValue(ImageBuildPhase, raw.phase),
-    attemptNo: Number(raw.attempt_no ?? 0),
+    attemptNo,
     builderSandboxId: (raw.builder_sandbox_id as string | null | undefined) ?? null,
     error: (raw.error as string | null | undefined) ?? null,
     result,
@@ -469,10 +488,13 @@ export async function __runWithInterrupt<T>(
 }
 
 function makeEmitter(options: { emit?: (event: ImageBuildEvent) => void; verbose?: boolean }) {
+  const hasConsumer = options.emit != null || options.verbose === true;
   const target =
     options.emit ??
     (options.verbose ? __imageBuildInternals.stderrEmit : __imageBuildInternals.noopEmit);
-  const emit = (event: Record<string, unknown>) => target(normalizeBuildEvent(event) as ImageBuildEvent);
+  const emit = hasConsumer
+    ? (event: Record<string, unknown>) => target(normalizeBuildEvent(event) as ImageBuildEvent)
+    : __imageBuildInternals.noopEmit;
   let emitError: unknown;
   const forward = (event: {
     eventType: string;
@@ -486,6 +508,7 @@ function makeEmitter(options: { emit?: (event: ImageBuildEvent) => void; verbose
     outcome?: string | null;
     confirmed?: boolean | null;
   }) => {
+    if (!hasConsumer) return;
     try {
       emit(__imageBuildInternals.eventToEmitDict(event));
     } catch (error) {
@@ -797,7 +820,7 @@ async function cancelImageBuildWith(
   const outcome = enumValue(ImageBuildCancellationOutcome, payload.outcome);
   return {
     outcome,
-    build: isRecord(payload.build) ? parseBuildInfo(payload.build) : null,
+    build: buildInfoOrNull(payload.build),
     confirmed: isConfirmedCancellation(outcome),
     raw: payload,
   };

@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   __setNativeBindingForTest,
+  __imageBuildInternals,
   createSandboxImage,
   importSandboxImage,
 } from "../src/sandbox-image.js";
@@ -251,6 +252,38 @@ describe("image build operations", () => {
     expect(error.rawDetails.code).toBe("future_code");
     expect(error.rawDetails.activeKind).toBe("future_kind");
     expect(error.rawDetails.activeStatus).toBe("future_status");
+  });
+
+  it.each([{}, { code: null }, { code: "" }])("defaults absent error codes to INTERNAL: %j", (fields) => {
+    const error = toImageBuildError(nativeError({ message: "m", ...fields })) as ImageBuildError;
+    expect(error.code).toBe(ImageBuildErrorCode.INTERNAL);
+  });
+
+  it.each(["not-a-number", {}, [], "", "1.5"])("guards malformed attempt_no %j in nested and top-level records", async (attempt_no) => {
+    const binding = makeFakeBinding();
+    const info = buildJson("failed", { attempt_no });
+    const error = toImageBuildError(nativeError({ code: "failed", message: "m", info })) as ImageBuildFailedError;
+    expect(error).toBeInstanceOf(ImageBuildFailedError);
+    expect(error.info).toBeUndefined();
+    expect(error.rawDetails.info).toEqual(info);
+    binding.getImageBuild.mockResolvedValueOnce(JSON.stringify(info));
+    await expect(getImageBuild("build-1")).rejects.toMatchObject({
+      code: ImageBuildErrorCode.SERVICE,
+      rawDetails: { response: info },
+    });
+    binding.cancelImageBuild.mockResolvedValueOnce(JSON.stringify({ outcome: "cancelled", build: info }));
+    expect((await cancelImageBuild({ buildId: "build-1" })).build).toBeNull();
+  });
+
+  it("does not translate or decode events without a consumer", async () => {
+    makeFakeBinding();
+    const translate = vi.spyOn(__imageBuildInternals, "eventToEmitDict");
+    try {
+      await waitImageBuild("build-1");
+      expect(translate).not.toHaveBeenCalled();
+    } finally {
+      translate.mockRestore();
+    }
   });
 
   it("rejects enum typos supplied directly by callers", () => {
