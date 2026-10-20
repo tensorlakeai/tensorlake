@@ -36,7 +36,7 @@ Rust callers can override the read limits with typed configuration:
 
 ```rust
 use std::time::Duration;
-use tensorlake::client::{ClientBuilder, ReadRetryConfig};
+use tensorlake::{ClientBuilder, ReadRetryConfig};
 
 let client = ClientBuilder::new("https://sandbox.tensorlake.ai")
     .read_retry(ReadRetryConfig {
@@ -60,11 +60,18 @@ other family reaches that deadline.
 Each attempt selects from the current records and prefers an untried address.
 A connection failure before HTTP delivery can try one address from the other
 family within the same attempt and deadline, without spending an HTTP retry.
+The first pinned connection gets at most half the time remaining after DNS,
+capped at two seconds, leaving time for fallback even with short caller
+deadlines. Only connection establishment uses this smaller limit; the response
+retains the rest of the attempt budget.
 If that family's DNS answer missed the initial grace period, connection failure
 allows a bounded lookup for that family before giving up on the attempt.
 TLS policy failures are terminal. Once an HTTP request is sent, any replay
 consumes another attempt. Pools are scoped to the URL origin and selected
-address, so an HTTP/2 retry cannot silently reuse the failed peer's multiplexed connection.
+address and connection-timeout bucket, so an HTTP/2 retry cannot silently reuse
+the failed peer's multiplexed connection. Connection budgets round down through
+two seconds, one second, 500 milliseconds, and so on; nearby caller deadlines
+reuse a pool instead of creating one for every distinct remaining duration.
 The URL hostname, TLS SNI, certificate verification, credentials, scope headers,
 redirect policy and middleware are preserved.
 

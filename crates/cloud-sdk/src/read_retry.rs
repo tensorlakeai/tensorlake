@@ -16,6 +16,7 @@ const MAX_POOLS: usize = 32;
 const POOL_IDLE: Duration = Duration::from_secs(60);
 const RETRY_CAPACITY: f64 = 20.0;
 const DNS_FAMILY_GRACE: Duration = Duration::from_millis(50);
+const MAX_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Retry limits for sandbox metadata reads. All attempts, DNS lookups, body
 /// reads and backoff share `total_timeout`, further capped by request timeout.
@@ -59,6 +60,7 @@ struct Endpoint {
 
 struct Pool {
     endpoint: Endpoint,
+    connect_timeout: Duration,
     client: Arc<ClientWithMiddleware>,
     used_at: Instant,
 }
@@ -293,12 +295,28 @@ impl ReadTransport {
         }
     }
 
-    fn pool(&self, endpoint: &Endpoint, host: &str) -> Result<Arc<ClientWithMiddleware>, SdkError> {
+    fn pool(
+        &self,
+        endpoint: &Endpoint,
+        host: &str,
+        connect_budget: Duration,
+    ) -> Result<Arc<ClientWithMiddleware>, SdkError> {
+        // Reqwest's connection timeout belongs to the pooled client. Round
+        // down to a shared timeout bucket so similar caller deadlines reuse
+        // connections instead of creating a pool for every elapsed nanosecond.
+        let mut connect_timeout = MAX_CONNECT_TIMEOUT;
+        while connect_timeout > connect_budget {
+            connect_timeout /= 2;
+        }
         let mut state = self.state.lock().unwrap();
         state
             .pools
             .retain(|pool| pool.used_at.elapsed() < POOL_IDLE);
-        if let Some(pool) = state.pools.iter_mut().find(|p| p.endpoint == *endpoint) {
+        if let Some(pool) = state
+            .pools
+            .iter_mut()
+            .find(|p| p.endpoint == *endpoint && p.connect_timeout == connect_timeout)
+        {
             pool.used_at = Instant::now();
             return Ok(pool.client.clone());
         }
@@ -311,7 +329,7 @@ impl ReadTransport {
                 reqwest::redirect::Policy::none()
             })
             .retry(reqwest::retry::never())
-            .connect_timeout(self.config.attempt_timeout.min(Duration::from_secs(2)));
+            .connect_timeout(connect_timeout);
         if let Some(address) = endpoint.address {
             builder = builder.resolve(host, address);
         }
@@ -342,6 +360,7 @@ impl ReadTransport {
         }
         state.pools.push(Pool {
             endpoint: endpoint.clone(),
+            connect_timeout,
             client: client.clone(),
             used_at: Instant::now(),
         });
@@ -527,17 +546,41 @@ impl Client {
                         origin: origin.clone(),
                         address: candidate,
                     };
+                    let remaining = attempt_deadline.saturating_duration_since(Instant::now());
+                    // A pinned address cannot use the connector's normal
+                    // family racing. Reserve half the remaining time for a
+                    // fallback connection, even for short caller deadlines.
+                    // Limit connection establishment, not HTTP delivery: a
+                    // slow response must still spend an HTTP retry attempt.
+                    let connect_budget = if connection_attempt == 0 && candidate.is_some() {
+                        remaining / 2
+                    } else {
+                        remaining
+                    };
+                    if connect_budget.is_zero() {
+                        return Err(SdkError::StreamTimeout {
+                            waiting_for: "a sandbox metadata read",
+                            timeout,
+                        });
+                    }
                     let transport = self
                         .reads
-                        .pool(&selected, request.url().host_str().unwrap_or(""))?;
+                        .pool(&selected, request.url().host_str().unwrap_or(""), connect_budget)?;
                     endpoint = Some(selected);
                     attempted_pool = Some(transport.clone());
                     let mut current = request.try_clone().expect("bodyless GET is replayable");
                     trace_id = self.prepare_traced_request(&mut current);
-                    *current.timeout_mut() = Some(timeout);
+                    let remaining = attempt_deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        return Err(SdkError::StreamTimeout {
+                            waiting_for: "a sandbox metadata read",
+                            timeout,
+                        });
+                    }
+                    *current.timeout_mut() = Some(remaining);
                     current.headers_mut().insert(
                         REQUEST_TIMEOUT_HEADER,
-                        HeaderValue::from(timeout.as_millis() as u64),
+                        HeaderValue::from(remaining.as_millis() as u64),
                     );
                     stage = "response_headers";
                     match transport.execute(current).await {

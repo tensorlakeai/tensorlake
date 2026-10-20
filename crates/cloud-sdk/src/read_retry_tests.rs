@@ -1136,22 +1136,50 @@ async fn metadata_read_reaches_healthy_a_address_while_aaaa_is_stalled() {
 
 #[tokio::test]
 async fn connect_timeout_leaves_time_for_the_other_family() {
+    for deadline in [
+        Duration::from_secs(3),
+        Duration::from_millis(750),
+        Duration::from_millis(100),
+    ] {
+        let pki = Pki::new(true);
+        let healthy = server(&pki, Behavior::Healthy).await;
+        let listener = TcpListener::bind("[::1]:0").await.unwrap();
+        let stalled = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await; // TCP succeeds, TLS never completes
+        });
+        let mut client = client(&pki, vec![stalled, healthy.address]);
+        Arc::get_mut(&mut client.reads).unwrap().config = ReadRetryConfig {
+            max_attempts: 1,
+            ..ReadRetryConfig::default()
+        };
+        let client = client
+            .with_base_url_and_timeout("https://metadata.test", Some(deadline))
+            .unwrap();
+        assert!(read(&client).await.unwrap().ok);
+        assert_eq!(healthy.requests.load(Ordering::SeqCst), 1);
+        task.abort();
+    }
+}
+
+#[tokio::test]
+async fn nearby_caller_deadlines_reuse_healthy_connections() {
     let pki = Pki::new(true);
     let healthy = server(&pki, Behavior::Healthy).await;
-    let listener = TcpListener::bind("[::1]:0").await.unwrap();
-    let stalled = listener.local_addr().unwrap();
-    let task = tokio::spawn(async move {
-        let (_socket, _) = listener.accept().await.unwrap();
-        std::future::pending::<()>().await; // TCP succeeds, TLS never completes
-    });
-    let mut client = client(&pki, vec![stalled, healthy.address]);
-    Arc::get_mut(&mut client.reads).unwrap().config = ReadRetryConfig {
-        max_attempts: 1,
-        ..ReadRetryConfig::default()
-    };
-    assert!(read(&client).await.unwrap().ok);
-    assert_eq!(healthy.requests.load(Ordering::SeqCst), 1);
-    task.abort();
+    let mut client = client(&pki, vec![healthy.address]);
+    Arc::get_mut(&mut client.reads).unwrap().config = ReadRetryConfig::default();
+    for timeout_ms in [700, 750, 790, 720] {
+        let client = client
+            .with_base_url_and_timeout(
+                "https://metadata.test",
+                Some(Duration::from_millis(timeout_ms)),
+            )
+            .unwrap();
+        assert!(read(&client).await.unwrap().ok);
+    }
+    assert_eq!(healthy.connections.load(Ordering::SeqCst), 1);
+    assert_eq!(healthy.requests.load(Ordering::SeqCst), 4);
 }
 
 #[tokio::test]
@@ -1179,4 +1207,73 @@ async fn slow_other_family_dns_can_recover_after_a_fast_family_cannot_connect() 
     );
     assert_eq!(target.requests.load(Ordering::SeqCst), 1);
     dns.abort();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn short_deadline_keeps_tcp_address_family_fallback() {
+    use std::os::fd::AsRawFd;
+    let pki = Pki::new(true);
+    let healthy = server_on(&pki, Behavior::Healthy, "[::1]:0").await;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    // SAFETY: the listener owns a valid, open listening socket. Lowering its
+    // backlog lets this fixture stall TCP without changing host network rules.
+    assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 1) }, 0);
+    let stalled = listener.local_addr().unwrap();
+    let mut held = Vec::new();
+    let mut backlog_full = false;
+    for _ in 0..8 {
+        match tokio::time::timeout(
+            Duration::from_millis(100),
+            tokio::net::TcpStream::connect(stalled),
+        )
+        .await
+        {
+            Ok(Ok(stream)) => held.push(stream),
+            Err(_) => {
+                backlog_full = true;
+                break;
+            }
+            Ok(Err(error)) => panic!("unexpected connect error: {error}"),
+        }
+    }
+    assert!(
+        backlog_full,
+        "fixture must stall TCP establishment, not merely TLS"
+    );
+    let addresses = [stalled, healthy.address];
+    let baseline = crate::http_transport::https_builder()
+        .no_proxy()
+        .tls_certs_merge([pki.certificate.clone()])
+        .resolve_to_addrs("metadata.test", &addresses)
+        .timeout(Duration::from_millis(750))
+        .build()
+        .unwrap();
+    let started = Instant::now();
+    let result = baseline
+        .get("https://metadata.test/sandboxes/example")
+        .header("traceparent", generate_traceparent().0)
+        .send()
+        .await
+        .unwrap();
+    assert!(result.json::<Metadata>().await.unwrap().ok);
+    assert!(started.elapsed() < Duration::from_millis(750));
+    assert_eq!(healthy.requests.load(Ordering::SeqCst), 1);
+    let mut sdk = client(&pki, addresses.to_vec());
+    Arc::get_mut(&mut sdk.reads).unwrap().config = ReadRetryConfig {
+        max_attempts: 1,
+        ..ReadRetryConfig::default()
+    };
+    let sdk = sdk
+        .with_base_url_and_timeout("https://metadata.test", Some(Duration::from_millis(750)))
+        .unwrap();
+    let started = Instant::now();
+    let result = read(&sdk).await;
+    assert!(started.elapsed() < Duration::from_millis(750));
+    assert!(
+        result.is_ok(),
+        "a shorter caller deadline must retain the healthy family's TCP fallback: {result:?}"
+    );
+    assert_eq!(healthy.requests.load(Ordering::SeqCst), 2);
+    assert_eq!(sdk.reads.state.lock().unwrap().tokens, RETRY_CAPACITY);
 }
