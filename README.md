@@ -125,6 +125,8 @@ Omit `--image` to use Tensorlake's default managed environment. To select a
 custom environment, pass the name of a registered Sandbox Image; arbitrary
 Docker image references are not supported.
 
+To mount only a directory from a filesystem, see [Mount a directory from a filesystem](docs/mount-subtrees.md).
+
 ### Create a Sandbox Programmatically
 
 ```python

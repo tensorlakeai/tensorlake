@@ -317,6 +317,10 @@ fn default_allow_internet_access() -> bool {
 pub struct FileSystemMount {
     pub file_system_id: String,
     pub mount_path: String,
+    /// Absolute directory within the filesystem to expose. Omission selects `/`.
+    /// Requires a guest runtime that supports subtree mounts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
     /// Mount the file system read-only inside the guest.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub read_only: bool,
@@ -1326,6 +1330,7 @@ mod tests {
             prefetch: false,
             snapshot_id: None,
             owner: None,
+            source_path: None,
         };
         assert_eq!(
             serde_json::to_value(&mount).unwrap(),
@@ -1375,6 +1380,7 @@ mod tests {
             prefetch: true,
             snapshot_id: None,
             owner: None,
+            source_path: None,
         };
         assert_eq!(
             serde_json::to_value(&mount).unwrap(),
@@ -1396,6 +1402,7 @@ mod tests {
             prefetch: false,
             snapshot_id: Some("0abc123def".to_string()),
             owner: None,
+            source_path: None,
         };
         assert_eq!(
             serde_json::to_value(&pinned).unwrap(),
@@ -1722,5 +1729,19 @@ mod tests {
                 model: "H100".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn file_system_mount_roundtrips_source_paths_and_defaults_legacy_responses() {
+        let legacy = serde_json::json!({"file_system_id":"data", "mount_path":"/mnt/data"});
+        let mount: FileSystemMount = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(mount.source_path, None);
+        assert_eq!(serde_json::to_value(mount).unwrap(), legacy);
+        for source in ["/", "/models"] {
+            let wire = serde_json::json!({"file_system_id":"data", "mount_path":"/mnt/data", "source_path":source});
+            let mount: FileSystemMount = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(mount.source_path.as_deref(), Some(source));
+            assert_eq!(serde_json::to_value(mount).unwrap(), wire);
+        }
     }
 }

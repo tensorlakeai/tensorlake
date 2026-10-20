@@ -1981,3 +1981,45 @@ async fn resize_zero_timeout_allows_a_response_slower_than_one_second() {
     assert_eq!(info.resources.memory_mb, 1536);
     assert!(server.await.unwrap().starts_with(b"GET "));
 }
+
+#[tokio::test]
+async fn attach_subtree_sends_source_path_and_preserves_it_in_response() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let request = read_http_request(&mut socket).await;
+        write_json_response(&mut socket, r#"{"sandbox_id":"sbx-1","namespace":"default","status":"running","resources":{"cpus":1.0,"memory_mb":1024,"disk_mb":10240},"file_systems":[{"file_system_id":"data","mount_path":"/mnt/data","source_path":"/models"}]}"#).await;
+        request
+    });
+    let client = ClientBuilder::new(&format!("http://{address}"))
+        .build()
+        .unwrap();
+    let sandboxes = SandboxesClient::new(client, "default", false);
+    let info = tokio::time::timeout(
+        Duration::from_secs(5),
+        sandboxes.attach_file_system_with_request(
+            "sbx-1",
+            &FileSystemMount {
+                file_system_id: "data".to_string(),
+                mount_path: "/mnt/data".to_string(),
+                source_path: Some("/models".to_string()),
+                ..Default::default()
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(info.file_systems[0].source_path.as_deref(), Some("/models"));
+    let request = server.await.unwrap();
+    let request = String::from_utf8(request).unwrap();
+    assert!(request.starts_with("POST /sandboxes/sbx-1/file_systems HTTP/1.1\r\n"));
+    let (_, body) = request.split_once("\r\n\r\n").unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(body).unwrap(),
+        serde_json::json!({
+            "file_system_id":"data", "mount_path":"/mnt/data", "source_path":"/models"
+        })
+    );
+}

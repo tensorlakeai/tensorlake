@@ -1286,8 +1286,9 @@ enum SbxCommands {
 
         /// Mount a registered file system at boot as
         /// `<name>[@<snapshot_id>]:<mount_path>[:<opts>]`, where `<opts>` is
-        /// a comma-separated list of `ro` (read-only) and/or `prefetch`
-        /// (eagerly download contents), e.g. `data:/mnt/data:ro,prefetch`.
+        /// a comma-separated list of `ro` (read-only), `prefetch` (download
+        /// contents), and `source_path=/dir` (select a directory; default `/`),
+        /// e.g. `data:/mnt/data:ro,source_path=/models`.
         /// `@<snapshot_id>` pins the mount to a filesystem snapshot and
         /// requires `ro` (pinned mounts are read-only), e.g.
         /// `data@0abc123:/mnt/data:ro`; `@` cannot appear in file system
@@ -1697,6 +1698,10 @@ enum SbxFsCommands {
         /// Absolute guest mount path (e.g. `/mnt/skills`)
         #[arg(short, long)]
         path: String,
+
+        /// Absolute directory within the filesystem to mount (default: /)
+        #[arg(long, value_name = "SOURCE_PATH")]
+        source_path: Option<String>,
 
         /// Mount the file system read-only
         #[arg(long = "read-only")]
@@ -2991,6 +2996,7 @@ async fn run_command(
                             sandbox_id,
                             file_system_id,
                             path,
+                            source_path,
                             read_only,
                             prefetch,
                             snapshot_id,
@@ -3006,6 +3012,7 @@ async fn run_command(
                                 prefetch,
                                 snapshot_id.as_deref(),
                                 owner.as_deref(),
+                                source_path.as_deref(),
                                 json,
                             )
                             .await
@@ -5719,5 +5726,28 @@ mod tests {
         let result = Cli::try_parse_from(["tl", "sbx", "tunnel", "sbx-123", "0"]);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn sbx_fs_attach_parses_source_path() {
+        let parsed = parse_command([
+            "tl",
+            "sbx",
+            "fs",
+            "attach",
+            "sbx-test",
+            "--id",
+            "data",
+            "--path",
+            "/mnt/data",
+            "--source-path",
+            "/models",
+        ]);
+        match parsed {
+            Commands::Sbx(SbxCommands::Fs(SbxFsCommands::Attach { source_path, .. })) => {
+                assert_eq!(source_path.as_deref(), Some("/models"));
+            }
+            _ => panic!("expected filesystem attach"),
+        }
     }
 }

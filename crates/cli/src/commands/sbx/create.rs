@@ -186,7 +186,7 @@ pub struct CreateArgs<'a> {
 }
 
 const FILESYSTEM_FLAG_USAGE: &str = "--filesystem must be <name>[@<snapshot_id>]:<mount_path>[:<opts>] where <opts> \
-     is a comma-separated list of `ro` and/or `prefetch`, and a `@<snapshot_id>` pin requires \
+     is a comma-separated list of `ro`, `prefetch`, and `source_path=/dir`, and a `@<snapshot_id>` pin requires \
      `ro`";
 
 /// Parse `--filesystem <name>[@<snapshot>]:<path>[:<opts>]` flags into the
@@ -195,7 +195,8 @@ const FILESYSTEM_FLAG_USAGE: &str = "--filesystem must be <name>[@<snapshot_id>]
 /// in file system names and snapshot ids are hex-ish, so the split is
 /// unambiguous); the mount path ends at the next `:` (file system names and
 /// absolute mount paths never contain one); the optional trailing segment is
-/// a comma-separated option list drawn from `ro` and `prefetch`. A snapshot
+/// a comma-separated option list drawn from `ro`, `prefetch`, and
+/// `source_path=/dir` (default `/`). A snapshot
 /// pin requires `ro`: pinned mounts are read-only, and rejecting the combo
 /// here mirrors the server's 400 so users fail fast offline. The option and
 /// pin keys are added to the wire object only when set: older servers reject
@@ -227,38 +228,47 @@ fn parse_file_system_mounts(raw: &[String]) -> Result<Vec<serde_json::Value>> {
                     "{FILESYSTEM_FLAG_USAGE}, got {entry:?}"
                 )));
             }
-            let mut mount = serde_json::json!({
-                "file_system_id": file_system_id,
-                "mount_path": mount_path,
-            });
-            let mut read_only = false;
+            let mut mount = tensorlake::sandboxes::models::FileSystemMount {
+                file_system_id: file_system_id.to_string(),
+                mount_path: mount_path.to_string(),
+                ..Default::default()
+            };
             if let Some(opts) = opts {
                 for opt in opts.split(',') {
                     match opt {
                         "ro" => {
-                            read_only = true;
-                            mount["read_only"] = serde_json::Value::Bool(true);
+                            mount.read_only = true;
                         }
-                        "prefetch" => mount["prefetch"] = serde_json::Value::Bool(true),
+                        "prefetch" => mount.prefetch = true,
+                        _ if opt.starts_with("source_path=") => {
+                            if mount.source_path.is_some() {
+                                return Err(CliError::usage(format!(
+                                    "duplicate source_path in {entry:?}"
+                                )));
+                            }
+                            let path = &opt["source_path=".len()..];
+                            super::fs::validate_source_path(Some(path))?;
+                            mount.source_path = Some(path.to_string());
+                        }
                         _ => {
                             return Err(CliError::usage(format!(
                                 "unknown --filesystem option {opt:?} in {entry:?}: \
-                                 valid options are `ro` and `prefetch`"
+                                 valid options are `ro`, `prefetch`, and `source_path=/dir`"
                             )));
                         }
                     }
                 }
             }
             if let Some(snapshot_id) = snapshot_id {
-                if !read_only {
+                if !mount.read_only {
                     return Err(CliError::usage(format!(
                         "snapshot pin @{snapshot_id} in {entry:?} requires `ro`: \
                          snapshot-pinned mounts are read-only"
                     )));
                 }
-                mount["snapshot_id"] = serde_json::Value::String(snapshot_id.to_string());
+                mount.snapshot_id = Some(snapshot_id.to_string());
             }
-            Ok(mount)
+            Ok(serde_json::to_value(mount)?)
         })
         .collect()
 }
@@ -1014,5 +1024,41 @@ mod tests {
                 sandbox_id_header: None,
             })
         );
+    }
+
+    #[test]
+    fn parse_file_system_mounts_preserves_independent_subtrees_and_modes() {
+        let mounts = parse_file_system_mounts(&[
+            "data@snap:/mnt/a:ro,prefetch,source_path=/a".to_string(),
+            "data:/mnt/b:source_path=/b with spaces".to_string(),
+            "data:/mnt/root:source_path=/".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(
+            mounts[0],
+            serde_json::json!({
+                "file_system_id": "data", "mount_path": "/mnt/a", "source_path": "/a",
+                "read_only": true, "prefetch": true, "snapshot_id": "snap"
+            })
+        );
+        assert_eq!(mounts[1]["source_path"], "/b with spaces");
+        assert_eq!(mounts[2]["source_path"], "/");
+    }
+
+    #[test]
+    fn parse_file_system_mounts_rejects_invalid_or_duplicate_source_paths() {
+        for options in [
+            "source_path=",
+            "source_path=a",
+            "source_path=/a/../b",
+            "source_path=/a,source_path=/b",
+            "source_path=/a//b",
+            "source_path=/a/",
+        ] {
+            assert!(
+                parse_file_system_mounts(&[format!("data:/mnt/data:{options}")]).is_err(),
+                "{options}"
+            );
+        }
     }
 }
