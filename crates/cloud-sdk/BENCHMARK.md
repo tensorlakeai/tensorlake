@@ -117,3 +117,33 @@ healthy replacement available for reuse: four requests use two TCP connections,
 instead of the three connections observed in the original review probe. The
 quota regression verifies that 20 responses whose `Retry-After` exceeds the
 deadline consume zero retry tokens and leave a subsequent read able to recover.
+
+## Short caller deadlines and public configuration — 2026-10-19
+
+Measured implementation: `7c9f38d1ca609b2f3182a425b463e7bcb9d03369`, using
+`just bench-sdk-resilience` on the same Mac17,6 / Apple M5 Max, 18 logical CPUs,
+48 GiB RAM, Darwin 25.5.0 arm64, Rust 1.98.1 and unoptimized test profile.
+Request measurements exclude DNS.
+
+| Round | Baseline, 1,000 reads (ms) | Resilient, 1,000 reads (ms) |
+| --- | ---: | ---: |
+| 0 | 134.079 | 145.418 |
+| 1 | 129.574 | 143.790 |
+| 2 | 128.480 | 147.027 |
+| 3 | 127.528 | 145.013 |
+| 4 | 127.545 | 144.880 |
+| Mean | 129.441 | 145.226 |
+
+Mean latency was 129.441 → 145.226 microseconds/read (+15.784 microseconds,
+12.2%), corresponding to about 7,726 and 6,886 sequential reads/second.
+Warm local resolution averaged another 15.020 microseconds per lookup;
+platform resolution averaged 117.415 microseconds. This sample is comparable
+to the preceding local measurements and is not a production latency estimate.
+
+Exactly two TCP connections served all 10,020 reads. The benchmark body took
+1.56 seconds; Cargo preparation took 0.36 seconds and is excluded. CPU
+utilization and peak memory were not measured. Additional regression tests
+verify TCP fallback within a 750-millisecond caller deadline, TLS fallback
+within deadlines down to 100 milliseconds, and reuse of one healthy connection
+across nearby caller deadlines. An external-consumer test also verifies the
+public `ReadRetryConfig` export.
