@@ -694,7 +694,9 @@ def build_sandbox_image(
             Image Service instead of a legacy template. Off by default.
         build_args: Dockerfile build args (``--build-arg KEY=VALUE``),
             forwarded to BuildKit and expanded in ``FROM`` references. CAS
-            builds only; a legacy build with build args is rejected.
+            builds only; a non-CAS build with build args is rejected. For an
+            :class:`Image` source, the generated Dockerfile declares these
+            arguments for ``FROM`` and subsequent build operations.
         docker_config_json: Docker config JSON contents for this call. Omit to
             discover local config at entry; pass "{}" to disable discovery.
         verbose: Print progress to stderr. Ignored if ``emit`` is provided.
@@ -737,7 +739,7 @@ def build_sandbox_image(
                     tempfile.TemporaryDirectory(prefix="tl-build-context-")
                 )
             rust_dockerfile_path = str(Path(rust_context_dir) / "Dockerfile")
-            dockerfile_text = image_to_dockerfile(source)
+            dockerfile_text = image_to_dockerfile(source, build_args=build_args)
             if not dockerfile_text.endswith("\n"):
                 dockerfile_text += "\n"
             effective_registered_name = registered_name or source.name
