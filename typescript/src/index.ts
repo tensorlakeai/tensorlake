@@ -24,7 +24,6 @@ export {
 export {
   ImageBuildCancellationOutcome,
   ImageBuildErrorCode,
-  ImageBuildEventType,
   ImageBuildKind,
   ImageBuildPhase,
   ImageBuildStatus,

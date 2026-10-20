@@ -1,5 +1,5 @@
 import * as defaults from "./defaults.js";
-import { enumValue } from "./enum.js";
+import { enumValue, withRaw } from "./enum.js";
 import { SandboxError, SandboxPending, formatErrorDetails } from "./errors.js";
 import type { Traced } from "./traced.js";
 import { releaseNativeHandle } from "./native-worker-client.js";
@@ -63,11 +63,10 @@ function parseSnapshot<T extends CreateSnapshotResponse>(raw: Record<string, unk
   if (!("status" in raw)) {
     throw new SandboxError("Invalid snapshot response: missing status");
   }
-  return {
+  return withRaw({
     ...fromSnakeKeys(raw, "snapshotId") as Record<string, unknown>,
     status: enumValue(SnapshotStatus, raw.status),
-    raw,
-  } as T;
+  } as T, raw);
 }
 
 const GPU_MODELS = new Set<string>([

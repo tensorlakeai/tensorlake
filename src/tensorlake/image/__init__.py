@@ -4,8 +4,6 @@ from .builds import (
     ImageBuildCancelledError,
     ImageBuildError,
     ImageBuildErrorCode,
-    ImageBuildEvent,
-    ImageBuildEventType,
     ImageBuildFailedError,
     ImageBuildHandle,
     ImageBuildInfo,

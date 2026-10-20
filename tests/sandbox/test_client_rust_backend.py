@@ -2156,6 +2156,19 @@ class TestSandboxClientRustBackend(unittest.TestCase):
 
 
 class TestSnapshotStatusCompatibility(unittest.TestCase):
+    def test_diagnostics_do_not_affect_snapshot_equality(self):
+        payload = {
+            "id": "s",
+            "namespace": "n",
+            "sandbox_id": "b",
+            "status": "completed",
+        }
+        a = SnapshotInfo.from_response(payload)
+        b = SnapshotInfo.from_response({**payload, "future": 42})
+        self.assertEqual(a, b)
+        self.assertNotEqual(a.raw, b.raw)
+        self.assertNotIn("raw", a.model_dump())
+
     def test_known_statuses_preserve_enum_values(self):
         for model in (CreateSnapshotResponse, SnapshotInfo):
             for status in SnapshotStatus:

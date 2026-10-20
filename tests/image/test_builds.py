@@ -10,19 +10,16 @@ CAS operations never reach them and they never reach the Image Service build
 operations.
 """
 
-import io
 import json
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import ANY, patch
+from unittest.mock import patch
 
-from tensorlake._enums import ResponseEnum
 from tensorlake._tracing import USER_AGENT
 from tensorlake.image import Image, builds
 from tensorlake.image import sandbox_builder as sbm
-from tensorlake.image._build_enums import normalize_build_event
 from tensorlake.sandbox.models import SnapshotStatus
 
 
@@ -82,243 +79,126 @@ def _native_error(payload: dict) -> Exception:
     return Exception("image_build", None, json.dumps(payload))
 
 
-class TestBuildEnums(unittest.TestCase):
-    def test_response_enums_require_unknown_when_the_class_is_defined(self):
-        with self.assertRaisesRegex(TypeError, "UNKNOWN"):
-
-            class MissingUnknown(ResponseEnum):
-                KNOWN = "known"
-
-    def test_diagnostics_do_not_affect_equality_hashing_or_model_dumps(self):
-        info = builds.ImageBuildInfo.from_dict(_build_json())
-        other = builds.ImageBuildInfo.from_dict(_build_json(future_field="new value"))
-        self.assertEqual(info, other)
-        self.assertEqual(hash(info), hash(other))
-        self.assertEqual(len({info, other}), 1)
-        self.assertNotIn("raw", info.model_dump())
-        self.assertNotIn("raw", json.loads(info.model_dump_json()))
-        self.assertNotEqual(info, info.model_copy(update={"name": "different"}))
-        first = builds.CancelBuildOutcome.from_dict(
-            {"outcome": "cancelled", "build": _build_json()}
-        )
-        second = builds.CancelBuildOutcome.from_dict(
-            {"outcome": "cancelled", "build": _build_json(), "future": 42}
-        )
-        self.assertEqual(first, second)
-        self.assertEqual(hash(first), hash(second))
-        self.assertNotIn("raw", first.model_dump())
-        self.assertNotIn("raw", first.model_dump()["build"])
-
-    def test_enum_constructors_reject_typos_and_response_decoders_accept_future_values(
-        self,
-    ):
+class TestResponseDecoding(unittest.TestCase):
+    def test_wire_enums_are_tolerant_and_enum_construction_is_strict(self):
         for enum in (
             SnapshotStatus,
             builds.ImageBuildStatus,
-            builds.ImageBuildKind,
             builds.ImageBuildPhase,
-            builds.ImageBuildCancellationOutcome,
+            builds.ImageBuildKind,
             builds.ImageBuildErrorCode,
-            builds.ImageBuildEventType,
-        ):
-            for value in ("future_value", None, 123):
-                with self.subTest(enum=enum.__name__, value=value):
-                    with self.assertRaises(ValueError):
-                        enum(value)
-                    self.assertIs(enum.from_response(value), enum.UNKNOWN)
-
-    def test_model_constructors_reject_typos(self):
-        with self.assertRaises(ValueError):
-            builds.ImageBuildInfo(build_id="b", status="runing")
-        with self.assertRaises(ValueError):
-            builds.CancelBuildOutcome(outcome="canceled")
-        with self.assertRaises(ValueError):
-            builds.ImageBuildError("m", code="image_build_inprogress")
-        with self.assertRaises(ValueError):
-            builds.ImageBuildInProgressError("m", active_status="runing")
-
-    def test_known_build_values_are_enum_members(self):
-        for field, enum in (
-            ("status", builds.ImageBuildStatus),
-            ("kind", builds.ImageBuildKind),
-            ("phase", builds.ImageBuildPhase),
+            builds.ImageBuildCancellationOutcome,
         ):
             for member in enum:
-                with self.subTest(field=field, value=member.value):
-                    info = builds.ImageBuildInfo.from_dict(
-                        _build_json(**{field: member.value})
-                    )
-                    self.assertIs(getattr(info, field), member)
-
-    def test_future_build_values_are_unknown_and_raw_is_preserved(self):
-        raw = _build_json(
-            status="future_status", kind="future_kind", phase="future_phase"
-        )
-        info = builds.ImageBuildInfo.from_dict(raw)
-        self.assertIs(info.status, builds.ImageBuildStatus.UNKNOWN)
-        self.assertIs(info.kind, builds.ImageBuildKind.UNKNOWN)
-        self.assertIs(info.phase, builds.ImageBuildPhase.UNKNOWN)
-        self.assertFalse(info.is_terminal)
-        self.assertEqual(info.raw, raw)
-        self.assertEqual(raw["status"], "future_status")
-
-    def test_missing_optional_build_values_remain_absent(self):
-        for raw in ({"build_id": "b", "status": "pending"}, _build_json(kind=None)):
-            info = builds.ImageBuildInfo.from_dict(raw)
+                self.assertIs(enum.from_response(member.value), member)
+            self.assertIs(enum.from_response("future_value"), enum.UNKNOWN)
+            with self.assertRaises(ValueError):
+                enum("future_value")
+        for field, enum in (
+            ("status", builds.ImageBuildStatus),
+            ("phase", builds.ImageBuildPhase),
+            ("kind", builds.ImageBuildKind),
+        ):
+            info = builds.ImageBuildInfo.from_dict(
+                _build_json(**{field: "future_value"})
+            )
+            self.assertIs(getattr(info, field), enum.UNKNOWN)
+            self.assertEqual(info.raw[field], "future_value")
+        for value in (None, ""):
+            info = builds.ImageBuildInfo.from_dict(_build_json(kind=value, phase=value))
             self.assertIsNone(info.kind)
             self.assertIsNone(info.phase)
 
-    def test_cancellation_outcomes_are_enums_and_unknown_is_unconfirmed(self):
-        for member in builds.ImageBuildCancellationOutcome:
-            outcome = builds.CancelBuildOutcome.from_dict({"outcome": member.value})
-            self.assertIs(outcome.outcome, member)
-            self.assertEqual(
-                outcome.confirmed,
-                member
-                in (
-                    builds.ImageBuildCancellationOutcome.CANCELLED,
-                    builds.ImageBuildCancellationOutcome.ALREADY_CANCELLED,
-                    builds.ImageBuildCancellationOutcome.ALREADY_FAILED,
+    def test_diagnostics_do_not_affect_equality_hashing_or_sdk_serialization(self):
+        first = builds.ImageBuildInfo.from_dict(
+            _build_json(status="succeeded", result=_result_json())
+        )
+        second = builds.ImageBuildInfo.from_dict(
+            _build_json(
+                status="succeeded", result=_result_json(), future_field="changed"
+            )
+        )
+        self.assertEqual(first, second)
+        self.assertEqual(hash(first), hash(second))
+        self.assertEqual(len({first, second}), 1)
+        self.assertNotIn("raw", json.loads(json.dumps(first.to_dict())))
+        a = builds.CancelBuildOutcome.from_dict(
+            {"outcome": "cancelled", "build": _build_json()}
+        )
+        b = builds.CancelBuildOutcome.from_dict(
+            {"outcome": "cancelled", "build": _build_json(future_field=42)}
+        )
+        self.assertEqual(a, b)
+        self.assertEqual(hash(a), hash(b))
+        dumped = json.loads(json.dumps(a.to_dict()))
+        self.assertNotIn("raw", dumped)
+        self.assertNotIn("raw", dumped["build"])
+
+    def test_errors_are_decoded_once_with_original_diagnostics(self):
+        for code in builds.ImageBuildErrorCode:
+            error = builds._typed_build_error(
+                _native_error({"code": code.value, "message": "m"})
+            )
+            self.assertIs(error.code, code)
+        for code in (None, "future_code"):
+            raw = {
+                "code": code,
+                "message": "m",
+                "active_kind": "future_kind",
+                "active_status": "future_status",
+            }
+            error = builds._typed_build_error(_native_error(raw))
+            self.assertEqual(error.raw, raw)
+            self.assertIs(
+                error.code,
+                (
+                    builds.ImageBuildErrorCode.INTERNAL
+                    if code is None
+                    else builds.ImageBuildErrorCode.UNKNOWN
                 ),
             )
+            self.assertIs(error.details["active_kind"], builds.ImageBuildKind.UNKNOWN)
+            self.assertIs(
+                error.details["active_status"], builds.ImageBuildStatus.UNKNOWN
+            )
+        for code in ("failed", "cancelled"):
+            raw = {"code": code, "message": "m", "info": _build_json(status=None)}
+            error = builds._typed_build_error(_native_error(raw))
+            self.assertIs(error.info.status, builds.ImageBuildStatus.UNKNOWN)
+            self.assertEqual(error.raw, raw)
+        for info in ("bad", [], {"attempt_no": "bad"}):
+            error = builds._typed_build_error(
+                _native_error({"code": "failed", "message": "m", "info": info})
+            )
+            self.assertIsInstance(error, builds.ImageBuildFailedError)
+            self.assertIsNone(error.info)
+
+    def test_unknown_cancellation_cannot_confirm(self):
         outcome = builds.CancelBuildOutcome.from_dict({"outcome": "future_outcome"})
         self.assertIs(outcome.outcome, builds.ImageBuildCancellationOutcome.UNKNOWN)
         self.assertFalse(outcome.confirmed)
-        self.assertEqual(outcome.raw, {"outcome": "future_outcome"})
-
-    def test_error_codes_are_enums_and_unknown_code_keeps_raw_details(self):
-        for member in builds.ImageBuildErrorCode:
-            error = builds._typed_build_error(
-                _native_error({"code": member.value, "message": "build error"})
-            )
-            self.assertIs(error.code, member)
-            self.assertIs(error.details["code"], member)
-        error = builds._typed_build_error(
-            _native_error({"code": "future_code", "message": "build error"})
-        )
-        self.assertIs(type(error), builds.ImageBuildError)
-        self.assertIs(error.code, builds.ImageBuildErrorCode.UNKNOWN)
-        self.assertEqual(error.raw_details["code"], "future_code")
-
-    def test_missing_or_null_error_codes_keep_the_internal_default(self):
-        for fields in ({}, {"code": None}, {"code": ""}):
-            with self.subTest(fields=fields):
-                payload = {"message": "m", **fields}
-                error = builds._typed_build_error(_native_error(payload))
-                self.assertIs(error.code, builds.ImageBuildErrorCode.INTERNAL)
-                self.assertEqual(error.raw_details, payload)
-
-    def test_nested_error_values_are_normalized(self):
-        payload = {
-            "code": "image_build_in_progress",
-            "message": "conflict",
-            "active_kind": "future_kind",
-            "active_status": "future_status",
-            "info": _build_json(status="future_status"),
-        }
-        error = builds._typed_build_error(_native_error(payload))
-        self.assertIsInstance(error, builds.ImageBuildInProgressError)
-        self.assertIs(error.active_kind, builds.ImageBuildKind.UNKNOWN)
-        self.assertIs(error.active_status, builds.ImageBuildStatus.UNKNOWN)
-        self.assertIs(error.details["info"].status, builds.ImageBuildStatus.UNKNOWN)
-        self.assertEqual(error.raw_details, payload)
-        absent = builds.ImageBuildInProgressError("conflict")
-        self.assertIsNone(absent.active_kind)
-        self.assertIsNone(absent.active_status)
-
-    def test_unknown_interruption_cannot_confirm_cancellation(self):
-        error = builds._typed_build_error(
-            _native_error(
-                {
-                    "code": "interrupted",
-                    "message": "interrupted",
-                    "outcome": "future_outcome",
-                    "confirmed": True,
-                }
-            )
-        )
-        self.assertIs(error.outcome, builds.ImageBuildCancellationOutcome.UNKNOWN)
-        self.assertFalse(error.confirmed)
-        self.assertFalse(error.details["confirmed"])
-        self.assertEqual(error.raw_details["outcome"], "future_outcome")
-        self.assertTrue(error.raw_details["confirmed"])
-        self.assertIs(
-            builds.ImageBuildInterruptedError("interrupted").outcome,
-            builds.ImageBuildCancellationOutcome.UNCONFIRMED,
-        )
-
-    def test_null_status_does_not_replace_typed_failure_or_cancellation(self):
-        for code, cls in (
-            ("failed", builds.ImageBuildFailedError),
-            ("cancelled", builds.ImageBuildCancelledError),
-        ):
-            with self.subTest(code=code):
-                payload = {
-                    "code": code,
-                    "message": "m",
-                    "info": _build_json(status=None),
-                }
-                error = builds._typed_build_error(_native_error(payload))
-                self.assertIsInstance(error, cls)
-                self.assertIs(error.info.status, builds.ImageBuildStatus.UNKNOWN)
-                self.assertIsNone(error.info.raw["status"])
-                self.assertEqual(error.raw_details, payload)
-
-    def test_malformed_info_does_not_leak_or_replace_typed_errors(self):
-        for info in ("not-a-dict", [], None, {"attempt_no": "not-a-number"}):
-            with self.subTest(info=info):
-                payload = {"code": "failed", "message": "m", "info": info}
-                error = builds._typed_build_error(_native_error(payload))
-                self.assertIsInstance(error, builds.ImageBuildFailedError)
-                self.assertIsNone(error.info)
-                self.assertIsNone(error.details["info"])
-                self.assertEqual(error.raw_details, payload)
-                self.assertIsNone(builds.ImageBuildFailedError("m", info=info).info)
-        info = builds.ImageBuildInfo.from_dict(_build_json())
-        self.assertIs(builds.ImageBuildFailedError("m", info=info).info, info)
-
-    def test_confirmation_requires_an_explicit_confirmed_outcome(self):
         for fields in ({}, {"outcome": None}, {"outcome": "future_outcome"}):
-            with self.subTest(fields=fields):
-                error = builds._typed_build_error(
-                    _native_error(
-                        {
-                            "code": "interrupted",
-                            "message": "m",
-                            "confirmed": True,
-                            **fields,
-                        }
-                    )
+            error = builds._typed_build_error(
+                _native_error(
+                    {"code": "interrupted", "message": "m", "confirmed": True, **fields}
                 )
-                self.assertFalse(error.confirmed)
-                self.assertFalse(error.details["confirmed"])
-                self.assertTrue(error.raw_details["confirmed"])
-                event = normalize_build_event(
-                    {"type": "interrupted", "confirmed": True, **fields}
-                )
-                self.assertFalse(event["confirmed"])
-                self.assertTrue(event["raw"]["confirmed"])
-        error = builds.ImageBuildInterruptedError("m", confirmed=True)
-        self.assertFalse(error.confirmed)
-        self.assertFalse(error.details["confirmed"])
+            )
+            self.assertFalse(error.confirmed)
+            self.assertFalse(error.details["confirmed"])
+            self.assertTrue(error.raw["confirmed"])
 
-    def test_wait_normalizes_callback_enums_without_mutating_native_events(self):
-        events = []
+    def test_events_remain_plain_dicts_with_the_server_spelling(self):
         raw = {
             "type": "future_event",
             "status": "future_status",
             "phase": "future_phase",
             "outcome": "future_outcome",
             "confirmed": True,
-            "future_field": 42,
         }
+        events = []
 
         def wait_native(*args):
-            emit = args[-1]
-            for member in builds.ImageBuildEventType:
-                emit({"type": member.value})
-            emit(raw)
-            emit({"type": "build_progress", "phase": None})
+            args[-1](raw)
             return json.dumps(_result_json())
 
         with (
@@ -326,94 +206,60 @@ class TestBuildEnums(unittest.TestCase):
             patch.object(builds, "_rust_wait_image_build", side_effect=wait_native),
         ):
             builds.wait_build("build-1", emit=events.append)
-        for member, event in zip(builds.ImageBuildEventType, events):
-            self.assertIs(event["type"], member)
-        future = events[-2]
-        self.assertIs(future["type"], builds.ImageBuildEventType.UNKNOWN)
-        self.assertIs(future["status"], builds.ImageBuildStatus.UNKNOWN)
-        self.assertIs(future["phase"], builds.ImageBuildPhase.UNKNOWN)
-        self.assertIs(future["outcome"], builds.ImageBuildCancellationOutcome.UNKNOWN)
-        self.assertFalse(future["confirmed"])
-        self.assertEqual(future["future_field"], 42)
-        self.assertEqual(future["raw"], raw)
-        self.assertNotIn("raw", future["raw"])
-        self.assertEqual(raw["type"], "future_event")
-        self.assertTrue(raw["confirmed"])
-        self.assertIsNone(events[-1]["phase"])
-        self.assertNotIn("status", events[-1])
+        self.assertEqual(events, [raw])
+        self.assertIs(type(events[0]["type"]), str)
+        self.assertNotIn("raw", events[0])
 
-    def test_cas_import_normalizes_callback_values(self):
-        events = []
-
-        def import_native(*args, emit, **kwargs):
-            emit({"type": "build_progress", "status": "future_status"})
-            return json.dumps(_result_json())
-
-        with (
-            patch.object(sbm, "_build_context_from_env", return_value=_ctx()),
-            patch.object(sbm, "_rust_import_sandbox_image", side_effect=import_native),
-        ):
-            sbm.import_sandbox_image("ubuntu:24.04", cas=True, emit=events.append)
-        self.assertIs(events[0]["type"], builds.ImageBuildEventType.STATUS)
-        self.assertIs(events[1]["status"], builds.ImageBuildStatus.UNKNOWN)
-        self.assertIs(events[-1]["type"], builds.ImageBuildEventType.IMAGE_REGISTERED)
-
-    def test_legacy_event_stream_is_unchanged_and_cas_events_are_decoded_once(self):
-        for api, source, native in (
-            (
-                sbm.build_sandbox_image,
-                Image(name="img", base_image="ubuntu:24.04"),
-                "_rust_build_sandbox_image",
-            ),
-            (sbm.import_sandbox_image, "ubuntu:24.04", "_rust_import_sandbox_image"),
-        ):
-            for cas in (False, True):
-                events = []
-                raw = {"type": "future_event", "status": "future_status"}
-
-                def run_native(*args, emit, **kwargs):
-                    emit({"type": "build_log", "message": "line"})
-                    emit(raw)
-                    return json.dumps(_result_json())
-
-                with (
-                    self.subTest(api=api.__name__, cas=cas),
-                    patch.object(sbm, "_build_context_from_env", return_value=_ctx()),
-                    patch.object(sbm, native, side_effect=run_native),
-                ):
-                    api(source, cas=cas, emit=events.append)
-                    for event in events:
-                        if cas:
-                            self.assertIsInstance(
-                                event["type"], builds.ImageBuildEventType
-                            )
-                            self.assertNotIn("raw", event["raw"])
-                        else:
-                            self.assertIs(type(event["type"]), str)
-                            self.assertNotIn("raw", event)
-                    self.assertEqual(events[-2]["raw"] if cas else events[-2], raw)
-                    if cas:
-                        self.assertIs(
-                            events[-2]["type"], builds.ImageBuildEventType.UNKNOWN
-                        )
-
-    def test_verbose_output_keeps_future_event_type(self):
-        output = io.StringIO()
-        with patch("sys.stderr", output):
-            sbm._stderr_emit(
-                normalize_build_event({"type": "future_event", "message": "diagnosis"})
-            )
-        self.assertEqual(output.getvalue(), "[future_event] diagnosis\n")
-
-    def test_silent_builds_do_not_decode_events(self):
+    def test_wait_keeps_kwargs_metadata_and_updates_diagnostics(self):
+        info = builds.ImageBuildInfo(
+            build_id="build-1",
+            status=builds.ImageBuildStatus.RUNNING,
+            kind=builds.ImageBuildKind.IMPORT,
+            name="img",
+            created_at_ms=123,
+        )
+        handle = builds.ImageBuildHandle(
+            info, _credentials=("http://localhost", "k", "default")
+        )
         with patch.object(
-            sbm,
-            "normalize_build_event",
-            side_effect=AssertionError("unexpected decoding"),
+            builds, "_rust_wait_image_build", return_value=json.dumps(_result_json())
         ):
-            emit = builds._resolve_emit(None, False)
-            self.assertIs(emit, sbm._noop_emit)
-            emit({"type": "build_log", "message": "line"})
+            result = handle.wait()
+        self.assertEqual(handle.build_id, "build-1")
+        self.assertEqual(handle.info.name, info.name)
+        self.assertEqual(handle.info.kind, info.kind)
+        self.assertEqual(handle.info.created_at_ms, info.created_at_ms)
+        self.assertIs(handle.info.status, builds.ImageBuildStatus.SUCCEEDED)
+        self.assertEqual(
+            handle.info.raw, {"status": "succeeded", "result": _result_json()}
+        )
+        self.assertEqual(handle.info.result, result)
+        hash(handle.info)
+
+    def test_all_native_response_boundaries_keep_malformed_bodies_typed(self):
+        handle = builds.ImageBuildHandle(
+            builds.ImageBuildInfo.from_dict(_build_json()),
+            _credentials=("http://localhost", "k", "default"),
+        )
+        for native, invoke in (
+            ("_rust_get_image_build", lambda: builds.get_build("b")),
+            ("_rust_get_image_build", handle.refresh),
+            (
+                "_rust_start_image_build",
+                lambda: builds.start_build(Image(name="img", base_image="ubuntu")),
+            ),
+            ("_rust_start_image_import", lambda: builds.start_import("ubuntu")),
+            ("_rust_wait_image_build", handle.wait),
+            ("_rust_wait_image_build", lambda: builds.wait_build("b")),
+            ("_rust_cancel_image_build", lambda: builds.cancel_build("b")),
+        ):
+            with (
+                self.subTest(native=native, invoke=invoke),
+                patch.object(builds, "_build_context_from_env", return_value=_ctx()),
+                patch.object(builds, native, return_value="null"),
+                self.assertRaises(builds.ImageBuildError),
+            ):
+                invoke()
 
 
 class TestStartBuild(unittest.TestCase):
@@ -459,24 +305,14 @@ class TestStartBuild(unittest.TestCase):
             None,
             None,
             {"A": "1"},
-            ANY,
+            events.append,
             "{}",
         )
         self.assertEqual(handle.build_id, "build-1")
         self.assertEqual(handle.client_request_id, "rid-generated")
         self.assertEqual(handle.info.status, "pending")
         self.assertEqual(handle.info.raw["future_field"], {"ignored": True})
-        self.assertIn(
-            {
-                "type": builds.ImageBuildEventType.STATUS,
-                "message": "Building image 'img'...",
-                "raw": {
-                    "type": builds.ImageBuildEventType.STATUS,
-                    "message": "Building image 'img'...",
-                },
-            },
-            events,
-        )
+        self.assertIn({"type": "status", "message": "Building image 'img'..."}, events)
 
     def test_start_build_renders_an_image_with_an_empty_context(self):
         image = Image(name="cas-img", base_image="python:3.12-slim")
@@ -517,7 +353,7 @@ class TestStartBuild(unittest.TestCase):
             "default",
             False,
             USER_AGENT,
-            ANY,
+            builds._noop_emit,
             "{}",
         )
         self.assertEqual(handle.build_id, "build-1")
@@ -561,72 +397,6 @@ class TestStartBuild(unittest.TestCase):
 
 
 class TestGetWaitCancel(unittest.TestCase):
-    def test_malformed_native_responses_remain_build_errors(self):
-        info = builds.ImageBuildInfo.from_dict(_build_json())
-        handle = builds.ImageBuildHandle(
-            info, _credentials=("https://api.tensorlake.test", "k", "default")
-        )
-        malformed = _build_json(name={"future": "shape"})
-        for native, invoke, response in (
-            ("_rust_get_image_build", lambda: builds.get_build("build-1"), malformed),
-            ("_rust_get_image_build", handle.refresh, malformed),
-            (
-                "_rust_start_image_build",
-                lambda: builds.start_build(Image(name="img", base_image="ubuntu")),
-                {"build": malformed},
-            ),
-            (
-                "_rust_start_image_import",
-                lambda: builds.start_import("ubuntu"),
-                {"build": malformed},
-            ),
-            ("_rust_wait_image_build", handle.wait, []),
-            ("_rust_wait_image_build", lambda: builds.wait_build("build-1"), []),
-            ("_rust_cancel_image_build", lambda: builds.cancel_build("build-1"), []),
-        ):
-            body = json.dumps(response)
-            with (
-                self.subTest(operation=invoke, native=native),
-                patch.object(builds, "_build_context_from_env", return_value=_ctx()),
-                patch.object(builds, native, return_value=body),
-                self.assertRaises(builds.ImageBuildError) as raised,
-            ):
-                invoke()
-            self.assertIs(raised.exception.code, builds.ImageBuildErrorCode.SERVICE)
-            self.assertEqual(raised.exception.raw_details["response"], body)
-            self.assertIs(handle.info, info)
-
-    def test_wait_preserves_kwargs_constructed_handle_metadata(self):
-        for raw in ({}, {"name": {"future": "shape"}}):
-            with self.subTest(raw=raw):
-                info = builds.ImageBuildInfo(
-                    build_id="build-1",
-                    status=builds.ImageBuildStatus.RUNNING,
-                    kind=builds.ImageBuildKind.DOCKERFILE,
-                    name="img",
-                    attempt_no=3,
-                    created_at_ms=123,
-                    updated_at_ms=456,
-                    raw=raw,
-                )
-                handle = builds.ImageBuildHandle(
-                    info, _credentials=("https://api.tensorlake.test", "k", "default")
-                )
-                with patch.object(
-                    builds,
-                    "_rust_wait_image_build",
-                    return_value=json.dumps(_result_json()),
-                ):
-                    result = handle.wait()
-                self.assertEqual(handle.build_id, "build-1")
-                self.assertEqual(
-                    handle.info.model_dump(exclude={"status", "result"}),
-                    info.model_dump(exclude={"status", "result"}),
-                )
-                self.assertIs(handle.info.status, builds.ImageBuildStatus.SUCCEEDED)
-                self.assertEqual(handle.info.result, result)
-                self.assertEqual(info.raw, raw)
-
     def test_get_build_returns_a_handle_and_refreshes(self):
         with (
             patch.object(builds, "_build_context_from_env", return_value=_ctx()),
@@ -720,7 +490,7 @@ class TestGetWaitCancel(unittest.TestCase):
             "default",
             False,
             USER_AGENT,
-            ANY,
+            events.append,
         )
         self.assertEqual(result["id"], "image_ok")
         self.assertEqual(
@@ -756,7 +526,7 @@ class TestGetWaitCancel(unittest.TestCase):
             looked_up = sbm.find_sandbox_image_by_name("img")
             self.assertEqual(handle.info.result, looked_up)
             self.assertEqual(handle.wait(), looked_up)
-            self.assertEqual(handle.info.raw["result"], looked_up)
+            self.assertEqual(handle.info.raw["result"], _result_json())
         self.assertEqual(looked_up["snapshot_id"], "snap-cas")
         self.assertEqual(looked_up["snapshot_uri"], "snapshot://snap-cas")
         self.assertEqual(looked_up["rootfs_disk_bytes"], 10 * 1024**3)
@@ -826,7 +596,10 @@ class TestGetWaitCancel(unittest.TestCase):
                 self.assertEqual(raised.exception.build_id, "build-1")
                 self.assertEqual(raised.exception.code, payload["code"])
         failed = builds.ImageBuildFailedError(
-            "m", build_id="b", error="RUN exited 1", info=_build_json(status="failed")
+            "m",
+            build_id="b",
+            error="RUN exited 1",
+            info=builds.ImageBuildInfo.from_dict(_build_json(status="failed")),
         )
         self.assertEqual(failed.error, "RUN exited 1")
         self.assertEqual(failed.info.status, "failed")

@@ -394,6 +394,18 @@ class TestBuildOperationsNative(unittest.TestCase):
             self.assertFalse(outcome.confirmed)
             self.assertIs(outcome.build.status, builds.ImageBuildStatus.UNKNOWN)
 
+    def test_missing_optional_kind_from_native_is_absent(self):
+        with ScriptedService() as service, _env():
+            record = _build()
+            record.pop("kind")
+            service.handlers[("GET", "/images/v4/builds/build-1")] = (200, record)
+            with patch.object(
+                builds, "_build_context_from_env", return_value=self._ctx(service.url)
+            ):
+                info = builds.get_build("build-1").info
+            self.assertIsNone(info.kind)
+            self.assertEqual(info.raw["kind"], "")
+
     def test_upload_failures_never_expose_the_capability_url(self):
         """The context-upload capability is a signed URL. A storage error
         body that echoes it and a transport error that carries it both

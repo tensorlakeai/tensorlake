@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { isDeepStrictEqual } from "node:util";
 import {
   RemoteAPIError,
   SandboxError,
@@ -1826,6 +1827,23 @@ describe("SandboxClient", () => {
   });
 
   describe("snapshots", () => {
+    it("omits diagnostic raw from snapshot equality and serialization", async () => {
+      const raw = { id: "s", namespace: "n", sandbox_id: "b", status: "future_one" };
+      const getSnapshot = vi.fn()
+        .mockResolvedValueOnce({ traceId: "t", json: JSON.stringify(raw) })
+        .mockResolvedValueOnce({ traceId: "t", json: JSON.stringify({ ...raw, status: "future_two" }) });
+      installNativeStub({ client: { getSnapshot } });
+      const client = SandboxClient.forLocalhost();
+      try {
+        const a = await client.getSnapshot("s");
+        const b = await client.getSnapshot("s");
+        // SnapshotInfo carries known fields; diagnostic raw is non-enumerable.
+        expect(Object.keys(a)).not.toContain("raw");
+        expect(JSON.parse(JSON.stringify(a))).not.toHaveProperty("raw");
+        expect(a.raw).not.toEqual(b.raw);
+        expect(isDeepStrictEqual(a, b)).toBe(true);
+      } finally { client.close(); }
+    });
     it.each([...Object.values(SnapshotStatus), "future_status"])(
       "normalizes snapshot status %s through create, get and list",
       async (status) => {
@@ -1843,7 +1861,7 @@ describe("SandboxClient", () => {
         const snapshot = await client.getSnapshot("snap-1");
         expect(snapshot.status).toBe(expected);
         expect(snapshot.raw).toEqual(info);
-        expect(JSON.parse(JSON.stringify(snapshot)).raw.status).toBe(status);
+        expect(JSON.parse(JSON.stringify(snapshot))).not.toHaveProperty("raw");
         expect(snapshot.traceId).toBe("get-trace");
         const snapshots = await client.listSnapshots();
         expect(snapshots[0]?.status).toBe(expected);

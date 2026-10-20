@@ -8,13 +8,7 @@ export function enumValue<E extends Record<string, string> & { UNKNOWN: string }
     : values.UNKNOWN as E[keyof E];
 }
 
-/** Validate values supplied by SDK callers without accepting typos. */
-export function requireEnumValue<E extends Record<string, string>>(
-  values: E,
-  value: unknown,
-): E[keyof E] {
-  if (typeof value === "string" && Object.values(values).includes(value)) {
-    return value as E[keyof E];
-  }
-  throw new TypeError(`Invalid enum value: ${String(value)}`);
+/** Diagnostic data is deliberately invisible to equality and JSON serialization. */
+export function withRaw<T extends object>(value: T, raw: Record<string, unknown>): T & { readonly raw: Record<string, unknown> } {
+  return Object.defineProperty(value, "raw", { value: raw, enumerable: false, configurable: true }) as T & { readonly raw: Record<string, unknown> };
 }

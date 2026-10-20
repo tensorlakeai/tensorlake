@@ -41,7 +41,6 @@ from typing import Any, Callable
 from tensorlake._tracing import USER_AGENT
 from tensorlake.cli._common import Context
 
-from ._build_enums import normalize_build_event
 from ._dockerfile import image_to_dockerfile
 from .image import Image, _ImageBuildOperation, _ImageBuildOperationType
 from .utils import dockerfile_content
@@ -86,8 +85,6 @@ def _stderr_emit(obj: dict) -> None:
 
     msg = obj.get("message") or ""
     event_type = obj.get("type", "")
-    if event_type == "unknown":
-        event_type = obj.get("raw", {}).get("type", event_type)
     if event_type == "build_log":
         stream = obj.get("stream", "stdout")
         print(f"[{stream}] {msg}", file=sys.stderr)
@@ -258,8 +255,6 @@ def _run_rust_image_create(
     ctx, token = _resolve_build_credentials(allow_pat=allow_pat)
     use_explicit_scope = allow_pat and ctx.api_key is None
 
-    if cas:
-        emit = _forwarder(emit, cas=True)
     emit({"type": "status", "message": f"Building image '{registered_name}'..."})
 
     try:
@@ -283,7 +278,7 @@ def _run_rust_image_create(
             context_dir,
             cas=cas,
             build_args=build_args,
-            emit=emit if cas else _forwarder(emit),
+            emit=_forwarder(emit),
             docker_config_json=docker_config_json,
         )
     except Exception as exc:
@@ -314,8 +309,6 @@ def _run_rust_image_import(
     ctx, token = _resolve_build_credentials(allow_pat=allow_pat)
     use_explicit_scope = allow_pat and ctx.api_key is None
 
-    if cas:
-        emit = _forwarder(emit, cas=True)
     emit(
         {
             "type": "status",
@@ -343,7 +336,7 @@ def _run_rust_image_import(
             USER_AGENT,
             docker_compat,
             cas=cas,
-            emit=emit if cas else _forwarder(emit),
+            emit=_forwarder(emit),
             docker_config_json=docker_config_json,
         )
     except Exception as exc:
@@ -376,12 +369,9 @@ def _resolve_build_credentials(*, allow_pat: bool = False) -> tuple[Context, str
     return ctx, token
 
 
-def _forwarder(emit: EmitFn, *, cas: bool = False) -> EmitFn:
-    if emit is _noop_emit:
-        return emit
-
+def _forwarder(emit: EmitFn) -> EmitFn:
     def forward_event(event: dict) -> None:
-        emit(normalize_build_event(event) if cas else dict(event))
+        emit(dict(event))
 
     return forward_event
 

@@ -7,7 +7,6 @@ import { Image, ImageBuildOperationType, dockerfileContent } from "./image.js";
 import type { ImageBuildOperation } from "./image.js";
 import { loadNative } from "./native-binding.js";
 import { __runWithInterrupt } from "./image-builds.js";
-import { normalizeBuildEvent } from "./image-build-enums.js";
 
 /**
  * Sandbox-image build engine.
@@ -339,11 +338,7 @@ function noopEmit(_event: Record<string, unknown>): void {}
 
 function stderrEmit(event: Record<string, unknown>): void {
   const message = typeof event.message === "string" ? event.message : "";
-  let type = typeof event.type === "string" ? event.type : "";
-  if (type === "unknown") {
-    const raw = event.raw as Record<string, unknown> | undefined;
-    if (typeof raw?.type === "string") type = raw.type;
-  }
+  const type = typeof event.type === "string" ? event.type : "";
   if (type === "build_log") {
     const stream = typeof event.stream === "string" ? event.stream : "stdout";
     process.stderr.write(`[${stream}] ${message}\n`);
@@ -373,13 +368,6 @@ function eventToEmitDict(event: NativeBindingEvent): Record<string, unknown> {
   if (event.outcome != null) out.outcome = event.outcome;
   if (event.confirmed != null) out.confirmed = event.confirmed;
   return out;
-}
-
-function makeImageEmitter(options: { cas?: boolean; verbose?: boolean }, deps: CreateSandboxImageDeps) {
-  const emit = deps.emit ?? (options.verbose ? stderrEmit : noopEmit);
-  return options.cas && emit !== noopEmit
-    ? (event: Record<string, unknown>) => emit(normalizeBuildEvent(event))
-    : emit;
 }
 
 /**
@@ -472,7 +460,7 @@ export async function createSandboxImage(
   options: CreateSandboxImageOptions = {},
   deps: CreateSandboxImageDeps = {},
 ): Promise<Record<string, unknown>> {
-  const emit = makeImageEmitter(options, deps);
+  const emit = deps.emit ?? (options.verbose ? stderrEmit : noopEmit);
   const context = buildContextFromEnv();
 
   let dockerfilePath: string;
@@ -586,7 +574,6 @@ export async function createSandboxImage(
       buildArgs: options.buildArgs,
     };
     const forward = (event: NativeBindingEvent) => {
-      if (emit === noopEmit) return;
       try {
         emit(eventToEmitDict(event));
       } catch (error) {
@@ -643,7 +630,7 @@ export async function importSandboxImage(
   options: ImportSandboxImageOptions = {},
   deps: CreateSandboxImageDeps = {},
 ): Promise<Record<string, unknown>> {
-  const emit = makeImageEmitter(options, deps);
+  const emit = deps.emit ?? (options.verbose ? stderrEmit : noopEmit);
 
   if (typeof imageReference !== "string" || imageReference.trim().length === 0) {
     throw new Error("image reference to import must not be empty");
@@ -711,7 +698,6 @@ export async function importSandboxImage(
     cas: options.cas ?? false,
   };
   const forward = (event: NativeBindingEvent) => {
-    if (emit === noopEmit) return;
     try {
       emit(eventToEmitDict(event));
     } catch (error) {
