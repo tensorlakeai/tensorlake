@@ -68,12 +68,13 @@ address, so an HTTP/2 retry cannot silently reuse the failed peer's multiplexed 
 The URL hostname, TLS SNI, certificate verification, credentials, scope headers,
 redirect policy and middleware are preserved.
 
-Transport failure retires that pool from future use and deprioritizes the
-address for ten seconds. Existing in-flight requests retain their own handles
-and deadlines. If every address is suspect, the client still makes a bounded
-attempt; it never disables every endpoint. Successful addresses continue to
-reuse their pools. Each shared client retains at most 32 pools and removes
-pools unused for 60 seconds.
+Transport failure retires that specific pool from future use and deprioritizes
+the address for ten seconds. Late failures from an already retired pool cannot
+evict a replacement pool or extend the address's suspect interval. Existing
+in-flight requests retain their own handles and deadlines. If every address is
+suspect, the client still makes a bounded attempt; it never disables every
+endpoint. Successful addresses continue to reuse their pools. Each shared
+client retains at most 32 pools and removes pools unused for 60 seconds.
 
 System HTTP proxy settings remain in force. A forwarding proxy controls its
 upstream DNS and connections, so selecting an origin address cannot guarantee
@@ -84,7 +85,9 @@ endpoint, not a verified peer beyond a proxy or redirect.
 A budget shared by cloned clients allows a burst of 20 retries, replenished by
 one token per successful read and one token per second. Initial requests do not
 consume retry tokens. Cancellation drops the operation without launching
-background retries.
+background retries. A token is charged only when a retry starts after backoff
+and a deadline check; an unusable `Retry-After` or a cancelled wait consumes no
+quota.
 
 `SdkError::ReadRetryExhausted` marks a completed retry sequence, preventing the
 existing language-binding retry loops from multiplying attempts. The bindings

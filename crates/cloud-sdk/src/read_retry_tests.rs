@@ -412,6 +412,150 @@ async fn successful_pool_is_not_closed_when_another_address_fails() {
 }
 
 #[tokio::test]
+async fn late_old_pool_failure_preserves_replacement_pool() {
+    let pki = Pki::new(true);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let connections = Arc::new(AtomicUsize::new(0));
+    let requests = Arc::new(AtomicUsize::new(0));
+    let release = Arc::new([Notify::new(), Notify::new()]);
+    let (seen_tx, mut seen_rx) = tokio::sync::mpsc::unbounded_channel();
+    let acceptor = pki.acceptor.clone();
+    let server_connections = connections.clone();
+    let server_requests = requests.clone();
+    let server_release = release.clone();
+    let task = tokio::spawn(async move {
+        let mut tasks = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                connection = listener.accept() => {
+                    let (socket, _) = connection.unwrap();
+                    server_connections.fetch_add(1, Ordering::SeqCst);
+                    let acceptor = acceptor.clone();
+                    let requests = server_requests.clone();
+                    let release = server_release.clone();
+                    let seen_tx = seen_tx.clone();
+                    tasks.spawn(async move {
+                        let stream = acceptor.accept(socket).await.unwrap();
+                        let service = service_fn(move |_: hyper::Request<hyper::body::Incoming>| {
+                            let requests = requests.clone();
+                            let release = release.clone();
+                            let seen_tx = seen_tx.clone();
+                            async move {
+                                let n = requests.fetch_add(1, Ordering::SeqCst);
+                                seen_tx.send(n).unwrap();
+                                let mut response = HyperResponse::builder();
+                                if let Some(gate) = release.get(n) {
+                                    // Both requests share the first HTTP/2 connection.
+                                    // Release their failures independently so the second
+                                    // arrives only after a healthy pool has replaced it.
+                                    gate.notified().await;
+                                    response = response.header("content-length", 1000);
+                                }
+                                Ok::<_, Infallible>(response.body(Full::new(Bytes::from_static(br#"{"ok":true}"#))).unwrap())
+                            }
+                        });
+                        let _ = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+                            .serve_connection(TokioIo::new(stream), service).await;
+                    });
+                }
+                _ = tasks.join_next(), if !tasks.is_empty() => {}
+            }
+        }
+    });
+    let target = Server {
+        address,
+        requests,
+        connections,
+        task,
+    };
+    let mut client = client(&pki, vec![address]);
+    Arc::get_mut(&mut client.reads).unwrap().config = ReadRetryConfig {
+        max_attempts: 1,
+        attempt_timeout: Duration::from_secs(10),
+        total_timeout: Duration::from_secs(10),
+    };
+    let first_client = client.clone();
+    let first = tokio::spawn(async move { read(&first_client).await });
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), seen_rx.recv())
+            .await
+            .unwrap(),
+        Some(0),
+    );
+    let second_client = client.clone();
+    let second = tokio::spawn(async move { read(&second_client).await });
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), seen_rx.recv())
+            .await
+            .unwrap(),
+        Some(1),
+    );
+    assert_eq!(target.connections.load(Ordering::SeqCst), 1);
+
+    release[0].notify_one();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), first)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err()
+    );
+    assert!(read(&client).await.unwrap().ok);
+    assert_eq!(target.connections.load(Ordering::SeqCst), 2);
+    assert!(
+        !second.is_finished(),
+        "the old pool still has an in-flight request"
+    );
+    let suspect_until = client.reads.state.lock().unwrap().suspect[0].1;
+
+    release[1].notify_one();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), second)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err()
+    );
+    assert_eq!(
+        client.reads.state.lock().unwrap().suspect[0].1,
+        suspect_until,
+        "a late failure must not extend the replacement pool's suspect interval"
+    );
+    assert!(read(&client).await.unwrap().ok);
+    assert_eq!(
+        target.connections.load(Ordering::SeqCst),
+        2,
+        "a late failure must not evict the healthy replacement pool"
+    );
+}
+
+#[tokio::test]
+async fn unscheduled_retries_do_not_exhaust_shared_budget() {
+    let pki = Pki::new(true);
+    let throttled = server(&pki, Behavior::RetryAfter).await;
+    let client = client(&pki, vec![throttled.address]);
+    for _ in 0..20 {
+        assert!(read(&client).await.is_err());
+    }
+    assert_eq!(
+        throttled.requests.load(Ordering::SeqCst),
+        20,
+        "Retry-After exceeds the deadline, so no retries should be sent"
+    );
+    assert_eq!(
+        client.reads.state.lock().unwrap().tokens,
+        RETRY_CAPACITY,
+        "unsent retries must leave the shared quota intact"
+    );
+
+    let recovering = server(&pki, Behavior::UndeliveredOnce).await;
+    client.reads.test_options.lock().unwrap().addresses = Some(vec![recovering.address]);
+    assert!(read(&client).await.unwrap().ok);
+    assert_eq!(recovering.requests.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
 async fn mutation_with_an_ambiguous_timeout_is_sent_once() {
     use tokio::io::AsyncReadExt;
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

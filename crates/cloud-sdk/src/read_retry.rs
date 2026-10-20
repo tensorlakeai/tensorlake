@@ -59,7 +59,7 @@ struct Endpoint {
 
 struct Pool {
     endpoint: Endpoint,
-    client: ClientWithMiddleware,
+    client: Arc<ClientWithMiddleware>,
     used_at: Instant,
 }
 
@@ -293,7 +293,7 @@ impl ReadTransport {
         }
     }
 
-    fn pool(&self, endpoint: &Endpoint, host: &str) -> Result<ClientWithMiddleware, SdkError> {
+    fn pool(&self, endpoint: &Endpoint, host: &str) -> Result<Arc<ClientWithMiddleware>, SdkError> {
         let mut state = self.state.lock().unwrap();
         state
             .pools
@@ -329,7 +329,7 @@ impl ReadTransport {
         for middleware in &self.middlewares {
             builder = builder.with_arc(middleware.clone());
         }
-        let client = builder.build();
+        let client = Arc::new(builder.build());
         if state.pools.len() >= MAX_POOLS {
             let oldest = state
                 .pools
@@ -348,11 +348,21 @@ impl ReadTransport {
         Ok(client)
     }
 
-    fn retire(&self, endpoint: &Endpoint) {
+    fn retire(&self, endpoint: &Endpoint, client: &Arc<ClientWithMiddleware>) {
         // Dropping the cache's handle does not cancel other in-flight streams.
         // Their handles live until their own requests/deadlines finish.
         let mut state = self.state.lock().unwrap();
-        state.pools.retain(|p| p.endpoint != *endpoint);
+        let Some(index) = state
+            .pools
+            .iter()
+            .position(|p| p.endpoint == *endpoint && Arc::ptr_eq(&p.client, client))
+        else {
+            // A different request already retired this pool. Its replacement
+            // must survive late failures from the old connection, including
+            // their attempts to extend the endpoint's suspect interval.
+            return;
+        };
+        state.pools.swap_remove(index);
         state
             .suspect
             .retain(|(e, until)| e != endpoint && *until > Instant::now());
@@ -483,9 +493,16 @@ impl Client {
             if now >= deadline {
                 break;
             }
+            // Charge only retries that actually start, after backoff and the
+            // deadline check. An unusable Retry-After or cancelled wait must
+            // not consume the quota shared with other reads.
+            if attempt > 1 && !self.reads.take_retry_token() {
+                break;
+            }
             let timeout = policy.attempt_timeout.min(deadline - now);
             let attempt_deadline = now + timeout;
             let mut endpoint = None;
+            let mut attempted_pool = None;
             let mut retry_after = None;
             let mut response_status = None;
             let mut stage = "dns";
@@ -514,6 +531,7 @@ impl Client {
                         .reads
                         .pool(&selected, request.url().host_str().unwrap_or(""))?;
                     endpoint = Some(selected);
+                    attempted_pool = Some(transport.clone());
                     let mut current = request.try_clone().expect("bodyless GET is replayable");
                     trace_id = self.prepare_traced_request(&mut current);
                     *current.timeout_mut() = Some(timeout);
@@ -543,7 +561,7 @@ impl Client {
                                     fallback = self.reads.select(&origin, &late, &tried);
                                 }
                                 if fallback.is_some() {
-                                    self.reads.retire(endpoint.as_ref().unwrap());
+                                    self.reads.retire(endpoint.as_ref().unwrap(), &transport);
                                     tracing::debug!(attempt, %read_id, %trace_id, selected_address = ?candidate, fallback_address = ?fallback, "sandbox metadata connection trying alternate address family");
                                     candidate = fallback;
                                     continue;
@@ -617,8 +635,10 @@ impl Client {
                         });
                     }
                     let transport_failure = !matches!(error, SdkError::ServerError { .. });
-                    if transport_failure && let Some(endpoint) = &endpoint {
-                        self.reads.retire(endpoint);
+                    if transport_failure
+                        && let (Some(endpoint), Some(pool)) = (&endpoint, &attempted_pool)
+                    {
+                        self.reads.retire(endpoint, pool);
                     }
                     let failure = match error.transport_failure() {
                         Some(crate::error::TransportFailure::Timeout) => "timeout",
@@ -628,7 +648,7 @@ impl Client {
                     };
                     tracing::debug!(attempt, %read_id, %trace_id, stage, failure, status = ?response_status.map(|s| s.as_u16()), selected_address = ?endpoint.as_ref().and_then(|e| e.address), elapsed_ms = started.elapsed().as_millis() as u64, "sandbox metadata read attempt failed");
                     last_error = Some(error);
-                    if attempt == max_attempts || !self.reads.take_retry_token() {
+                    if attempt == max_attempts {
                         break;
                     }
                     let wait = retry_after.unwrap_or_else(|| jitter(attempt));
