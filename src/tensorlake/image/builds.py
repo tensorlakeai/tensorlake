@@ -739,10 +739,36 @@ def wait_build(
     verbose: bool = False,
     emit: EmitFn | None = None,
 ) -> dict:
-    """:meth:`ImageBuildHandle.wait` for a build id."""
-    return get_build(build_id).wait(
-        timeout=timeout, follow_logs=follow_logs, verbose=verbose, emit=emit
-    )
+    """:meth:`ImageBuildHandle.wait` for a build id.
+
+    The lookup of ``build_id`` is part of the interruptible wait (not a
+    separate call before it), so ``KeyboardInterrupt`` during a slow or
+    stalled first request still runs the cancellation handshake by build
+    id, and ``timeout`` bounds the lookup too.
+    """
+    _reject_legacy_reference(build_id)
+    if emit is None:
+        emit = _stderr_emit if verbose else _noop_emit
+    api_url, token, namespace = _credentials()
+    try:
+        raw = _rust_wait_image_build(
+            api_url,
+            token,
+            build_id,
+            timeout,
+            follow_logs,
+            None,
+            None,
+            namespace,
+            False,
+            USER_AGENT,
+            emit,
+        )
+    except ImageBuildError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - re-raised typed below
+        _raise_typed(exc)
+    return _snake_case_keys(json.loads(raw))
 
 
 def cancel_build(

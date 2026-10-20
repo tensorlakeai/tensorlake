@@ -752,6 +752,11 @@ function catalogOptionsFromEnv(): NativeBindingCatalogOptions {
   return { apiUrl: context.apiUrl, bearerToken, useScopeHeaders: false };
 }
 
+// An explicit organization/project pair addresses that project's routes
+// directly (and sends the scope headers), as the clients' explicit-scope
+// options always did; without one the key's own scope applies. The Rust core
+// reads the pair only when `useScopeHeaders` is set, so the flag follows the
+// pair. Half a pair is a caller error rather than a silent fallback.
 function catalogOptionsFromCredentials(
   credentials: SandboxImageCatalogCredentials,
 ): NativeBindingCatalogOptions {
@@ -760,12 +765,16 @@ function catalogOptionsFromCredentials(
   if (!bearerToken) {
     throw new Error("Missing TENSORLAKE_API_KEY credentials.");
   }
+  const { organizationId, projectId } = credentials;
+  if ((organizationId === undefined) !== (projectId === undefined)) {
+    throw new TypeError("organizationId and projectId must be given together");
+  }
   return {
     apiUrl: credentials.apiUrl ?? context.apiUrl,
     bearerToken,
-    organizationId: credentials.organizationId,
-    projectId: credentials.projectId,
-    useScopeHeaders: false,
+    organizationId,
+    projectId,
+    useScopeHeaders: organizationId !== undefined,
   };
 }
 
@@ -847,6 +856,21 @@ export async function findSandboxImageByName(
   return json == null ? null : parseTemplate(json);
 }
 
+/** @internal `CloudClient.findSandboxImageByName` with the client's credentials. */
+export async function findSandboxImageByNameWithCredentials(
+  credentials: SandboxImageCatalogCredentials,
+  imageName: string,
+): Promise<SandboxTemplate | null> {
+  if (typeof imageName !== "string" || imageName.length === 0) {
+    throw new TypeError("imageName must be a non-empty string");
+  }
+  const json = await loadNativeBinding().findSandboxImage(
+    catalogOptionsFromCredentials(credentials),
+    imageName,
+  );
+  return json == null ? null : parseTemplate(json);
+}
+
 /**
  * List all registered sandbox images for the current project: every CAS and
  * legacy image in the sandbox-template shape, newest first. Uses the same
@@ -855,6 +879,16 @@ export async function findSandboxImageByName(
  */
 export async function listSandboxImages(): Promise<SandboxTemplate[]> {
   const json = await loadNativeBinding().listSandboxImages(catalogOptionsFromEnv());
+  return JSON.parse(json) as SandboxTemplate[];
+}
+
+/** @internal `CloudClient.listSandboxImages` with the client's credentials. */
+export async function listSandboxImagesWithCredentials(
+  credentials: SandboxImageCatalogCredentials,
+): Promise<SandboxTemplate[]> {
+  const json = await loadNativeBinding().listSandboxImages(
+    catalogOptionsFromCredentials(credentials),
+  );
   return JSON.parse(json) as SandboxTemplate[];
 }
 

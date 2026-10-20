@@ -4544,6 +4544,10 @@ impl CasImageEventEmitter {
             .clone()
     }
 
+    fn set_build_id(&self, build_id: String) {
+        *self.build_id.lock().unwrap_or_else(|e| e.into_inner()) = Some(build_id);
+    }
+
     /// Deliver a binding-generated event (the forced second interrupt).
     fn emit_dict(&self, py: Python<'_>, fields: &[(&str, Option<String>)]) {
         let Some(callback) = self.callback.as_ref() else {
@@ -4589,7 +4593,27 @@ where
     T: Send + 'static,
     Fut: Future<Output = Result<T, SandboxImageBuildError>> + Send + 'static,
 {
+    run_cas_image_operation_on(py, label, callback, None, operation)
+}
+
+/// [`run_cas_image_operation`] for an operation on a build whose id the
+/// caller already knows (a wait by id): the forced-exit message can name it
+/// before any event has.
+fn run_cas_image_operation_on<T, Fut>(
+    py: Python<'_>,
+    label: &'static str,
+    callback: Option<Py<PyAny>>,
+    known_build_id: Option<String>,
+    operation: impl FnOnce(InterruptSignal, Box<dyn FnMut(SandboxImageBuildEvent) + Send>) -> Fut,
+) -> PyResult<T>
+where
+    T: Send + 'static,
+    Fut: Future<Output = Result<T, SandboxImageBuildError>> + Send + 'static,
+{
     let emitter = CasImageEventEmitter::new(callback);
+    if let Some(build_id) = known_build_id {
+        emitter.set_build_id(build_id);
+    }
     let interrupt = InterruptSignal::new();
     let task_emitter = emitter.clone();
     let future = operation(
@@ -4968,14 +4992,19 @@ fn wait_image_build(
         }
         None => None,
     };
-    let result =
-        run_cas_image_operation(py, "image_build", emit, |interrupt, mut emit| async move {
-            let mut handle = client
-                .get(&build_id)
-                .await
-                .map_err(SandboxImageBuildError::Build)?;
-            handle
-                .wait(
+    // The lookup runs inside the interruptible operation too: a
+    // KeyboardInterrupt during a slow or stalled first request cancels the
+    // build by its id instead of ending the call without a request.
+    let known_build_id = build_id.clone();
+    let result = run_cas_image_operation_on(
+        py,
+        "image_build",
+        emit,
+        Some(known_build_id),
+        |interrupt, mut emit| async move {
+            client
+                .wait_build(
+                    &build_id,
                     ImageBuildWaitOptions {
                         timeout,
                         follow_logs,
@@ -4985,7 +5014,8 @@ fn wait_image_build(
                 )
                 .await
                 .map_err(SandboxImageBuildError::Build)
-        })?;
+        },
+    )?;
     image_build_json(&result)
 }
 

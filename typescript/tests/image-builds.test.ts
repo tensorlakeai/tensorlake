@@ -212,6 +212,16 @@ describe("image build operations", () => {
     expect(options).toMatchObject({ imageReference: "ghcr.io/org/app:v1", registeredName: "app", cas: true });
   });
 
+  it("waitImageBuild runs the lookup inside the interruptible native wait, not as a separate call", async () => {
+    const binding = makeFakeBinding();
+    const result = await waitImageBuild("build-1", { timeoutMs: 1234 });
+    expect(result.id).toBe(resultJson().id);
+    expect(binding.getImageBuild).not.toHaveBeenCalled();
+    expect(binding.waitImageBuild).toHaveBeenCalledTimes(1);
+    expect(binding.waitImageBuild.mock.calls[0][1]).toBe("build-1");
+    expect(binding.waitImageBuild.mock.calls[0][2]).toEqual({ timeoutMs: 1234, followLogs: false });
+  });
+
   it("getImageBuild returns the record and refresh re-reads it", async () => {
     const binding = makeFakeBinding();
     const handle = await getImageBuild("build-1");

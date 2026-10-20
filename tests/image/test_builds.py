@@ -417,6 +417,28 @@ class TestGetWaitCancel(unittest.TestCase):
         self.assertEqual(failed.error, "RUN exited 1")
         self.assertEqual(failed.info.status, "failed")
 
+    def test_wait_build_runs_the_lookup_inside_the_interruptible_wait(self):
+        """``wait_build`` makes no separate lookup call before the native
+        wait: the lookup is part of the interruptible operation, so an
+        interrupt during it still cancels by build id and ``timeout`` bounds
+        it too."""
+        core_result = json.dumps({"id": "image_1", "snapshotId": "snap-1"})
+        with (
+            patch.object(builds, "_build_context_from_env", return_value=_ctx()),
+            patch.object(builds, "_rust_get_image_build") as get_native,
+            patch.object(
+                builds, "_rust_wait_image_build", return_value=core_result
+            ) as wait_native,
+        ):
+            result = builds.wait_build("build-1", timeout=12.5, follow_logs=True)
+        self.assertEqual(result, {"id": "image_1", "snapshot_id": "snap-1"})
+        get_native.assert_not_called()
+        wait_native.assert_called_once()
+        args = wait_native.call_args.args
+        self.assertEqual(args[2], "build-1")
+        self.assertEqual(args[3], 12.5)
+        self.assertTrue(args[4])
+
     def test_cancel_by_build_id_alone_and_outcomes(self):
         responses = [
             {"outcome": "cancelled", "build": _build_json(status="cancelled")},

@@ -218,7 +218,10 @@ pub async fn get(ctx: &CliContext, build_id: &str, output_json: bool) -> Result<
 /// `tl sbx image build wait BUILD_ID [--json] [--timeout SECS]`: wait for
 /// the operation's own result. The record stands until a later build of the
 /// image publishes or the image is deleted, which retires it (then the build
-/// is not found). Ctrl+C cancels the build.
+/// is not found). Ctrl+C cancels the build, from the first request on: the
+/// handler is installed before the lookup, and the lookup runs inside the
+/// interruptible wait, so an interrupt during a slow or stalled first
+/// request still sends the cancellation (the id is sufficient for it).
 pub async fn wait(
     ctx: &CliContext,
     build_id: &str,
@@ -226,7 +229,6 @@ pub async fn wait(
     output_json: bool,
 ) -> Result<()> {
     let client = image_build_client(ctx)?;
-    let mut handle = client.get(build_id).await.map_err(build_error)?;
     let timeout = match timeout_secs {
         Some(secs) if secs.is_finite() && secs >= 0.0 => {
             Some(std::time::Duration::from_secs_f64(secs))
@@ -236,12 +238,13 @@ pub async fn wait(
     };
     let guard = CasInterruptGuard::install();
     guard.observe(&SandboxImageBuildEvent::Accepted {
-        build_id: handle.build_id().to_string(),
+        build_id: build_id.to_string(),
         client_request_id: None,
     });
     let mut renderer = ImageBuildEventRenderer::new();
-    let result = handle
-        .wait(
+    let result = client
+        .wait_build(
+            build_id,
             ImageBuildWaitOptions {
                 timeout,
                 follow_logs: true,
