@@ -449,6 +449,26 @@ class TestResponseDecoding(unittest.TestCase):
 
 
 class TestStartBuild(unittest.TestCase):
+    def test_image_build_arguments_have_global_and_stage_scope(self):
+        image = Image(name="img", base_image="python:${PYTHON_VERSION}-slim").run(
+            'printf "%s" "$PYTHON_VERSION" > /python-version'
+        )
+        with (
+            patch.object(builds, "_build_context_from_env", return_value=_ctx()),
+            patch.object(
+                builds,
+                "_rust_start_image_build",
+                return_value=json.dumps({"build": _build_json()}),
+            ) as native,
+        ):
+            builds.start_build(image, build_args={"PYTHON_VERSION": "3.12"})
+
+        dockerfile = native.call_args.args[13]
+        global_args, stage = dockerfile.split("FROM python:${PYTHON_VERSION}-slim\n")
+        self.assertIn("ARG PYTHON_VERSION\n", global_args)
+        self.assertTrue(stage.startswith("ARG PYTHON_VERSION\nRUN "))
+        self.assertEqual(native.call_args.args[15], {"PYTHON_VERSION": "3.12"})
+
     def test_start_build_forwards_exact_positional_arguments(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             dockerfile = Path(tmpdir, "Dockerfile")

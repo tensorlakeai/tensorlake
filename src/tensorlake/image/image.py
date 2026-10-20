@@ -106,13 +106,15 @@ class Image:
         is_public: bool = False,
         docker_compat: bool = False,
         context_dir: str | None = None,
+        cas: bool = False,
+        build_args: dict[str, str] | None = None,
         verbose: bool = False,
         docker_config_json: str | None = None,
     ) -> dict:
-        """Build this image as a sandbox template and register it.
+        """Build and register this sandbox image.
 
-        Materializes the image in a build sandbox, snapshots the filesystem,
-        and registers the snapshot as a named sandbox template.
+        Builds a non-CAS image by default. Pass ``cas=True`` to build a CAS
+        image through the Image Service.
 
         Args:
             registered_name: Name to register the image under. Defaults to ``self.name``.
@@ -131,6 +133,10 @@ class Image:
                 files — building without it then raises. When the image has no
                 such ops it may be omitted, and an empty context (just the
                 generated Dockerfile) is uploaded so the cwd is not archived.
+            cas: Build a CAS image through the Image Service. Defaults to False.
+            build_args: Build-time variables for CAS builds. The generated
+                Dockerfile declares these arguments for use in ``base_image``
+                and build operations. Non-CAS builds reject build arguments.
             docker_config_json: Docker config JSON contents. Omit to discover local
                 config at entry; pass "{}" to disable discovery.
             verbose: If True, print build progress to stderr.
@@ -150,6 +156,8 @@ class Image:
             is_public=is_public,
             docker_compat=docker_compat,
             context_dir=context_dir,
+            cas=cas,
+            build_args=build_args,
             verbose=verbose,
             docker_config_json=docker_config_json,
         )

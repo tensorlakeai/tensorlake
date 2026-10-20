@@ -736,6 +736,7 @@ def _prepare_source(
     registered_name: str | None,
     context_dir: str | None,
     stack,
+    build_args: dict[str, str] | None = None,
 ) -> tuple[str, str | None, str | None, str]:
     """Resolve a build source the same way :func:`build_sandbox_image` does:
     ``(dockerfile_path, dockerfile_text, context_dir, registered_name)``."""
@@ -756,7 +757,7 @@ def _prepare_source(
             rust_context_dir = stack.enter_context(
                 tempfile.TemporaryDirectory(prefix="tl-build-context-")
             )
-        dockerfile_text = image_to_dockerfile(source)
+        dockerfile_text = image_to_dockerfile(source, build_args=build_args)
         if not dockerfile_text.endswith("\n"):
             dockerfile_text += "\n"
         return (
@@ -813,7 +814,7 @@ def start_build(
         emit = _stderr_emit if verbose else _noop_emit
     with contextlib.ExitStack() as stack:
         dockerfile_path, dockerfile_text, rust_context_dir, name = _prepare_source(
-            source, registered_name, context_dir, stack
+            source, registered_name, context_dir, stack, build_args=build_args
         )
         if name == _DEFAULT_IMAGE_NAME:
             warnings.warn(

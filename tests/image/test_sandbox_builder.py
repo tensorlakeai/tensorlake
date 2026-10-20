@@ -260,6 +260,37 @@ class TestBuildSandboxImageFromDockerfileOptions(unittest.TestCase):
 
 
 class TestCasBuildOptions(unittest.TestCase):
+    def test_image_build_arguments_are_available_in_base_and_operations(self):
+        image = Image(name="cas-image", base_image="python:${PYTHON_VERSION}-slim").run(
+            'printf "%s" "$APP_REVISION" > /revision'
+        )
+        arguments = {"PYTHON_VERSION": "3.12", "APP_REVISION": "release-42"}
+        build_ctx, rust_builder = _make_build_patches(_make_ctx())
+
+        with build_ctx, rust_builder as native:
+            image.build(cas=True, build_args=arguments)
+
+        self.assertIs(native.call_args.kwargs["cas"], True)
+        self.assertEqual(native.call_args.kwargs["build_args"], arguments)
+        dockerfile = native.call_args.args[15]
+        global_args, stage = dockerfile.split("FROM python:${PYTHON_VERSION}-slim\n")
+        for name, value in arguments.items():
+            self.assertIn(f"ARG {name}\n", global_args)
+            self.assertIn(f"ARG {name}\n", stage.split("RUN ")[0])
+            self.assertNotIn(value, dockerfile)
+        self.assertIn('RUN printf "%s" "$APP_REVISION" > /revision', stage)
+
+    def test_image_build_rejects_invalid_argument_names_before_native_call(self):
+        image = Image(name="cas-image", base_image="python:3.12-slim")
+        for name in ("", "1VERSION", "VERSION=3.12", "VERSION\nRUN echo injected"):
+            with (
+                self.subTest(name=name),
+                patch.object(sbm, "_rust_build_sandbox_image") as native,
+                self.assertRaisesRegex(ValueError, "Invalid build argument name"),
+            ):
+                image.build(cas=True, build_args={name: "3.12"})
+            native.assert_not_called()
+
     def test_cas_and_build_args_are_forwarded_for_builds(self):
         ctx = _make_ctx()
 
@@ -290,8 +321,8 @@ class TestCasBuildOptions(unittest.TestCase):
 
         self.assertIs(rust_importer_mock.call_args.kwargs["cas"], True)
 
-    def test_image_build_stays_legacy(self):
-        """``Image.build`` and application images never opt into CAS."""
+    def test_image_build_defaults_to_non_cas(self):
+        """``Image.build`` defaults to a non-CAS image."""
         ctx = _make_ctx()
         image = Image(name="legacy", base_image="python:3.12-slim")
 
