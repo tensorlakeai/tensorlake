@@ -106,7 +106,6 @@ tensorlake/
 ├── src/tensorlake/              # Python SDK source
 │   ├── applications/            # Serverless applications SDK
 │   ├── cli/                     # Python CLI entry points (NDJSON producers)
-│   ├── documentai/              # Document AI client
 │   └── function_executor/       # gRPC function executor server
 ├── crates/
 │   ├── cli/                     # Rust CLI binary (tl / tensorlake)
@@ -130,7 +129,6 @@ Wrapper scripts live in `tensorlake.data/scripts/` for local development and are
 | Rust command | Spawns wrapper script |
 |---|---|
 | `tl deploy` | `tensorlake-deploy` |
-| `tl parse` | `tensorlake-parse` |
 | `tl generate-dockerfiles` | `tensorlake-generate-dockerfiles` |
 
 `tl sbx image create` is handled directly by the Rust CLI. Programmatic SDK image builds should go through the language-native `Image` DSL APIs rather than passing raw Dockerfile paths into the Python or TypeScript packages.
@@ -161,9 +159,6 @@ make check
 
 # Run all tests
 make test
-
-# Run Document AI tests only
-make test_document_ai
 ```
 
 ### Working on the Rust CLI
@@ -224,7 +219,7 @@ We follow the [Conventional Commits](https://www.conventionalcommits.org/) speci
 
 **Examples:**
 ```
-feat(documentai): add signature detection support
+feat(sandbox): add GPU sandbox support
 fix(cli): resolve authentication error on Windows
 docs(examples): add real estate analysis example
 test(functions): add unit tests for graph validation
@@ -267,7 +262,6 @@ Examples:
 4. **Test your changes**
    ```bash
    make test
-   make test_document_ai
    make check
    ```
 
@@ -400,7 +394,7 @@ Maintainers follow this checklist for releases:
 
 - [ ] Update version in `pyproject.toml`
 - [ ] Update `CHANGELOG.md`
-- [ ] Run full test suite (`make test_document_ai`)
+- [ ] Run full test suite (`make test`)
 - [ ] Check code quality (`make check`)
 - [ ] Build the project (`make build`)
 - [ ] Create release PR

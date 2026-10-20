@@ -42,7 +42,6 @@
 //! - [`ImagesClient`](images::ImagesClient): Build and manage container images
 //! - [`SandboxesClient`](sandboxes::SandboxesClient): Manage sandbox lifecycle, pools, and snapshots
 //! - [`SecretsClient`](secrets::SecretsClient): Manage secrets for secure configuration
-//! - [`DocumentAiClient`](document_ai::DocumentAiClient): Manage Document AI APIs
 //!
 //! ## Error Handling
 //!
@@ -70,7 +69,6 @@ pub mod applications;
 pub mod artifact_storage;
 pub mod cron;
 pub mod docker_config;
-pub mod document_ai;
 pub mod error;
 pub mod http_transport;
 mod image_service_builds;
@@ -84,7 +82,6 @@ pub mod sse;
 use applications::*;
 use artifact_storage::*;
 use cron::*;
-use document_ai::*;
 use images::*;
 use sandbox_templates::*;
 use sandboxes::*;
@@ -457,11 +454,6 @@ impl Sdk {
             use_namespaced_endpoints,
         )
         .with_log_client(self.client.clone())
-    }
-
-    /// Get a client for Document AI APIs.
-    pub fn document_ai(&self) -> DocumentAiClient {
-        DocumentAiClient::new(self.client.clone())
     }
 
     /// Get a client for managing secrets.

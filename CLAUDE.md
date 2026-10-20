@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-TensorLake SDK — a Python SDK for document ingestion (DocumentAI) and serverless agentic applications. Users define applications using decorator-based APIs and deploy them to TensorLake Cloud or run locally.
+TensorLake SDK — a Python SDK for serverless agentic applications. Users define applications using decorator-based APIs and deploy them to TensorLake Cloud or run locally.
 
 ## Common Commands
 
@@ -24,7 +24,6 @@ make test
 # Run a specific test suite
 cd tests && ./run_tests.sh --applications
 cd tests && ./run_tests.sh --function-executor
-cd tests && ./run_tests.sh --document-ai
 cd tests && ./run_tests.sh --cli
 
 # Run a single test file
@@ -114,8 +113,6 @@ finally:
 
 2. **Sandbox SDK** (`src/tensorlake/sandbox`) - Client for creating Sandboxes where users can run arbitrary code, copy files, install packages and etc.
 
-3. **DocumentAI SDK** (`src/tensorlake/documentai/`) — Client for document parsing, extraction, and classification.
-
 ### Applications: Decorator → Function → Runner
 
 Users decorate functions with `@application` and `@function` (defined in `interface/decorators.py`). Decorators create `Function` objects registered in a global registry (`registry.py`). Functions support `.map()` and `.reduce()` operations and return `Future`/`Awaitable` objects for async execution.
@@ -130,7 +127,7 @@ Two execution modes:
 
 ### CLI
 
-`src/tensorlake/cli/` — Click-based CLI (`tensorlake` command). Entry points: `tensorlake deploy`, `tensorlake parse`, `tensorlake login`, `tensorlake secrets`, etc.
+`src/tensorlake/cli/` — Click-based CLI (`tensorlake` command). Entry points: `tensorlake deploy`, `tensorlake login`, `tensorlake secrets`, etc.
 
 ### Vendored Dependencies
 

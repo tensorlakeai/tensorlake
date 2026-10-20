@@ -391,21 +391,12 @@ impl Client {
         &self,
         request: Request,
     ) -> Result<(Traced<Response>, Option<Duration>), SdkError> {
-        self.send_stream(request, true).await
-    }
-
-    /// [`Self::execute_stream_traced`] without mapping non-success statuses.
-    pub(crate) async fn execute_stream_raw_traced(
-        &self,
-        request: Request,
-    ) -> Result<(Traced<Response>, Option<Duration>), SdkError> {
-        self.send_stream(request, false).await
+        self.send_stream(request).await
     }
 
     async fn send_stream(
         &self,
         mut request: Request,
-        map_status: bool,
     ) -> Result<(Traced<Response>, Option<Duration>), SdkError> {
         let trace_id = self.prepare_traced_request(&mut request);
         // reqwest applies a request timeout until the body ends, which would
@@ -414,11 +405,7 @@ impl Client {
         let timeout = request.timeout_mut().take();
         let response = within_timeout(timeout, WAITING_FOR_RESPONSE_HEADERS, async {
             let response = self.client.execute(request).await?;
-            if map_status {
-                self.handle_response(response).await
-            } else {
-                Ok(response)
-            }
+            self.handle_response(response).await
         })
         .await?;
         Ok((Traced::new(trace_id, response), timeout))

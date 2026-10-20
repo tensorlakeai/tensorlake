@@ -81,9 +81,6 @@ check:
 test:
 	cd tests && ./run_tests.sh
 
-test_document_ai:
-	cd tests && ./run_tests.sh --document-ai
-
 test_sandbox:
 	@$(MAKE) build_cloud_sdk
 	cd tests/sandbox && poetry run python test_lifecycle.py -v
@@ -110,7 +107,7 @@ bump_version:
 	@test -n "$(VERSION)" || (echo "Usage: make bump_version VERSION=x.y.z" && exit 1)
 	@python3 .github/scripts/bump_version.py "$(VERSION)"
 
-.PHONY: all build build_proto build_cloud_sdk build_rust_py_client fmt check test test_document_ai test_sandbox test_function_executor_compatibility install-dev install-dev-release install-global build_release bump_version fs-posix-conformance
+.PHONY: all build build_proto build_cloud_sdk build_rust_py_client fmt check test test_sandbox test_function_executor_compatibility install-dev install-dev-release install-global build_release bump_version fs-posix-conformance
 
 # POSIX conformance for `tl fs mount` (Linux + FUSE + working credentials). Runs the ported
 # issue-#24 battery against a real mounted workspace, in fresh and snapshot-reattached phases.

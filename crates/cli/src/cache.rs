@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use sha2::{Digest, Sha256};
 
-/// Filesystem-backed key/value cache mirroring Python's `KVCache`.
+/// Filesystem-backed key/value cache.
 ///
 /// Values are stored as UTF-8 text files at:
 ///   `~/.tensorlake/cache/{namespace}/{sha256(key)}.txt`
