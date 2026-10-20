@@ -343,8 +343,11 @@ function decodeResponse(value: unknown): Record<string, unknown> {
 
 function parseBuildInfo(value: unknown): ImageBuildInfo {
   const raw = decodeResponse(value);
-  const attemptNo = Number(raw.attempt_no ?? 0);
-  if (!Number.isSafeInteger(attemptNo)) {
+  const attempt = raw.attempt_no ?? 0;
+  const attemptNo = Number(attempt);
+  if ((typeof attempt !== "number" && typeof attempt !== "string") ||
+      (typeof attempt === "string" && attempt.trim() === "") ||
+      !Number.isSafeInteger(attemptNo)) {
     throw withRaw(new ImageBuildError({ code: ImageBuildErrorCode.SERVICE, message: "Invalid image-build attempt_no" }), { response: value });
   }
   const camel = camelizeRecord(raw);
@@ -582,9 +585,10 @@ export class ImageBuildHandle {
       ),
     );
     emitter.rethrow();
-    const result = parseResult(json);
+    const raw = decodeResponse(json);
+    const result = camelizeRecord(raw) as unknown as ImageBuildResult;
     this.#info = withRaw({ ...this.#info, status: ImageBuildStatus.SUCCEEDED, result },
-      { ...this.#info.raw, status: "succeeded", result: JSON.parse(json) });
+      { ...this.#info.raw, status: "succeeded", result: raw });
     return result;
   }
 
@@ -625,7 +629,15 @@ export interface StartImageImportOptions {
 
 function decodeStarted(json: string, credentials: Credentials): ImageBuildHandle {
   const payload = decodeResponse(json);
-  return new ImageBuildHandle(parseBuildInfo(payload.build ?? {}), credentials, payload.client_request_id as string | null | undefined);
+  const build = payload.build as Record<string, unknown> | null | undefined;
+  if (!build || typeof build !== "object" || Array.isArray(build) ||
+      typeof build.build_id !== "string" || !build.build_id.trim()) {
+    throw withRaw(new ImageBuildError({
+      code: ImageBuildErrorCode.SERVICE,
+      message: "Invalid image-build admission: expected a build with a non-empty build_id",
+    }), { response: payload });
+  }
+  return new ImageBuildHandle(parseBuildInfo(build), credentials, payload.client_request_id as string | null | undefined);
 }
 
 /**

@@ -887,7 +887,7 @@ class _SnapshotResponse(BaseModel):
         cls: type[SnapshotResponseT], payload: dict | str
     ) -> SnapshotResponseT:
         raw = json.loads(payload) if isinstance(payload, str) else payload
-        if not isinstance(raw, dict) or "status" not in raw:
+        if not isinstance(raw, dict) or raw.get("status") is None:
             raise ValueError("snapshot response must include status")
         return cls.model_validate(
             {

@@ -200,6 +200,44 @@ describe("image build operations", () => {
     });
   });
 
+  it.each([
+    {}, { build: null }, { build: [] }, { build: {} },
+    ...[null, "", " ", 123].map((build_id) => ({ build: buildJson("pending", { build_id }) })),
+  ])("rejects admission without a build identity: %j", async (payload) => {
+    const binding = makeFakeBinding();
+    for (const [native, invoke] of [
+      [binding.startImageBuild, () => startImageBuild(new Image({ name: "img", baseImage: "ubuntu" }))],
+      [binding.startImageImport, () => startImageImport("ubuntu")],
+    ] as const) {
+      native.mockResolvedValueOnce(JSON.stringify(payload));
+      await expect(invoke()).rejects.toMatchObject({
+        code: ImageBuildErrorCode.SERVICE, raw: { response: payload },
+      });
+    }
+  });
+
+  it("keeps a null build id empty", async () => {
+    const binding = makeFakeBinding();
+    binding.getImageBuild.mockResolvedValueOnce(JSON.stringify(buildJson("pending", { build_id: null })));
+    expect((await getImageBuild("build-1")).info.buildId).toBe("");
+  });
+
+  it.each([
+    [null, 0], [0, 0], [2, 2], ["2", 2], ["2.0", 2], [Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER],
+  ])("decodes attempt_no %j as %j", async (attempt_no, expected) => {
+    const binding = makeFakeBinding();
+    binding.getImageBuild.mockResolvedValueOnce(JSON.stringify(buildJson("pending", { attempt_no })));
+    expect((await getImageBuild("build-1")).info.attemptNo).toBe(expected);
+  });
+
+  it.each([true, false, 1.5, "1.5", 2 ** 53, -(2 ** 53), "bad", "", [], {}])(
+    "rejects invalid attempt_no %j with SERVICE", async (attempt_no) => {
+      const binding = makeFakeBinding();
+      binding.getImageBuild.mockResolvedValueOnce(JSON.stringify(buildJson("pending", { attempt_no })));
+      await expect(getImageBuild("build-1")).rejects.toMatchObject({ code: ImageBuildErrorCode.SERVICE });
+    },
+  );
+
   it("decodes known and future build enums at the response boundary", async () => {
     const binding = makeFakeBinding();
     for (const [field, values] of [["status", ImageBuildStatus], ["kind", ImageBuildKind], ["phase", ImageBuildPhase]] as const) {

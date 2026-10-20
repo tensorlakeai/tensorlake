@@ -80,6 +80,119 @@ def _native_error(payload: dict) -> Exception:
 
 
 class TestResponseDecoding(unittest.TestCase):
+    def test_admission_requires_a_build_identity(self):
+        for payload in (
+            {},
+            {"build": None},
+            {"build": []},
+            {"build": {}},
+            {"build": _build_json(build_id=None)},
+            {"build": _build_json(build_id="")},
+            {"build": _build_json(build_id=" ")},
+            {"build": _build_json(build_id=123)},
+        ):
+            for native, invoke in (
+                (
+                    "_rust_start_image_build",
+                    lambda: builds.start_build(Image(name="img", base_image="ubuntu")),
+                ),
+                ("_rust_start_image_import", lambda: builds.start_import("ubuntu")),
+            ):
+                with (
+                    self.subTest(payload=payload, native=native),
+                    patch.object(
+                        builds, "_build_context_from_env", return_value=_ctx()
+                    ),
+                    patch.object(builds, native, return_value=json.dumps(payload)),
+                    self.assertRaises(builds.ImageBuildError) as raised,
+                ):
+                    invoke()
+                self.assertIs(raised.exception.code, builds.ImageBuildErrorCode.SERVICE)
+                self.assertEqual(raised.exception.raw, {"response": payload})
+
+    def test_direct_errors_preserve_dict_and_typed_info(self):
+        raw = _build_json(status="future_status")
+        typed = builds.ImageBuildInfo.from_dict(raw)
+        for cls in (builds.ImageBuildFailedError, builds.ImageBuildCancelledError):
+            with self.subTest(cls=cls):
+                info = cls("m", info=raw).info
+                self.assertIs(info.status, builds.ImageBuildStatus.UNKNOWN)
+                self.assertEqual(info.raw, raw)
+                self.assertIs(cls("m", info=typed).info, typed)
+                for malformed in ("bad", [], {"attempt_no": "bad"}):
+                    self.assertIsNone(cls("m", info=malformed).info)
+        error = builds.ImageBuildNotFoundError(
+            "m", code=builds.ImageBuildErrorCode.NOT_FOUND, build_id="b"
+        )
+        self.assertIs(error.code, builds.ImageBuildErrorCode.NOT_FOUND)
+        self.assertEqual(error.build_id, "b")
+
+    def test_interrupted_error_is_strict_and_normalizes_native_results(self):
+        for outcome in ("cancelled", "future_outcome", False):
+            with self.subTest(outcome=outcome), self.assertRaises(TypeError):
+                builds.ImageBuildInterruptedError("m", outcome=outcome, confirmed=True)
+        error = builds.ImageBuildInterruptedError(
+            "m", outcome=builds.ImageBuildCancellationOutcome.CANCELLED, confirmed=True
+        )
+        self.assertTrue(error.confirmed)
+        raw = {
+            "code": "interrupted",
+            "message": "m",
+            "outcome": "already_completed",
+            "result": _result_json(),
+        }
+        error = builds._typed_build_error(_native_error(raw))
+        self.assertEqual(error.result["snapshot_id"], "snap-cas")
+        self.assertNotIn("snapshotId", error.result)
+        self.assertEqual(error.details["result"], error.result)
+        self.assertEqual(error.raw, raw)
+
+    def test_build_ids_and_attempt_numbers_decode_consistently(self):
+        self.assertEqual(
+            builds.ImageBuildInfo.from_dict(_build_json(build_id=None)).build_id, ""
+        )
+        for value, expected in (
+            (None, 0),
+            (0, 0),
+            (2, 2),
+            (2.0, 2),
+            ("2", 2),
+            ("2.0", 2),
+            (2**53 - 1, 2**53 - 1),
+        ):
+            with self.subTest(attempt_no=value):
+                info = builds.ImageBuildInfo.from_dict(_build_json(attempt_no=value))
+                self.assertEqual(info.attempt_no, expected)
+                self.assertIs(type(info.attempt_no), int)
+        for value in (True, False, 1.5, "1.5", 2**53, -(2**53), "bad", "", [], {}):
+            with (
+                self.subTest(attempt_no=value),
+                self.assertRaises(builds.ImageBuildError) as raised,
+            ):
+                builds.ImageBuildInfo.from_dict(_build_json(attempt_no=value))
+            self.assertIs(raised.exception.code, builds.ImageBuildErrorCode.SERVICE)
+
+    def test_response_models_inherit_their_family_decoder(self):
+        class CustomBuildInfo(builds.ImageBuildInfo):
+            pass
+
+        class CustomCancelOutcome(builds.CancelBuildOutcome):
+            pass
+
+        info = CustomBuildInfo.from_dict(_build_json(status="future_status"))
+        self.assertIsInstance(info, CustomBuildInfo)
+        self.assertIs(info.status, builds.ImageBuildStatus.UNKNOWN)
+        self.assertEqual(info.attempt_no, 1)
+        self.assertIs(
+            CustomCancelOutcome.from_dict({"outcome": "future_outcome"}).outcome,
+            builds.ImageBuildCancellationOutcome.UNKNOWN,
+        )
+        decoded = builds._decode_response(
+            {"code": "future_code"}, builds.ImageBuildFailedError
+        )
+        self.assertIs(decoded["code"], builds.ImageBuildErrorCode.UNKNOWN)
+        self.assertNotIn("outcome", decoded)
+
     def test_wire_enums_are_tolerant_and_enum_construction_is_strict(self):
         for enum in (
             SnapshotStatus,

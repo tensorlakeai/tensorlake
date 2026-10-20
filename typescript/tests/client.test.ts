@@ -1883,10 +1883,24 @@ describe("SandboxClient", () => {
       }
     });
 
-    it("rejects a missing snapshot status before polling", async () => {
+    it.each([{ snapshots: {} }, { snapshots: "bad" }, [], "bad"])(
+      "rejects malformed snapshot lists with SandboxError: %j", async (payload) => {
+        installNativeStub({ client: {
+          listSnapshots: vi.fn(async () => ({ traceId: "t", json: JSON.stringify(payload) })),
+        } });
+        const client = SandboxClient.forLocalhost();
+        try {
+          await expect(client.listSnapshots()).rejects.toBeInstanceOf(SandboxError);
+        } finally {
+          client.close();
+        }
+      },
+    );
+
+    it.each([{ snapshot_id: "s" }, { snapshot_id: "s", status: null }])("rejects a missing or null snapshot status before polling: %j", async (payload) => {
       const getSnapshot = vi.fn();
       installNativeStub({ client: {
-        createSnapshot: vi.fn(async () => ({ traceId: "t", json: '{"snapshot_id":"s"}' })),
+        createSnapshot: vi.fn(async () => ({ traceId: "t", json: JSON.stringify(payload) })),
         getSnapshot,
       } });
       const client = SandboxClient.forLocalhost();

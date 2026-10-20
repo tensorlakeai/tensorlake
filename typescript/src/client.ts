@@ -60,7 +60,7 @@ function parseSnapshot<T extends CreateSnapshotResponse>(raw: Record<string, unk
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
     throw new SandboxError("Invalid snapshot response: expected an object");
   }
-  if (!("status" in raw)) {
+  if (raw.status == null) {
     throw new SandboxError("Invalid snapshot response: missing status");
   }
   return withRaw({
@@ -998,10 +998,15 @@ export class SandboxClient {
     const { traceId, json } = await callNative(() =>
       this.native.listSnapshots(),
     );
-    const parsed = JSON.parse(json) as {
-      snapshots?: Record<string, unknown>[];
-    };
-    const snapshots = (parsed?.snapshots ?? []).map((s) => parseSnapshot<SnapshotInfo>(s));
+    const parsed = JSON.parse(json) as { snapshots?: unknown } | null;
+    if (parsed !== null && (typeof parsed !== "object" || Array.isArray(parsed))) {
+      throw new SandboxError("Invalid snapshot list response: expected an object");
+    }
+    const records = parsed?.snapshots ?? [];
+    if (!Array.isArray(records)) {
+      throw new SandboxError("Invalid snapshot list response: snapshots must be an array");
+    }
+    const snapshots = records.map((s) => parseSnapshot<SnapshotInfo>(s));
     return Object.assign(snapshots, { traceId });
   }
 

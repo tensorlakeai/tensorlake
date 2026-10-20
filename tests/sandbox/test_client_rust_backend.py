@@ -2140,19 +2140,21 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         self.assertIs(info.status, SnapshotStatus.LOCAL_READY)
         self.assertEqual(fake.get_calls, 2)
 
-    def test_snapshot_wait_rejects_a_missing_status_before_polling(self):
+    def test_snapshot_wait_rejects_a_missing_or_null_status_before_polling(self):
         fake = _FakeRustClient()
         client = SandboxClient(api_url="http://localhost:8900", api_key="k")
         client._rust_client = fake
-        with (
-            patch.object(
-                fake, "create_snapshot", return_value=("trace", '{"snapshot_id":"s"}')
-            ),
-            patch.object(fake, "get_snapshot_json") as get,
-            self.assertRaisesRegex(SandboxError, "status"),
-        ):
-            client.snapshot_and_wait("sbx-1", poll_interval=0)
-        get.assert_not_called()
+        for payload in ({"snapshot_id": "s"}, {"snapshot_id": "s", "status": None}):
+            with (
+                self.subTest(payload=payload),
+                patch.object(
+                    fake, "create_snapshot", return_value=("trace", json.dumps(payload))
+                ),
+                patch.object(fake, "get_snapshot_json") as get,
+                self.assertRaisesRegex(SandboxError, "status"),
+            ):
+                client.snapshot_and_wait("sbx-1", poll_interval=0)
+            get.assert_not_called()
 
 
 class TestSnapshotStatusCompatibility(unittest.TestCase):
@@ -2214,7 +2216,12 @@ class TestSnapshotStatusCompatibility(unittest.TestCase):
     def test_response_decoding_requires_status(self):
         payload = {"snapshot_id": "s", "namespace": "n", "sandbox_id": "b"}
         for model in (CreateSnapshotResponse, SnapshotInfo):
-            for value in (payload, json.dumps(payload)):
+            for value in (
+                payload,
+                json.dumps(payload),
+                {**payload, "status": None},
+                json.dumps({**payload, "status": None}),
+            ):
                 with (
                     self.subTest(model=model.__name__, value=value),
                     self.assertRaisesRegex(ValueError, "status"),
