@@ -343,6 +343,9 @@ function decodeResponse(value: unknown): Record<string, unknown> {
 
 function parseBuildInfo(value: unknown): ImageBuildInfo {
   const raw = decodeResponse(value);
+  if (raw.status == null) {
+    throw withRaw(new ImageBuildError({ code: ImageBuildErrorCode.SERVICE, message: "Invalid image-build response: missing status" }), { response: value });
+  }
   const attempt = raw.attempt_no ?? 0;
   const attemptNo = Number(attempt);
   if ((typeof attempt !== "number" && typeof attempt !== "string") ||

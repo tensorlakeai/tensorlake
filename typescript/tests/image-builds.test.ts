@@ -222,6 +222,24 @@ describe("image build operations", () => {
     expect((await getImageBuild("build-1")).info.buildId).toBe("");
   });
 
+  it.each([{ build_id: "b" }, { build_id: "b", status: null }])(
+    "rejects a missing or null build status at every record boundary: %j", async (raw) => {
+      const binding = makeFakeBinding();
+      const handle = await getImageBuild("build-1");
+      for (const [native, invoke, payload] of [
+        [binding.getImageBuild, () => getImageBuild("build-1"), raw],
+        [binding.getImageBuild, () => handle.refresh(), raw],
+        [binding.startImageBuild, () => startImageBuild(new Image({ name: "img", baseImage: "ubuntu" })), { build: raw }],
+        [binding.startImageImport, () => startImageImport("ubuntu"), { build: raw }],
+      ] as const) {
+        native.mockResolvedValueOnce(JSON.stringify(payload));
+        await expect(invoke()).rejects.toMatchObject({
+          code: ImageBuildErrorCode.SERVICE, message: expect.stringContaining("status"),
+        });
+      }
+    },
+  );
+
   it.each([
     [null, 0], [0, 0], [2, 2], ["2", 2], ["2.0", 2], [Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER],
   ])("decodes attempt_no %j as %j", async (attempt_no, expected) => {
@@ -291,9 +309,15 @@ describe("image build operations", () => {
     expect(error.raw).toMatchObject(payload);
     expect(JSON.parse(JSON.stringify(error))).not.toHaveProperty("raw");
     for (const code of ["failed", "cancelled"]) {
-      const error = toImageBuildError(nativeError({ code, message: "m", info: buildJson("pending", { status: null }) })) as ImageBuildFailedError;
+      const error = toImageBuildError(nativeError({ code, message: "m", info: buildJson("future_status") })) as ImageBuildFailedError;
       expect(error.info?.status).toBe(ImageBuildStatus.UNKNOWN);
-      expect(error.info?.raw.status).toBeNull();
+      expect(error.info?.raw.status).toBe("future_status");
+      for (const info of [{ build_id: "b" }, buildJson("pending", { status: null })]) {
+        const malformed = toImageBuildError(nativeError({ code, message: "m", info })) as ImageBuildFailedError;
+        expect(malformed).toBeInstanceOf(code === "failed" ? ImageBuildFailedError : ImageBuildCancelledError);
+        expect(malformed.info).toBeUndefined();
+        expect(malformed.raw.info).toEqual(info);
+      }
     }
     for (const info of ["bad", [], { attempt_no: "bad" }]) {
       const error = toImageBuildError(nativeError({ code: "failed", message: "m", info })) as ImageBuildFailedError;

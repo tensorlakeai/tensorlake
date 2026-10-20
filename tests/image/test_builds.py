@@ -115,9 +115,12 @@ class TestResponseDecoding(unittest.TestCase):
         typed = builds.ImageBuildInfo.from_dict(raw)
         for cls in (builds.ImageBuildFailedError, builds.ImageBuildCancelledError):
             with self.subTest(cls=cls):
-                info = cls("m", info=raw).info
+                error = cls("m", info=raw)
+                info = error.info
                 self.assertIs(info.status, builds.ImageBuildStatus.UNKNOWN)
                 self.assertEqual(info.raw, raw)
+                self.assertIs(error.details["info"], raw)
+                self.assertEqual(json.loads(json.dumps(error.details))["info"], raw)
                 self.assertIs(cls("m", info=typed).info, typed)
                 for malformed in ("bad", [], {"attempt_no": "bad"}):
                     self.assertIsNone(cls("m", info=malformed).info)
@@ -128,12 +131,13 @@ class TestResponseDecoding(unittest.TestCase):
         self.assertEqual(error.build_id, "b")
 
     def test_interrupted_error_is_strict_and_normalizes_native_results(self):
-        for outcome in ("cancelled", "future_outcome", False):
-            with self.subTest(outcome=outcome), self.assertRaises(TypeError):
+        for outcome in ("future_outcome", False):
+            with self.subTest(outcome=outcome), self.assertRaises(ValueError):
                 builds.ImageBuildInterruptedError("m", outcome=outcome, confirmed=True)
         error = builds.ImageBuildInterruptedError(
-            "m", outcome=builds.ImageBuildCancellationOutcome.CANCELLED, confirmed=True
+            "m", outcome="cancelled", confirmed=True
         )
+        self.assertIs(error.outcome, builds.ImageBuildCancellationOutcome.CANCELLED)
         self.assertTrue(error.confirmed)
         raw = {
             "code": "interrupted",
@@ -141,11 +145,75 @@ class TestResponseDecoding(unittest.TestCase):
             "outcome": "already_completed",
             "result": _result_json(),
         }
-        error = builds._typed_build_error(_native_error(raw))
+        with (
+            patch.object(builds, "_build_context_from_env", return_value=_ctx()),
+            patch.object(
+                builds, "_rust_wait_image_build", side_effect=_native_error(raw)
+            ),
+            self.assertRaises(builds.ImageBuildInterruptedError) as raised,
+        ):
+            builds.wait_build("b")
+        error = raised.exception
         self.assertEqual(error.result["snapshot_id"], "snap-cas")
         self.assertNotIn("snapshotId", error.result)
         self.assertEqual(error.details["result"], error.result)
         self.assertEqual(error.raw, raw)
+
+    def test_direct_error_enum_fields_are_strict(self):
+        self.assertIs(
+            builds.ImageBuildError("m", code="auth").code,
+            builds.ImageBuildErrorCode.AUTH,
+        )
+        error = builds.ImageBuildInProgressError(
+            "m", active_kind="import", active_status="pending"
+        )
+        self.assertIs(error.active_kind, builds.ImageBuildKind.IMPORT)
+        self.assertIs(error.active_status, builds.ImageBuildStatus.PENDING)
+        self.assertIs(error.details["active_kind"], error.active_kind)
+        self.assertIs(error.details["active_status"], error.active_status)
+        for cls, fields in (
+            (builds.ImageBuildError, {"code": "autth"}),
+            (builds.ImageBuildError, {"active_kind": "improt"}),
+            (builds.ImageBuildInProgressError, {"active_kind": "improt"}),
+            (builds.ImageBuildInProgressError, {"active_status": "pendign"}),
+            (builds.ImageBuildInterruptedError, {"outcome": "cancelleed"}),
+            (builds.ImageBuildNotFoundError, {"code": "auth"}),
+            (builds.ImageBuildNotFoundError, {"code": "not_foudn"}),
+        ):
+            with self.subTest(cls=cls, fields=fields), self.assertRaises(ValueError):
+                cls("m", **fields)
+
+    def test_missing_or_null_build_status_fails_at_every_record_boundary(self):
+        for payload in ({"build_id": "b"}, {"build_id": "b", "status": None}):
+            handle = builds.ImageBuildHandle(
+                builds.ImageBuildInfo.from_dict(_build_json()),
+                _credentials=("http://localhost", "k", "default"),
+            )
+            for native, invoke, response in (
+                ("_rust_get_image_build", lambda: builds.get_build("b"), payload),
+                ("_rust_get_image_build", handle.refresh, payload),
+                (
+                    "_rust_start_image_build",
+                    lambda: builds.start_build(Image(name="img", base_image="ubuntu")),
+                    {"build": payload},
+                ),
+                (
+                    "_rust_start_image_import",
+                    lambda: builds.start_import("ubuntu"),
+                    {"build": payload},
+                ),
+            ):
+                with (
+                    self.subTest(payload=payload, native=native),
+                    patch.object(
+                        builds, "_build_context_from_env", return_value=_ctx()
+                    ),
+                    patch.object(builds, native, return_value=json.dumps(response)),
+                    self.assertRaises(builds.ImageBuildError) as raised,
+                ):
+                    invoke()
+                self.assertIs(raised.exception.code, builds.ImageBuildErrorCode.SERVICE)
+                self.assertIn("status", str(raised.exception))
 
     def test_build_ids_and_attempt_numbers_decode_consistently(self):
         self.assertEqual(
@@ -277,8 +345,13 @@ class TestResponseDecoding(unittest.TestCase):
         for code in ("failed", "cancelled"):
             raw = {"code": code, "message": "m", "info": _build_json(status=None)}
             error = builds._typed_build_error(_native_error(raw))
-            self.assertIs(error.info.status, builds.ImageBuildStatus.UNKNOWN)
+            self.assertIsNone(error.info)
+            self.assertEqual(json.loads(json.dumps(error.details))["info"], raw["info"])
             self.assertEqual(error.raw, raw)
+            raw["info"]["status"] = "future_status"
+            error = builds._typed_build_error(_native_error(raw))
+            self.assertIs(error.info.status, builds.ImageBuildStatus.UNKNOWN)
+            self.assertEqual(json.loads(json.dumps(error.details))["info"], raw["info"])
         for info in ("bad", [], {"attempt_no": "bad"}):
             error = builds._typed_build_error(
                 _native_error({"code": "failed", "message": "m", "info": info})
@@ -883,6 +956,37 @@ class TestLegacyBoundary(unittest.TestCase):
                 sbm.import_sandbox_image("ubuntu:24.04")
         self.assertIs(type(raised.exception), sbm.SandboxImageBuildError)
         self.assertIs(native.call_args.kwargs["cas"], False)
+
+    def test_cas_interrupted_results_keep_the_legacy_camel_case_shape(self):
+        payload = {
+            "code": "interrupted",
+            "message": "m",
+            "outcome": "already_completed",
+            "result": _result_json(),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            dockerfile = Path(directory) / "Dockerfile"
+            dockerfile.write_text("FROM scratch\n")
+            for native, invoke in (
+                (
+                    "_rust_build_sandbox_image",
+                    lambda: sbm.build_sandbox_image(str(dockerfile), cas=True),
+                ),
+                (
+                    "_rust_import_sandbox_image",
+                    lambda: sbm.import_sandbox_image("ubuntu", cas=True),
+                ),
+            ):
+                with (
+                    self.subTest(native=native),
+                    patch.object(sbm, "_build_context_from_env", return_value=_ctx()),
+                    patch.object(sbm, native, side_effect=_native_error(payload)),
+                    self.assertRaises(builds.ImageBuildInterruptedError) as raised,
+                ):
+                    invoke()
+                self.assertEqual(raised.exception.result, _result_json())
+                self.assertEqual(raised.exception.details["result"], _result_json())
+                self.assertEqual(raised.exception.raw, payload)
 
     def test_cas_build_surfaces_typed_outcomes(self):
         conflict = _native_error(

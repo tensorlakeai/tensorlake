@@ -2158,6 +2158,18 @@ class TestSandboxClientRustBackend(unittest.TestCase):
 
 
 class TestSnapshotStatusCompatibility(unittest.TestCase):
+    def test_snapshot_enums_keep_the_standard_enum_string_form(self):
+        self.assertEqual(str(SnapshotStatus.COMPLETED), "SnapshotStatus.COMPLETED")
+
+    def test_non_object_snapshot_responses_report_the_body_shape(self):
+        for model in (CreateSnapshotResponse, SnapshotInfo):
+            for payload in ("null", "[]", "1", '"bad"'):
+                with (
+                    self.subTest(model=model, payload=payload),
+                    self.assertRaisesRegex(ValueError, "JSON object"),
+                ):
+                    model.from_response(payload)
+
     def test_diagnostics_do_not_affect_snapshot_equality(self):
         payload = {
             "id": "s",

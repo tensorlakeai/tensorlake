@@ -15,6 +15,3 @@ class ResponseEnum(str, Enum):
             return cls(value)
         except (ValueError, TypeError):
             return cls.__members__["UNKNOWN"]
-
-    def __str__(self) -> str:
-        return self.value

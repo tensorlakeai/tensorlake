@@ -178,7 +178,10 @@ class ImageBuildError(SandboxImageBuildError):
             ``timeout``, ``interrupted``, ``service``, ``internal``).
         build_id: The build this error is about, when known.
         client_request_id: The admission's request id, when relevant.
-        details: The full structured payload from the Rust core.
+        details: Additional structured error fields; ``info`` retains its
+            response dictionary while failure/cancellation errors expose a
+            parsed record on ``info``.
+        raw: The original response from the Rust core, for diagnostics.
     """
 
     def __init__(
@@ -189,11 +192,12 @@ class ImageBuildError(SandboxImageBuildError):
         **details: Any,
     ):
         super().__init__(message)
-        self.code = code
+        self.code = ImageBuildErrorCode(code)
         self.raw: dict = {}
         self.details = details
-        if "info" in details:
-            details["info"] = _info_or_none(details["info"])
+        for name, enum in _RESPONSE_ENUMS[ImageBuildError].items():
+            if name in details and details[name] is not None:
+                details[name] = enum(details[name])
         if "confirmed" in details:
             outcome = details.get("outcome")
             details["confirmed"] = (
@@ -213,14 +217,11 @@ class ImageBuildNotFoundError(ImageBuildError):
     ``get_build``, ``wait_build`` and ``cancel_build`` raise this error.
     """
 
-    def __init__(
-        self,
-        message: str,
-        *,
-        code: ImageBuildErrorCode = ImageBuildErrorCode.NOT_FOUND,
-        **details: Any,
-    ):
-        super().__init__(message, code=code, **details)
+    def __init__(self, message: str, **details: Any):
+        code = ImageBuildErrorCode(details.pop("code", ImageBuildErrorCode.NOT_FOUND))
+        if code is not ImageBuildErrorCode.NOT_FOUND:
+            raise ValueError("ImageBuildNotFoundError code must be NOT_FOUND")
+        super().__init__(message, code=ImageBuildErrorCode.NOT_FOUND, **details)
 
 
 class ImageBuildInProgressError(ImageBuildError):
@@ -236,8 +237,8 @@ class ImageBuildInProgressError(ImageBuildError):
         )
         self.image_name: str | None = details.get("image_name")
         self.active_build_id: str | None = details.get("active_build_id")
-        self.active_kind: ImageBuildKind | None = details.get("active_kind")
-        self.active_status: ImageBuildStatus | None = details.get("active_status")
+        self.active_kind: ImageBuildKind | None = self.details.get("active_kind")
+        self.active_status: ImageBuildStatus | None = self.details.get("active_status")
 
 
 class ImageBuildFailedError(ImageBuildError):
@@ -246,7 +247,7 @@ class ImageBuildFailedError(ImageBuildError):
     def __init__(self, message: str, **details: Any):
         super().__init__(message, code=ImageBuildErrorCode.FAILED, **details)
         self.error: str = details.get("error") or "no error recorded"
-        self.info: ImageBuildInfo | None = self.details.get("info")
+        self.info: ImageBuildInfo | None = _info_or_none(details.get("info"))
 
 
 class ImageBuildCancelledError(ImageBuildError):
@@ -254,7 +255,7 @@ class ImageBuildCancelledError(ImageBuildError):
 
     def __init__(self, message: str, **details: Any):
         super().__init__(message, code=ImageBuildErrorCode.CANCELLED, **details)
-        self.info: ImageBuildInfo | None = self.details.get("info")
+        self.info: ImageBuildInfo | None = _info_or_none(details.get("info"))
 
 
 class ImageBuildTimeoutError(ImageBuildError):
@@ -274,14 +275,9 @@ class ImageBuildInterruptedError(ImageBuildError):
     """
 
     def __init__(self, message: str, **details: Any):
-        outcome = details.get("outcome")
-        if outcome is not None and not isinstance(
-            outcome, ImageBuildCancellationOutcome
-        ):
-            raise TypeError("outcome must be an ImageBuildCancellationOutcome")
         super().__init__(message, code=ImageBuildErrorCode.INTERRUPTED, **details)
         self.outcome: ImageBuildCancellationOutcome = (
-            outcome or ImageBuildCancellationOutcome.UNCONFIRMED
+            self.details.get("outcome") or ImageBuildCancellationOutcome.UNCONFIRMED
         )
         self.confirmed: bool = self.details.get("confirmed") is True
         self.result: dict | None = details.get("result")
@@ -324,10 +320,6 @@ def _typed_build_error(exc: BaseException) -> ImageBuildError | None:
         for key, value in payload.items()
         if key not in ("message", "code", "raw")
     }
-    if code is ImageBuildErrorCode.INTERRUPTED and isinstance(
-        details.get("result"), dict
-    ):
-        details["result"] = _snake_case_keys(details["result"])
     cls = _TYPED_ERRORS.get(code)
     error = (
         cls(message, **details)
@@ -341,6 +333,11 @@ def _typed_build_error(exc: BaseException) -> ImageBuildError | None:
 def _raise_typed(exc: BaseException) -> None:
     typed = _typed_build_error(exc)
     if typed is not None:
+        if isinstance(typed, ImageBuildInterruptedError) and isinstance(
+            typed.result, dict
+        ):
+            typed.result = _snake_case_keys(typed.result)
+            typed.details["result"] = typed.result
         raise typed from exc
     raise ImageBuildError(f"{type(exc).__name__}: {exc}") from exc
 
@@ -476,6 +473,8 @@ def _decode_response(response: dict | str, model: type = dict) -> dict:
         family = next((base for base in model.__mro__ if base in _RESPONSE_ENUMS), None)
         if family is None:
             return raw
+        if family is ImageBuildInfo and raw.get("status") is None:
+            raise ValueError("build response must include status")
         enums = _RESPONSE_ENUMS[family]
         decoded = {**raw, "raw": dict(raw)}
         for name, enum in enums.items():

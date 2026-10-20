@@ -1854,20 +1854,23 @@ describe("SandboxClient", () => {
           listSnapshots: vi.fn(async () => ({ traceId: "list-trace", json: JSON.stringify({ snapshots: [info] }) })),
         } });
         const client = SandboxClient.forLocalhost();
-        const expected = status === "future_status" ? SnapshotStatus.UNKNOWN : status;
-        const created = await client.snapshot("sbx-1");
-        expect(created.status).toBe(expected);
-        expect(created.raw).toEqual({ snapshot_id: "snap-1", status });
-        const snapshot = await client.getSnapshot("snap-1");
-        expect(snapshot.status).toBe(expected);
-        expect(snapshot.raw).toEqual(info);
-        expect(JSON.parse(JSON.stringify(snapshot))).not.toHaveProperty("raw");
-        expect(snapshot.traceId).toBe("get-trace");
-        const snapshots = await client.listSnapshots();
-        expect(snapshots[0]?.status).toBe(expected);
-        expect(snapshots[0]?.raw).toEqual(info);
-        expect(snapshots.traceId).toBe("list-trace");
-        client.close();
+        try {
+          const expected = status === "future_status" ? SnapshotStatus.UNKNOWN : status;
+          const created = await client.snapshot("sbx-1");
+          expect(created.status).toBe(expected);
+          expect(created.raw).toEqual({ snapshot_id: "snap-1", status });
+          const snapshot = await client.getSnapshot("snap-1");
+          expect(snapshot.status).toBe(expected);
+          expect(snapshot.raw).toEqual(info);
+          expect(JSON.parse(JSON.stringify(snapshot))).not.toHaveProperty("raw");
+          expect(snapshot.traceId).toBe("get-trace");
+          const snapshots = await client.listSnapshots();
+          expect(snapshots[0]?.status).toBe(expected);
+          expect(snapshots[0]?.raw).toEqual(info);
+          expect(snapshots.traceId).toBe("list-trace");
+        } finally {
+          client.close();
+        }
       },
     );
 
@@ -1924,10 +1927,13 @@ describe("SandboxClient", () => {
         getSnapshot,
       } });
       const client = SandboxClient.forLocalhost();
-      const info = await client.snapshotAndWait("sbx-1", { pollInterval: 0 });
-      expect(info.status).toBe(SnapshotStatus.COMPLETED);
-      expect(getSnapshot).toHaveBeenCalledTimes(2);
-      client.close();
+      try {
+        const info = await client.snapshotAndWait("sbx-1", { pollInterval: 0 });
+        expect(info.status).toBe(SnapshotStatus.COMPLETED);
+        expect(getSnapshot).toHaveBeenCalledTimes(2);
+      } finally {
+        client.close();
+      }
     });
 
     it("creates a snapshot", async () => {
