@@ -2,7 +2,6 @@ import path from "node:path";
 import os from "node:os";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { parseArgs } from "node:util";
-import { CloudClient } from "./cloud-client.js";
 import type { SandboxTemplate } from "./cloud-models.js";
 import { Image, ImageBuildOperationType, dockerfileContent } from "./image.js";
 import type { ImageBuildOperation } from "./image.js";
@@ -49,6 +48,17 @@ export interface CreateSandboxImageOptions {
    */
   dockerCompat?: boolean;
   /**
+   * Build a CAS (content-addressed streaming) image through the Image
+   * Service instead of a legacy template. Off by default.
+   */
+  cas?: boolean;
+  /**
+   * Dockerfile build args (`--build-arg KEY=VALUE`), forwarded to BuildKit
+   * and expanded in `FROM` references. CAS builds only; a legacy build with
+   * build args is rejected.
+   */
+  buildArgs?: Record<string, string>;
+  /**
    * Print build progress to stderr. Ignored when an explicit `emit` is
    * passed via `deps`. Defaults to false — `createSandboxImage` is silent
    * by default when invoked programmatically (e.g. `Image.build()`).
@@ -80,6 +90,11 @@ export interface ImportSandboxImageOptions {
    * memory and disk space on builder sandbox).
    */
   dockerCompat?: boolean;
+  /**
+   * Import as a CAS (content-addressed streaming) image through the Image
+   * Service instead of a legacy template. Off by default.
+   */
+  cas?: boolean;
   /**
    * Print build progress to stderr. Ignored when an explicit `emit` is
    * passed via `deps`. Defaults to false.
@@ -120,10 +135,23 @@ interface NativeBindingOptions extends NativeBindingCommonOptions {
   dockerfilePath: string;
   dockerfileText?: string | undefined | null;
   contextDir?: string | undefined | null;
+  cas?: boolean | undefined | null;
+  buildArgs?: Record<string, string> | undefined | null;
 }
 
 interface NativeBindingImportOptions extends NativeBindingCommonOptions {
   imageReference: string;
+  cas?: boolean | undefined | null;
+}
+
+/** Credentials and scope for the merged image catalog. */
+interface NativeBindingCatalogOptions {
+  apiUrl: string;
+  bearerToken: string;
+  organizationId?: string | undefined | null;
+  projectId?: string | undefined | null;
+  useScopeHeaders?: boolean | undefined | null;
+  userAgent?: string | undefined | null;
 }
 
 interface NativeBindingEvent {
@@ -142,6 +170,18 @@ interface NativeBinding {
     options: NativeBindingImportOptions,
     emit?: ((event: NativeBindingEvent) => void) | null | undefined,
   ): Promise<string>;
+  /** JSON array of every image of both families, newest first. */
+  listSandboxImages(options: NativeBindingCatalogOptions): Promise<string>;
+  /** JSON record of one image by name or id, or null when unknown. */
+  findSandboxImage(
+    options: NativeBindingCatalogOptions,
+    reference: string,
+  ): Promise<string | null>;
+  /** Delete one image by name or id; unknown in both catalogs rejects. */
+  deleteSandboxImage(
+    options: NativeBindingCatalogOptions,
+    reference: string,
+  ): Promise<void>;
 }
 
 let cachedNativeBinding: NativeBinding | undefined;
@@ -431,6 +471,8 @@ export async function createSandboxImage(
         dockerConfigJson: options.dockerConfigJson,
         dockerfileText,
         contextDir: nativeContextDir,
+        cas: options.cas ?? false,
+        buildArgs: options.buildArgs,
       },
       (event) => {
         try {
@@ -541,6 +583,7 @@ export async function importSandboxImage(
       userAgent: undefined,
       dockerCompat: options.dockerCompat ?? false,
       dockerConfigJson: options.dockerConfigJson,
+      cas: options.cas ?? false,
     },
     (event) => {
       try {
@@ -571,11 +614,15 @@ export async function importSandboxImage(
   return result;
 }
 
-export async function deleteSandboxImage(imageName: string): Promise<void> {
-  if (typeof imageName !== "string" || imageName.length === 0) {
-    throw new TypeError("imageName must be a non-empty string");
-  }
+/** Credentials the merged-catalog operations run with. */
+export interface SandboxImageCatalogCredentials {
+  apiUrl?: string;
+  apiKey?: string;
+  organizationId?: string;
+  projectId?: string;
+}
 
+function catalogOptionsFromEnv(): NativeBindingCatalogOptions {
   const context = buildContextFromEnv();
   const bearerToken = context.apiKey;
   if (!bearerToken) {
@@ -586,25 +633,66 @@ export async function deleteSandboxImage(imageName: string): Promise<void> {
     }
     throw new Error("Missing TENSORLAKE_API_KEY credentials.");
   }
+  return { apiUrl: context.apiUrl, bearerToken, useScopeHeaders: false };
+}
 
-  const client = new CloudClient({
-    apiUrl: context.apiUrl,
-    apiKey: bearerToken,
-    namespace: context.namespace,
-  });
-  try {
-    await client.deleteSandboxImage(imageName);
-  } finally {
-    client.close();
+function catalogOptionsFromCredentials(
+  credentials: SandboxImageCatalogCredentials,
+): NativeBindingCatalogOptions {
+  const context = buildContextFromEnv();
+  const bearerToken = credentials.apiKey ?? context.apiKey;
+  if (!bearerToken) {
+    throw new Error("Missing TENSORLAKE_API_KEY credentials.");
   }
+  return {
+    apiUrl: credentials.apiUrl ?? context.apiUrl,
+    bearerToken,
+    organizationId: credentials.organizationId,
+    projectId: credentials.projectId,
+    useScopeHeaders: false,
+  };
+}
+
+function parseTemplate(json: string): SandboxTemplate {
+  return JSON.parse(json) as SandboxTemplate;
 }
 
 /**
- * Look up a registered sandbox image by its registered name.
+ * Delete a registered sandbox image by name or id. Both families are
+ * covered: an `image_` id or a name registered in the Image Service deletes
+ * a CAS image, a `sandbox_template_` id or a name registered only in the
+ * platform registry deletes a legacy image. Rejects when neither catalog
+ * knows the reference.
+ */
+export async function deleteSandboxImage(imageName: string): Promise<void> {
+  if (typeof imageName !== "string" || imageName.length === 0) {
+    throw new TypeError("imageName must be a non-empty string");
+  }
+  await loadNativeBinding().deleteSandboxImage(catalogOptionsFromEnv(), imageName);
+}
+
+/** @internal `APIClient.deleteSandboxImage` with the client's credentials. */
+export async function deleteSandboxImageWithCredentials(
+  credentials: SandboxImageCatalogCredentials,
+  imageName: string,
+): Promise<void> {
+  if (typeof imageName !== "string" || imageName.length === 0) {
+    throw new TypeError("imageName must be a non-empty string");
+  }
+  await loadNativeBinding().deleteSandboxImage(
+    catalogOptionsFromCredentials(credentials),
+    imageName,
+  );
+}
+
+/**
+ * Look up a registered sandbox image by its registered name or id.
  *
- * Returns the registered sandbox template, or `null` if no image with that
- * name exists. Uses the same environment-based Tensorlake auth as
- * `createSandboxImage`. Ingress derives project scope from the API key.
+ * Returns the image in the sandbox-template shape (CAS images carry
+ * `snapshotFormatVersion === "content_addressed_streaming_v1"` plus `imageId`
+ * and `buildId`), or `null` if neither the Image Service nor the platform
+ * registry knows the reference. Uses the same environment-based Tensorlake
+ * auth as `createSandboxImage`. Ingress derives project scope from the API key.
  */
 export async function findSandboxImageByName(
   imageName: string,
@@ -612,59 +700,22 @@ export async function findSandboxImageByName(
   if (typeof imageName !== "string" || imageName.length === 0) {
     throw new TypeError("imageName must be a non-empty string");
   }
-
-  const context = buildContextFromEnv();
-  const bearerToken = context.apiKey;
-  if (!bearerToken) {
-    if (context.personalAccessToken) {
-      throw new Error(
-        "Sandbox image SDKs require TENSORLAKE_API_KEY. Personal access tokens are CLI-only.",
-      );
-    }
-    throw new Error("Missing TENSORLAKE_API_KEY credentials.");
-  }
-
-  const client = new CloudClient({
-    apiUrl: context.apiUrl,
-    apiKey: bearerToken,
-    namespace: context.namespace,
-  });
-  try {
-    return await client.findSandboxImageByName(imageName);
-  } finally {
-    client.close();
-  }
+  const json = await loadNativeBinding().findSandboxImage(
+    catalogOptionsFromEnv(),
+    imageName,
+  );
+  return json == null ? null : parseTemplate(json);
 }
 
 /**
- * List all registered sandbox images for the current project.
- *
- * Returns the registered sandbox templates (each with `id`, `name`,
- * `snapshotId`, `public`, etc.). Uses the same environment-based Tensorlake
- * auth as `createSandboxImage`. Ingress derives project scope from the API key.
+ * List all registered sandbox images for the current project: every CAS and
+ * legacy image in the sandbox-template shape, newest first. Uses the same
+ * environment-based Tensorlake auth as `createSandboxImage`. Ingress derives
+ * project scope from the API key.
  */
 export async function listSandboxImages(): Promise<SandboxTemplate[]> {
-  const context = buildContextFromEnv();
-  const bearerToken = context.apiKey;
-  if (!bearerToken) {
-    if (context.personalAccessToken) {
-      throw new Error(
-        "Sandbox image SDKs require TENSORLAKE_API_KEY. Personal access tokens are CLI-only.",
-      );
-    }
-    throw new Error("Missing TENSORLAKE_API_KEY credentials.");
-  }
-
-  const client = new CloudClient({
-    apiUrl: context.apiUrl,
-    apiKey: bearerToken,
-    namespace: context.namespace,
-  });
-  try {
-    return await client.listSandboxImages();
-  } finally {
-    client.close();
-  }
+  const json = await loadNativeBinding().listSandboxImages(catalogOptionsFromEnv());
+  return JSON.parse(json) as SandboxTemplate[];
 }
 
 export async function runCreateSandboxImageCli(argv = process.argv.slice(2)) {

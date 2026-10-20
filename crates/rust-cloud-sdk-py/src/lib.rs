@@ -31,8 +31,8 @@ use tensorlake::artifact_storage::models::{
 };
 use tensorlake::images::ImagesClient;
 use tensorlake::images::models::{ApplicationBuildContext, CreateApplicationBuildRequest};
+use tensorlake::sandbox_image_catalog::SandboxImageCatalog;
 use tensorlake::sandbox_images::SandboxImageBuildEvent;
-use tensorlake::sandbox_templates::SandboxTemplatesClient;
 use tensorlake::sandboxes::models::{
     ArchivedSandboxesPaginationDirection, ClaimSandboxRequest, CreateSandboxPoolRequest,
     CreateSandboxRequest, GetSandboxLogsRequest, ListArchivedSandboxesParams, SnapshotType,
@@ -188,91 +188,84 @@ impl CloudApiClient {
         })
     }
 
-    fn delete_sandbox_image(&self, image_name: String) -> PyResult<()> {
-        let namespace = self.namespace.clone();
-        self.run_with_retry(5, move |client| {
-            let encoded_image = urlencoding::encode(&image_name).into_owned();
-            let path = format!("/v1/namespaces/{namespace}/sandbox-images/{encoded_image}");
-            async move {
-                let request = client.request(Method::DELETE, &path).build()?;
-                let _response = client.execute(request).await?;
-                Ok(())
-            }
-        })
+    /// Delete a registered sandbox image by name or id through the merged
+    /// catalog (ADR 0107): an `image_` id or a name known to the Image
+    /// Service deletes a CAS image, a `sandbox_template_` id or a name known
+    /// only to the platform registry deletes a legacy one. Not found in
+    /// either raises the 404 as a `remote_api` error. Replayed only when the
+    /// request provably never reached a server: a lost response must not
+    /// retry into deleting a same-named image in the other catalog.
+    #[pyo3(signature = (image_name, organization_id=None, project_id=None))]
+    fn delete_sandbox_image(
+        &self,
+        image_name: String,
+        organization_id: Option<String>,
+        project_id: Option<String>,
+    ) -> PyResult<()> {
+        let catalog = self.sandbox_image_catalog(organization_id, project_id)?;
+        run_with_connect_replay_blocking(
+            catalog,
+            "rust cloud API request",
+            into_py_error,
+            move |catalog| {
+                let image_name = image_name.clone();
+                async move { catalog.delete(&image_name).await }
+            },
+        )
     }
 
-    /// Look up a registered sandbox image (template) by name.
-    ///
-    /// Returns the template JSON, or `None` when no image with that name
-    /// exists. When organization/project are both omitted, the authenticated
-    /// API key supplies the scope through the token-scoped Platform API route.
+    /// Look up a registered sandbox image by name or id through the merged
+    /// catalog. Returns the record in the platform template shape (CAS
+    /// images are mapped onto it), or `None` when neither catalog knows the
+    /// reference. When organization/project are both omitted, the
+    /// authenticated API key supplies the scope.
     fn find_sandbox_image_by_name(
         &self,
         organization_id: Option<String>,
         project_id: Option<String>,
         image_name: String,
     ) -> PyResult<Option<String>> {
-        let scope = match (organization_id, project_id) {
-            (Some(organization_id), Some(project_id)) => Some((organization_id, project_id)),
-            (None, None) => None,
-            _ => {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "organization_id and project_id must be provided together",
-                ));
-            }
-        };
-        self.run_with_retry(5, move |client| {
-            let scope = scope.clone();
-            let image_name = image_name.clone();
-            async move {
-                let templates = match scope {
-                    Some((organization_id, project_id)) => {
-                        SandboxTemplatesClient::new(client, organization_id, project_id)
+        let catalog = self.sandbox_image_catalog(organization_id, project_id)?;
+        run_with_retry_blocking(
+            catalog,
+            5,
+            "rust cloud API request",
+            into_py_error,
+            move |catalog| {
+                let image_name = image_name.clone();
+                async move {
+                    match catalog.find(&image_name).await? {
+                        Some(image) => {
+                            let json = serde_json::to_string(&image).map_err(SdkError::from)?;
+                            Ok(Some(json))
+                        }
+                        None => Ok(None),
                     }
-                    None => SandboxTemplatesClient::new_api_key_scoped(client),
-                };
-                match templates.find_by_name(&image_name).await? {
-                    Some(traced) => {
-                        let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
-                        Ok(Some(json))
-                    }
-                    None => Ok(None),
                 }
-            }
-        })
+            },
+        )
     }
 
-    /// List all registered sandbox images (templates) for the given scope.
-    ///
-    /// Returns a JSON array of templates. When organization/project are both
-    /// omitted, the authenticated API key supplies the scope.
+    /// List every registered sandbox image of both families, newest first
+    /// (ADR 0107 D20), as a JSON array in the platform template shape. When
+    /// organization/project are both omitted, the authenticated API key
+    /// supplies the scope.
     fn list_sandbox_images(
         &self,
         organization_id: Option<String>,
         project_id: Option<String>,
     ) -> PyResult<String> {
-        let scope = match (organization_id, project_id) {
-            (Some(organization_id), Some(project_id)) => Some((organization_id, project_id)),
-            (None, None) => None,
-            _ => {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "organization_id and project_id must be provided together",
-                ));
-            }
-        };
-        self.run_with_retry(5, move |client| {
-            let scope = scope.clone();
-            async move {
-                let templates = match scope {
-                    Some((organization_id, project_id)) => {
-                        SandboxTemplatesClient::new(client, organization_id, project_id)
-                    }
-                    None => SandboxTemplatesClient::new_api_key_scoped(client),
-                };
-                let traced = templates.list().await?;
-                serde_json::to_string(&*traced).map_err(SdkError::from)
-            }
-        })
+        let catalog = self.sandbox_image_catalog(organization_id, project_id)?;
+        run_with_retry_blocking(
+            catalog,
+            5,
+            "rust cloud API request",
+            into_py_error,
+            move |catalog| async move {
+                let images = catalog.list().await?;
+                serde_json::to_string(&images).map_err(SdkError::from)
+            },
+        )
     }
 
     fn git_repo_url(&self, project_id: String, repo: String) -> PyResult<String> {
@@ -3673,6 +3666,30 @@ where
 impl CloudApiClient {
     fn artifact_storage_client(&self) -> ArtifactStorageClient {
         self.artifact_storage.clone()
+    }
+
+    /// The merged image catalog over this client's credentials. Explicit
+    /// organization/project address the platform's project routes (PAT
+    /// callers); both omitted means the API key supplies the scope.
+    fn sandbox_image_catalog(
+        &self,
+        organization_id: Option<String>,
+        project_id: Option<String>,
+    ) -> PyResult<SandboxImageCatalog> {
+        let scope = match (organization_id, project_id) {
+            (Some(organization_id), Some(project_id)) => Some((organization_id, project_id)),
+            (None, None) => None,
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "organization_id and project_id must be provided together",
+                ));
+            }
+        };
+        Ok(SandboxImageCatalog::new(
+            self.client.clone(),
+            &self.api_url,
+            scope,
+        ))
     }
 
     fn run_with_retry<T, F, Fut>(&self, max_retries: usize, operation: F) -> PyResult<T>

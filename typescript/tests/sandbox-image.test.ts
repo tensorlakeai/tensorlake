@@ -6,7 +6,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   __setNativeBindingForTest,
   createSandboxImage,
+  deleteSandboxImage,
+  findSandboxImageByName,
   importSandboxImage,
+  listSandboxImages,
   runCreateSandboxImageCli,
   runImportSandboxImageCli,
 } from "../src/sandbox-image.js";
@@ -23,6 +26,8 @@ interface CapturedCall {
 function makeFakeBinding(opts: {
   resultJson?: string;
   events?: Array<{ eventType: string; stream?: string | null; message: string }>;
+  listJson?: string;
+  findJson?: string | null;
 } = {}) {
   const captured: CapturedCall = { options: {} };
   const handler = async (
@@ -55,6 +60,9 @@ function makeFakeBinding(opts: {
     loadDockerConfigJson: vi.fn(() => "{}"),
     buildSandboxImage: vi.fn(handler),
     importSandboxImage: vi.fn(handler),
+    listSandboxImages: vi.fn(async () => opts.listJson ?? "[]"),
+    findSandboxImage: vi.fn(async () => opts.findJson ?? null),
+    deleteSandboxImage: vi.fn(async () => {}),
   };
   __setNativeBindingForTest(binding);
   return { binding, captured };
@@ -280,6 +288,31 @@ describe("createSandboxImage", () => {
     await createSandboxImage(dockerfilePath, { dockerCompat: true });
 
     expect(captured.options.dockerCompat).toBe(true);
+  });
+
+  it("forwards cas and buildArgs to the native build binding and defaults them off", async () => {
+    const tempDir = await mkdir(
+      path.join(os.tmpdir(), `tensorlake-images-${Date.now()}-cas`),
+      { recursive: true },
+    );
+    const dockerfilePath = path.join(tempDir, "Dockerfile");
+    await writeFile(
+      dockerfilePath,
+      "ARG PY_TAG=3.12-slim\nFROM python:${PY_TAG}\n",
+      "utf8",
+    );
+
+    const { captured } = makeFakeBinding();
+    await createSandboxImage(dockerfilePath, {
+      cas: true,
+      buildArgs: { PY_TAG: "3.13" },
+    });
+    expect(captured.options.cas).toBe(true);
+    expect(captured.options.buildArgs).toEqual({ PY_TAG: "3.13" });
+
+    await createSandboxImage(dockerfilePath);
+    expect(captured.options.cas).toBe(false);
+    expect(captured.options.buildArgs).toBeUndefined();
   });
 
   it("forwards native events back through the user emit callback", async () => {
@@ -566,6 +599,14 @@ describe("importSandboxImage", () => {
     expect(result).toEqual({ id: "tpl-1", snapshot_id: "snap-1" });
   });
 
+  it("forwards cas to the native import binding and defaults it off", async () => {
+    const { captured } = makeFakeBinding();
+    await importSandboxImage("ubuntu:24.04", { cas: true });
+    expect(captured.options.cas).toBe(true);
+    await importSandboxImage("ubuntu:24.04");
+    expect(captured.options.cas).toBe(false);
+  });
+
   it("derives the registered name from the reference, stripping tag and registry path", async () => {
     const { captured } = makeFakeBinding();
     await importSandboxImage("ghcr.io/org/app@sha256:abc123");
@@ -648,6 +689,75 @@ describe("importSandboxImage", () => {
       projectId: "proj_1",
       useScopeHeaders: true,
     });
+  });
+});
+
+describe("sandbox image catalog", () => {
+  beforeEach(() => {
+    vi.stubEnv("TENSORLAKE_API_URL", "https://api.tensorlake.test");
+    vi.stubEnv("TENSORLAKE_API_KEY", "tl_key_test");
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    __setNativeBindingForTest(undefined);
+    vi.restoreAllMocks();
+  });
+
+  const record = {
+    id: "image_abc",
+    name: "team/app",
+    snapshotId: "snap-1",
+    snapshotFormatVersion: "content_addressed_streaming_v1",
+    rootfsDiskBytes: 1024,
+    public: false,
+    createdAt: "2026-10-15T00:00:00.000Z",
+    imageId: "c".repeat(64),
+  };
+
+  it("lists both families through the native catalog", async () => {
+    const { binding } = makeFakeBinding({ listJson: JSON.stringify([record]) });
+    const images = await listSandboxImages();
+    expect(images).toEqual([record]);
+    expect(binding.listSandboxImages).toHaveBeenCalledWith({
+      apiUrl: "https://api.tensorlake.test",
+      bearerToken: "tl_key_test",
+      useScopeHeaders: false,
+    });
+  });
+
+  it("finds one image by name or id and returns null when unknown", async () => {
+    const { binding } = makeFakeBinding({ findJson: JSON.stringify(record) });
+    expect(await findSandboxImageByName("team/app")).toEqual(record);
+    expect(binding.findSandboxImage).toHaveBeenCalledWith(
+      expect.objectContaining({ bearerToken: "tl_key_test" }),
+      "team/app",
+    );
+    makeFakeBinding({ findJson: null });
+    expect(await findSandboxImageByName("missing")).toBeNull();
+    await expect(findSandboxImageByName("")).rejects.toThrow(TypeError);
+  });
+
+  it("deletes through the native catalog and surfaces its errors", async () => {
+    const { binding } = makeFakeBinding();
+    await deleteSandboxImage("team/app");
+    expect(binding.deleteSandboxImage).toHaveBeenCalledWith(
+      expect.objectContaining({ apiUrl: "https://api.tensorlake.test" }),
+      "team/app",
+    );
+    binding.deleteSandboxImage.mockRejectedValueOnce(
+      new Error('{"category":"remote_api","status":404,"message":"image \'missing\' not found"}'),
+    );
+    await expect(deleteSandboxImage("missing")).rejects.toThrow("not found");
+  });
+
+  it("requires an API key", async () => {
+    vi.stubEnv("TENSORLAKE_API_KEY", "");
+    vi.stubEnv("TENSORLAKE_PAT", "tl_pat_test");
+    makeFakeBinding();
+    await expect(listSandboxImages()).rejects.toThrow("Personal access tokens are CLI-only");
+    vi.stubEnv("TENSORLAKE_PAT", "");
+    await expect(findSandboxImageByName("x")).rejects.toThrow("Missing TENSORLAKE_API_KEY");
   });
 });
 

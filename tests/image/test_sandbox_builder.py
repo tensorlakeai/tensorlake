@@ -130,6 +130,7 @@ class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
             None,
             None,
             cas=False,
+            build_args=None,
             emit=ANY,
             docker_config_json=None,
         )
@@ -200,6 +201,7 @@ class TestBuildSandboxImageFromDockerfileOptions(unittest.TestCase):
             None,
             None,
             cas=False,
+            build_args=None,
             emit=ANY,
             docker_config_json=None,
         )
@@ -257,6 +259,71 @@ class TestBuildSandboxImageFromDockerfileOptions(unittest.TestCase):
         self.assertIn({"type": "status", "message": "builder running"}, emitted)
 
 
+class TestCasBuildOptions(unittest.TestCase):
+    def test_cas_and_build_args_are_forwarded_for_builds(self):
+        ctx = _make_ctx()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dockerfile_path = Path(tmpdir) / "Dockerfile"
+            dockerfile_path.write_text(
+                "ARG PY_TAG=3.12-slim\nFROM python:${PY_TAG}\n", encoding="utf-8"
+            )
+            build_ctx, rust_builder = _make_build_patches(ctx)
+            with build_ctx, rust_builder as rust_builder_mock:
+                sbm.build_sandbox_image(
+                    str(dockerfile_path),
+                    registered_name="cas-image",
+                    cas=True,
+                    build_args={"PY_TAG": "3.13"},
+                )
+
+        kwargs = rust_builder_mock.call_args.kwargs
+        self.assertIs(kwargs["cas"], True)
+        self.assertEqual(kwargs["build_args"], {"PY_TAG": "3.13"})
+
+    def test_cas_is_forwarded_for_imports(self):
+        ctx = _make_ctx()
+
+        build_ctx, rust_importer = _make_import_patches(ctx)
+        with build_ctx, rust_importer as rust_importer_mock:
+            sbm.import_sandbox_image("ubuntu:24.04", cas=True)
+
+        self.assertIs(rust_importer_mock.call_args.kwargs["cas"], True)
+
+    def test_image_build_stays_legacy(self):
+        """``Image.build`` and application images never opt into CAS."""
+        ctx = _make_ctx()
+        image = Image(name="legacy", base_image="python:3.12-slim")
+
+        build_ctx, rust_builder = _make_build_patches(ctx)
+        with build_ctx, rust_builder as rust_builder_mock:
+            image.build()
+
+        kwargs = rust_builder_mock.call_args.kwargs
+        self.assertIs(kwargs["cas"], False)
+        self.assertIsNone(kwargs["build_args"])
+
+    def test_registration_event_reads_the_template_shaped_record(self):
+        emitted = []
+        result = sbm._finish_image_registration(
+            '{"id":"image_abc","snapshotId":"snap-1","name":"cas-image"}',
+            "cas-image",
+            emitted.append,
+        )
+        self.assertEqual(result["id"], "image_abc")
+        self.assertEqual(
+            emitted,
+            [
+                {
+                    "type": "image_registered",
+                    "image_id": "image_abc",
+                    "name": "cas-image",
+                    "snapshot_id": "snap-1",
+                }
+            ],
+        )
+
+
 class TestDeleteSandboxImage(unittest.TestCase):
     def test_deletes_sandbox_image_with_env_context(self):
         ctx = _make_ctx()
@@ -282,6 +349,24 @@ class TestDeleteSandboxImage(unittest.TestCase):
         with patch.object(sbm, "_build_context_from_env", return_value=ctx):
             with self.assertRaises(sbm.SandboxImageDeleteError):
                 sbm.delete_sandbox_image("image")
+
+    def test_delete_of_an_unknown_image_raises(self):
+        """The merged catalog reports not-found as an error (the legacy
+        server route used to answer 204 for unknown names)."""
+        ctx = _make_ctx()
+
+        with (
+            patch.object(sbm, "_build_context_from_env", return_value=ctx),
+            patch.object(
+                sbm,
+                "_rust_delete_sandbox_image",
+                side_effect=RuntimeError("image 'missing' not found"),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                sbm.SandboxImageDeleteError, "image 'missing' not found"
+            ):
+                sbm.delete_sandbox_image("missing")
 
 
 class TestFindSandboxImageByName(unittest.TestCase):
