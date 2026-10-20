@@ -15,7 +15,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 from tensorlake._tracing import USER_AGENT
 from tensorlake.image import Image, builds
@@ -78,6 +78,163 @@ def _native_error(payload: dict) -> Exception:
     return Exception("image_build", None, json.dumps(payload))
 
 
+class TestBuildEnums(unittest.TestCase):
+    def test_known_build_values_are_enum_members(self):
+        for field, enum in (
+            ("status", builds.ImageBuildStatus),
+            ("kind", builds.ImageBuildKind),
+            ("phase", builds.ImageBuildPhase),
+        ):
+            for member in enum:
+                with self.subTest(field=field, value=member.value):
+                    info = builds.ImageBuildInfo.from_dict(
+                        _build_json(**{field: member.value})
+                    )
+                    self.assertIs(getattr(info, field), member)
+
+    def test_future_build_values_are_unknown_and_raw_is_preserved(self):
+        raw = _build_json(
+            status="future_status", kind="future_kind", phase="future_phase"
+        )
+        info = builds.ImageBuildInfo.from_dict(raw)
+        self.assertIs(info.status, builds.ImageBuildStatus.UNKNOWN)
+        self.assertIs(info.kind, builds.ImageBuildKind.UNKNOWN)
+        self.assertIs(info.phase, builds.ImageBuildPhase.UNKNOWN)
+        self.assertFalse(info.is_terminal)
+        self.assertEqual(info.raw, raw)
+        self.assertEqual(raw["status"], "future_status")
+
+    def test_missing_optional_build_values_remain_absent(self):
+        for raw in ({"build_id": "b", "status": "pending"}, _build_json(kind=None)):
+            info = builds.ImageBuildInfo.from_dict(raw)
+            self.assertIsNone(info.kind)
+            self.assertIsNone(info.phase)
+
+    def test_cancellation_outcomes_are_enums_and_unknown_is_unconfirmed(self):
+        for member in builds.ImageBuildCancellationOutcome:
+            outcome = builds.CancelBuildOutcome.from_dict({"outcome": member.value})
+            self.assertIs(outcome.outcome, member)
+            self.assertEqual(
+                outcome.confirmed,
+                member
+                in (
+                    builds.ImageBuildCancellationOutcome.CANCELLED,
+                    builds.ImageBuildCancellationOutcome.ALREADY_CANCELLED,
+                    builds.ImageBuildCancellationOutcome.ALREADY_FAILED,
+                ),
+            )
+        outcome = builds.CancelBuildOutcome.from_dict({"outcome": "future_outcome"})
+        self.assertIs(outcome.outcome, builds.ImageBuildCancellationOutcome.UNKNOWN)
+        self.assertFalse(outcome.confirmed)
+
+    def test_error_codes_are_enums_and_unknown_code_keeps_raw_details(self):
+        for member in builds.ImageBuildErrorCode:
+            error = builds._typed_build_error(
+                _native_error({"code": member.value, "message": "build error"})
+            )
+            self.assertIs(error.code, member)
+            self.assertIs(error.details["code"], member)
+        error = builds._typed_build_error(
+            _native_error({"code": "future_code", "message": "build error"})
+        )
+        self.assertIs(type(error), builds.ImageBuildError)
+        self.assertIs(error.code, builds.ImageBuildErrorCode.UNKNOWN)
+        self.assertEqual(error.raw_details["code"], "future_code")
+
+    def test_nested_error_values_are_normalized(self):
+        payload = {
+            "code": "image_build_in_progress",
+            "message": "conflict",
+            "active_kind": "future_kind",
+            "active_status": "future_status",
+            "info": _build_json(status="future_status"),
+        }
+        error = builds._typed_build_error(_native_error(payload))
+        self.assertIsInstance(error, builds.ImageBuildInProgressError)
+        self.assertIs(error.active_kind, builds.ImageBuildKind.UNKNOWN)
+        self.assertIs(error.active_status, builds.ImageBuildStatus.UNKNOWN)
+        self.assertIs(error.details["info"].status, builds.ImageBuildStatus.UNKNOWN)
+        self.assertEqual(error.raw_details, payload)
+        absent = builds.ImageBuildInProgressError("conflict")
+        self.assertIsNone(absent.active_kind)
+        self.assertIsNone(absent.active_status)
+
+    def test_unknown_interruption_cannot_confirm_cancellation(self):
+        error = builds._typed_build_error(
+            _native_error(
+                {
+                    "code": "interrupted",
+                    "message": "interrupted",
+                    "outcome": "future_outcome",
+                    "confirmed": True,
+                }
+            )
+        )
+        self.assertIs(error.outcome, builds.ImageBuildCancellationOutcome.UNKNOWN)
+        self.assertFalse(error.confirmed)
+        self.assertFalse(error.details["confirmed"])
+        self.assertEqual(error.raw_details["outcome"], "future_outcome")
+        self.assertTrue(error.raw_details["confirmed"])
+        self.assertIs(
+            builds.ImageBuildInterruptedError("interrupted").outcome,
+            builds.ImageBuildCancellationOutcome.UNCONFIRMED,
+        )
+
+    def test_wait_normalizes_callback_enums_without_mutating_native_events(self):
+        events = []
+        raw = {
+            "type": "future_event",
+            "status": "future_status",
+            "phase": "future_phase",
+            "outcome": "future_outcome",
+            "confirmed": True,
+            "future_field": 42,
+        }
+
+        def wait_native(*args):
+            emit = args[-1]
+            for member in builds.ImageBuildEventType:
+                emit({"type": member.value})
+            emit(raw)
+            emit({"type": "build_progress", "phase": None})
+            return json.dumps(_result_json())
+
+        with (
+            patch.object(builds, "_build_context_from_env", return_value=_ctx()),
+            patch.object(builds, "_rust_wait_image_build", side_effect=wait_native),
+        ):
+            builds.wait_build("build-1", emit=events.append)
+        for member, event in zip(builds.ImageBuildEventType, events):
+            self.assertIs(event["type"], member)
+        future = events[-2]
+        self.assertIs(future["type"], builds.ImageBuildEventType.UNKNOWN)
+        self.assertIs(future["status"], builds.ImageBuildStatus.UNKNOWN)
+        self.assertIs(future["phase"], builds.ImageBuildPhase.UNKNOWN)
+        self.assertIs(future["outcome"], builds.ImageBuildCancellationOutcome.UNKNOWN)
+        self.assertFalse(future["confirmed"])
+        self.assertEqual(future["future_field"], 42)
+        self.assertEqual(raw["type"], "future_event")
+        self.assertTrue(raw["confirmed"])
+        self.assertIsNone(events[-1]["phase"])
+        self.assertNotIn("status", events[-1])
+
+    def test_cas_import_normalizes_callback_values(self):
+        events = []
+
+        def import_native(*args, emit, **kwargs):
+            emit({"type": "build_progress", "status": "future_status"})
+            return json.dumps(_result_json())
+
+        with (
+            patch.object(sbm, "_build_context_from_env", return_value=_ctx()),
+            patch.object(sbm, "_rust_import_sandbox_image", side_effect=import_native),
+        ):
+            sbm.import_sandbox_image("ubuntu:24.04", cas=True, emit=events.append)
+        self.assertIs(events[0]["type"], builds.ImageBuildEventType.STATUS)
+        self.assertIs(events[1]["status"], builds.ImageBuildStatus.UNKNOWN)
+        self.assertIs(events[-1]["type"], builds.ImageBuildEventType.IMAGE_REGISTERED)
+
+
 class TestStartBuild(unittest.TestCase):
     def test_start_build_forwards_exact_positional_arguments(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -121,7 +278,7 @@ class TestStartBuild(unittest.TestCase):
             None,
             None,
             {"A": "1"},
-            events.append,
+            ANY,
             "{}",
         )
         self.assertEqual(handle.build_id, "build-1")
@@ -169,7 +326,7 @@ class TestStartBuild(unittest.TestCase):
             "default",
             False,
             USER_AGENT,
-            builds._noop_emit,
+            ANY,
             "{}",
         )
         self.assertEqual(handle.build_id, "build-1")
@@ -306,7 +463,7 @@ class TestGetWaitCancel(unittest.TestCase):
             "default",
             False,
             USER_AGENT,
-            events.append,
+            ANY,
         )
         self.assertEqual(result["id"], "image_ok")
         self.assertEqual(

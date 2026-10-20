@@ -8,6 +8,12 @@ import {
   importSandboxImage,
 } from "../src/sandbox-image.js";
 import {
+  ImageBuildCancellationOutcome,
+  ImageBuildErrorCode,
+  ImageBuildEventType,
+  ImageBuildKind,
+  ImageBuildPhase,
+  ImageBuildStatus,
   ImageBuildCancelledError,
   ImageBuildError,
   ImageBuildFailedError,
@@ -192,6 +198,124 @@ describe("image build operations", () => {
       build_id: "build-1",
       client_request_id: "rid-gen",
     });
+  });
+
+  it("returns enum members for every known build status, kind and phase", async () => {
+    const binding = makeFakeBinding();
+    for (const [field, values] of [
+      ["status", ImageBuildStatus],
+      ["kind", ImageBuildKind],
+      ["phase", ImageBuildPhase],
+    ] as const) {
+      for (const value of Object.values(values)) {
+        binding.getImageBuild.mockResolvedValueOnce(JSON.stringify(buildJson("pending", { [field]: value })));
+        const handle = await getImageBuild("build-1");
+        expect(handle.info[field]).toBe(value);
+      }
+    }
+  });
+
+  it("maps future build fields to UNKNOWN while retaining the raw record", async () => {
+    const binding = makeFakeBinding();
+    const raw = buildJson("future_status", { kind: "future_kind", phase: "future_phase" });
+    binding.getImageBuild.mockResolvedValueOnce(JSON.stringify(raw));
+    const { info } = await getImageBuild("build-1");
+    expect(info.status).toBe(ImageBuildStatus.UNKNOWN);
+    expect(info.kind).toBe(ImageBuildKind.UNKNOWN);
+    expect(info.phase).toBe(ImageBuildPhase.UNKNOWN);
+    expect(info.raw).toEqual(raw);
+    for (const value of [null, undefined]) {
+      binding.getImageBuild.mockResolvedValueOnce(JSON.stringify(buildJson("pending", { kind: value, phase: value })));
+      const { info: absent } = await getImageBuild("build-1");
+      expect(absent.kind).toBe(value);
+      expect(absent.phase).toBe(value);
+    }
+  });
+
+  it("normalizes all error codes and preserves unknown error details", () => {
+    for (const code of Object.values(ImageBuildErrorCode)) {
+      const error = toImageBuildError(nativeError({ code, message: "build error" })) as ImageBuildError;
+      expect(error.code).toBe(code);
+      expect(error.details.code).toBe(code);
+    }
+    const error = toImageBuildError(nativeError({
+      code: "future_code", message: "future error",
+      active_kind: "future_kind", active_status: "future_status",
+      info: buildJson("future_status"),
+    })) as ImageBuildError;
+    expect(error.constructor).toBe(ImageBuildError);
+    expect(error.code).toBe(ImageBuildErrorCode.UNKNOWN);
+    expect(error.details.activeKind).toBe(ImageBuildKind.UNKNOWN);
+    expect(error.details.activeStatus).toBe(ImageBuildStatus.UNKNOWN);
+    expect(error.details.info?.status).toBe(ImageBuildStatus.UNKNOWN);
+    expect(error.rawDetails.code).toBe("future_code");
+    expect(error.rawDetails.activeKind).toBe("future_kind");
+    expect(error.rawDetails.activeStatus).toBe("future_status");
+  });
+
+  it("normalizes conflict attributes and leaves missing attributes absent", () => {
+    const error = toImageBuildError(nativeError({
+      code: "image_build_in_progress", message: "conflict",
+      active_kind: "future_kind", active_status: "future_status",
+    })) as ImageBuildInProgressError;
+    expect(error.activeKind).toBe(ImageBuildKind.UNKNOWN);
+    expect(error.activeStatus).toBe(ImageBuildStatus.UNKNOWN);
+    const absent = toImageBuildError(nativeError({
+      code: "image_build_in_progress", message: "conflict",
+    })) as ImageBuildInProgressError;
+    expect(absent.activeKind).toBeUndefined();
+    expect(absent.activeStatus).toBeUndefined();
+  });
+
+  it("normalizes cancellation outcomes and never confirms an unknown outcome", async () => {
+    const binding = makeFakeBinding();
+    for (const outcome of Object.values(ImageBuildCancellationOutcome)) {
+      binding.cancelImageBuild.mockResolvedValueOnce(JSON.stringify({ outcome, build: null }));
+      const result = await cancelImageBuild({ buildId: "build-1" });
+      expect(result.outcome).toBe(outcome);
+      expect(result.confirmed).toBe([
+        ImageBuildCancellationOutcome.CANCELLED,
+        ImageBuildCancellationOutcome.ALREADY_CANCELLED,
+        ImageBuildCancellationOutcome.ALREADY_FAILED,
+      ].includes(outcome));
+    }
+    binding.cancelImageBuild.mockResolvedValueOnce(JSON.stringify({ outcome: "future_outcome" }));
+    expect(await cancelImageBuild({ buildId: "build-1" })).toMatchObject({
+      outcome: ImageBuildCancellationOutcome.UNKNOWN, confirmed: false,
+    });
+    const error = toImageBuildError(nativeError({
+      code: "interrupted", message: "interrupted", outcome: "future_outcome", confirmed: true,
+    })) as ImageBuildInterruptedError;
+    expect(error.outcome).toBe(ImageBuildCancellationOutcome.UNKNOWN);
+    expect(error.confirmed).toBe(false);
+    expect(error.details.confirmed).toBe(false);
+    expect(error.rawDetails.outcome).toBe("future_outcome");
+    expect(error.rawDetails.confirmed).toBe(true);
+  });
+
+  it("normalizes known and future callback values and preserves optional fields", async () => {
+    const binding = makeFakeBinding();
+    binding.waitImageBuild.mockImplementationOnce(async (_options, _id, _wait, emit) => {
+      for (const eventType of Object.values(ImageBuildEventType)) {
+        emit?.({ eventType, message: "event" } as never);
+      }
+      emit?.({ eventType: "future_event", message: "event", status: "future_status", outcome: "future_outcome", confirmed: true } as never);
+      emit?.({ eventType: "build_progress", message: "event", phase: "future_phase" } as never);
+      emit?.({ eventType: "build_progress", message: "event", phase: null } as never);
+      return JSON.stringify(resultJson());
+    });
+    const events: Record<string, unknown>[] = [];
+    await waitImageBuild("build-1", { emit: (event) => events.push(event) });
+    for (const [index, type] of Object.values(ImageBuildEventType).entries()) {
+      expect(events[index]?.type).toBe(type);
+    }
+    expect(events.at(-3)).toMatchObject({
+      type: ImageBuildEventType.UNKNOWN, status: ImageBuildStatus.UNKNOWN,
+      outcome: ImageBuildCancellationOutcome.UNKNOWN, confirmed: false,
+    });
+    expect(events.at(-2)?.phase).toBe(ImageBuildPhase.UNKNOWN);
+    expect(events.at(-1)?.phase).toBeNull();
+    expect(events.at(-1)).not.toHaveProperty("status");
   });
 
   it("startImageBuild renders an Image into an empty context and cleans it up", async () => {

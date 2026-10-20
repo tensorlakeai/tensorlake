@@ -2113,6 +2113,29 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         _, snapshot_type = fake.create_snapshot_calls[0]
         self.assertIsNone(snapshot_type)
 
+    def test_snapshot_wait_does_not_treat_future_status_as_ready(self):
+        class _FutureStatusClient(_FakeRustClient):
+            get_calls = 0
+
+            def get_snapshot_json(self, snapshot_id):
+                self.get_calls += 1
+                status = "future_status" if self.get_calls == 1 else "local_ready"
+                return "trace-get", json.dumps(
+                    {
+                        "id": "snap-1",
+                        "namespace": "default",
+                        "sandbox_id": "sbx-1",
+                        "status": status,
+                    }
+                )
+
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        fake = _FutureStatusClient()
+        client._rust_client = fake
+        info = client.snapshot_and_wait("sbx-1", poll_interval=0)
+        self.assertIs(info.status, SnapshotStatus.LOCAL_READY)
+        self.assertEqual(fake.get_calls, 2)
+
 
 class TestSnapshotStatusCompatibility(unittest.TestCase):
     def test_known_statuses_preserve_enum_values(self):
@@ -2135,7 +2158,7 @@ class TestSnapshotStatusCompatibility(unittest.TestCase):
                             json.loads(info.model_dump_json())["status"], status.value
                         )
 
-    def test_unknown_statuses_are_preserved_as_strings(self):
+    def test_unknown_statuses_map_to_unknown_enum(self):
         for model in (CreateSnapshotResponse, SnapshotInfo):
             payload = {
                 "snapshot_id": "snap-1",
@@ -2148,10 +2171,10 @@ class TestSnapshotStatusCompatibility(unittest.TestCase):
                 ("json", model.model_validate_json(json.dumps(payload))),
             ):
                 with self.subTest(model=model.__name__, mode=mode):
-                    self.assertIs(type(info.status), str)
-                    self.assertEqual(info.status, "future_status")
+                    self.assertIs(info.status, SnapshotStatus.UNKNOWN)
+                    self.assertEqual(info.status.value, "unknown")
                     self.assertEqual(
-                        json.loads(info.model_dump_json())["status"], "future_status"
+                        json.loads(info.model_dump_json())["status"], "unknown"
                     )
 
 

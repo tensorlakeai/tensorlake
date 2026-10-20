@@ -1883,6 +1883,27 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
         _, snapshot_type = fake.create_snapshot_calls[0]
         self.assertIsNone(snapshot_type)
 
+    async def test_snapshot_wait_does_not_treat_future_status_as_ready(self):
+        class _FutureStatusClient(_FakeAsyncRustClient):
+            get_calls = 0
+
+            async def get_snapshot_json_async(self, *, snapshot_id):
+                self.get_calls += 1
+                status = "future_status" if self.get_calls == 1 else "local_ready"
+                return "trace-get", json.dumps(
+                    {
+                        "id": "snap-1",
+                        "namespace": "default",
+                        "sandbox_id": "sbx-1",
+                        "status": status,
+                    }
+                )
+
+        fake = _FutureStatusClient()
+        info = await _make_client(fake).snapshot_and_wait("sbx-1", poll_interval=0)
+        self.assertIs(info.status, SnapshotStatus.LOCAL_READY)
+        self.assertEqual(fake.get_calls, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

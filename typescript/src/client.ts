@@ -1,4 +1,5 @@
 import * as defaults from "./defaults.js";
+import { enumValue } from "./enum.js";
 import { SandboxError, SandboxPending, formatErrorDetails } from "./errors.js";
 import type { Traced } from "./traced.js";
 import { releaseNativeHandle } from "./native-worker-client.js";
@@ -963,20 +964,24 @@ export class SandboxClient {
     sandboxId: string,
     options?: SnapshotOptions,
   ): Promise<CreateSnapshotResponse> {
-    return this.plainJson<CreateSnapshotResponse>(
+    const response = await this.plainJson<CreateSnapshotResponse>(
       () =>
         this.native.createSnapshot(sandboxId, options?.snapshotType ?? null),
       "snapshotId",
       { sandboxId, notFoundKind: "sandbox" },
     );
+    response.status = enumValue(SnapshotStatus, response.status);
+    return response;
   }
 
   /** Get current status and metadata for a snapshot by ID. */
   async getSnapshot(snapshotId: string): Promise<Traced<SnapshotInfo>> {
-    return this.tracedJson<SnapshotInfo>(
+    const info = await this.tracedJson<SnapshotInfo>(
       () => this.native.getSnapshot(snapshotId),
       "snapshotId",
     );
+    info.status = enumValue(SnapshotStatus, info.status);
+    return info;
   }
 
   /** List all snapshots in the namespace. */
@@ -988,7 +993,11 @@ export class SandboxClient {
       snapshots?: Record<string, unknown>[];
     };
     const snapshots = (parsed.snapshots ?? []).map(
-      (s) => fromSnakeKeys(s, "snapshotId") as SnapshotInfo,
+      (s) => {
+        const info = fromSnakeKeys(s, "snapshotId") as SnapshotInfo;
+        info.status = enumValue(SnapshotStatus, info.status);
+        return info;
+      },
     );
     return Object.assign(snapshots, { traceId });
   }
@@ -1388,7 +1397,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 function snapshotStatusSatisfiesWaitCondition(
-  status: SnapshotStatus | string,
+  status: SnapshotStatus,
   waitUntil: SnapshotWaitCondition,
 ): boolean {
   if (waitUntil === "local_ready") {

@@ -255,6 +255,8 @@ def _run_rust_image_create(
     ctx, token = _resolve_build_credentials(allow_pat=allow_pat)
     use_explicit_scope = allow_pat and ctx.api_key is None
 
+    if cas:
+        emit = _forwarder(emit)
     emit({"type": "status", "message": f"Building image '{registered_name}'..."})
 
     try:
@@ -278,7 +280,7 @@ def _run_rust_image_create(
             context_dir,
             cas=cas,
             build_args=build_args,
-            emit=_forwarder(emit),
+            emit=emit if cas else _forwarder(emit),
             docker_config_json=docker_config_json,
         )
     except Exception as exc:
@@ -309,6 +311,8 @@ def _run_rust_image_import(
     ctx, token = _resolve_build_credentials(allow_pat=allow_pat)
     use_explicit_scope = allow_pat and ctx.api_key is None
 
+    if cas:
+        emit = _forwarder(emit)
     emit(
         {
             "type": "status",
@@ -336,7 +340,7 @@ def _run_rust_image_import(
             USER_AGENT,
             docker_compat,
             cas=cas,
-            emit=_forwarder(emit),
+            emit=emit if cas else _forwarder(emit),
             docker_config_json=docker_config_json,
         )
     except Exception as exc:
@@ -371,7 +375,9 @@ def _resolve_build_credentials(*, allow_pat: bool = False) -> tuple[Context, str
 
 def _forwarder(emit: EmitFn) -> EmitFn:
     def forward_event(event: dict) -> None:
-        emit(dict(event))
+        from ._build_enums import normalize_build_event
+
+        emit(normalize_build_event(event))
 
     return forward_event
 

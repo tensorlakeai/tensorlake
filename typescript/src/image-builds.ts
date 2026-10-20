@@ -1,6 +1,25 @@
 import path from "node:path";
 import os from "node:os";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { enumValue } from "./enum.js";
+import {
+  ImageBuildCancellationOutcome,
+  ImageBuildErrorCode,
+  ImageBuildEventType,
+  ImageBuildKind,
+  ImageBuildPhase,
+  ImageBuildStatus,
+  isConfirmedCancellation,
+} from "./image-build-enums.js";
+
+export {
+  ImageBuildCancellationOutcome,
+  ImageBuildErrorCode,
+  ImageBuildEventType,
+  ImageBuildKind,
+  ImageBuildPhase,
+  ImageBuildStatus,
+} from "./image-build-enums.js";
 import type { SandboxTemplate } from "./cloud-models.js";
 import { Image, dockerfileContent } from "./image.js";
 import {
@@ -25,6 +44,10 @@ import {
  * the legacy functions in `sandbox-image.ts` keep their own requests,
  * results, errors and interruption behavior.
  *
+ * Categorical response fields use enums. Values added by newer servers map
+ * to each enum's `UNKNOWN` member. Build records retain original values in
+ * `raw`; errors expose the originals in `rawDetails`.
+ *
  * **Build ids are the immutable record.** An image name and its `image_` id
  * name the *current* image; a rebuild replaces what they point at. A build id
  * and its result never change, so `wait` returns this build's own result even
@@ -48,17 +71,17 @@ import {
 
 /** Structured payload the native binding attaches to image-build failures. */
 export interface ImageBuildErrorDetails {
-  code: string;
+  code: ImageBuildErrorCode;
   message: string;
   buildId?: string | null;
   clientRequestId?: string | null;
   imageName?: string | null;
   activeBuildId?: string | null;
-  activeKind?: string | null;
-  activeStatus?: string | null;
+  activeKind?: ImageBuildKind | null;
+  activeStatus?: ImageBuildStatus | null;
   error?: string | null;
-  info?: Record<string, unknown> | null;
-  outcome?: string | null;
+  info?: ImageBuildInfo | null;
+  outcome?: ImageBuildCancellationOutcome | null;
   confirmed?: boolean | null;
   result?: Record<string, unknown> | null;
   waitedSecs?: number | null;
@@ -67,16 +90,35 @@ export interface ImageBuildErrorDetails {
 
 /** An Image Service build operation failed. `code` is stable. */
 export class ImageBuildError extends Error {
-  readonly code: string;
+  readonly code: ImageBuildErrorCode;
   readonly buildId?: string;
   readonly clientRequestId?: string;
   readonly details: ImageBuildErrorDetails;
+  /** Original decoded error fields, before enum normalization. */
+  readonly rawDetails: Readonly<Record<string, unknown>>;
 
   constructor(details: ImageBuildErrorDetails) {
     super(details.message);
     this.name = "ImageBuildError";
-    this.code = details.code;
-    this.details = details;
+    this.rawDetails = { ...details };
+    this.code = enumValue(ImageBuildErrorCode, details.code);
+    this.details = { ...details, code: this.code };
+    if (details.activeKind != null) {
+      this.details.activeKind = enumValue(ImageBuildKind, details.activeKind);
+    }
+    if (details.activeStatus != null) {
+      this.details.activeStatus = enumValue(ImageBuildStatus, details.activeStatus);
+    }
+    if (details.outcome != null) {
+      this.details.outcome = enumValue(ImageBuildCancellationOutcome, details.outcome);
+      if (details.confirmed != null) {
+        this.details.confirmed = details.confirmed === true &&
+          isConfirmedCancellation(this.details.outcome);
+      }
+    }
+    if (details.info != null) {
+      this.details.info = parseBuildInfo(details.info as unknown as Record<string, unknown>);
+    }
     if (details.buildId) this.buildId = details.buildId;
     if (details.clientRequestId) this.clientRequestId = details.clientRequestId;
   }
@@ -101,16 +143,16 @@ export class ImageBuildNotFoundError extends ImageBuildError {
 export class ImageBuildInProgressError extends ImageBuildError {
   readonly imageName?: string;
   readonly activeBuildId?: string;
-  readonly activeKind?: string;
-  readonly activeStatus?: string;
+  readonly activeKind?: ImageBuildKind;
+  readonly activeStatus?: ImageBuildStatus;
 
   constructor(details: ImageBuildErrorDetails) {
     super(details);
     this.name = "ImageBuildInProgressError";
     if (details.imageName) this.imageName = details.imageName;
     if (details.activeBuildId) this.activeBuildId = details.activeBuildId;
-    if (details.activeKind) this.activeKind = details.activeKind;
-    if (details.activeStatus) this.activeStatus = details.activeStatus;
+    if (this.details.activeKind != null) this.activeKind = this.details.activeKind;
+    if (this.details.activeStatus != null) this.activeStatus = this.details.activeStatus;
   }
 }
 
@@ -123,7 +165,7 @@ export class ImageBuildFailedError extends ImageBuildError {
     super(details);
     this.name = "ImageBuildFailedError";
     this.error = details.error ?? "no error recorded";
-    if (details.info) this.info = parseBuildInfo(details.info);
+    if (this.details.info) this.info = this.details.info;
   }
 }
 
@@ -134,7 +176,7 @@ export class ImageBuildCancelledError extends ImageBuildError {
   constructor(details: ImageBuildErrorDetails) {
     super(details);
     this.name = "ImageBuildCancelledError";
-    if (details.info) this.info = parseBuildInfo(details.info);
+    if (this.details.info) this.info = this.details.info;
   }
 }
 
@@ -153,15 +195,15 @@ export class ImageBuildTimeoutError extends ImageBuildError {
  * not to publish. `not_admitted` is an observation, not a cancellation.
  */
 export class ImageBuildInterruptedError extends ImageBuildError {
-  readonly outcome: string;
+  readonly outcome: ImageBuildCancellationOutcome;
   readonly confirmed: boolean;
   readonly result?: Record<string, unknown>;
 
   constructor(details: ImageBuildErrorDetails) {
     super(details);
     this.name = "ImageBuildInterruptedError";
-    this.outcome = details.outcome ?? "unconfirmed";
-    this.confirmed = details.confirmed === true;
+    this.outcome = this.details.outcome ?? ImageBuildCancellationOutcome.UNCONFIRMED;
+    this.confirmed = this.details.confirmed === true && isConfirmedCancellation(this.outcome);
     if (details.result) this.result = details.result;
   }
 }
@@ -209,16 +251,6 @@ export function toImageBuildError(error: unknown): unknown {
 
 // --- Models ------------------------------------------------------------------
 
-export type ImageBuildStatus = "pending" | "running" | "succeeded" | "failed" | "cancelled" | string;
-export type ImageBuildPhase =
-  | "awaiting_context"
-  | "starting_builder"
-  | "executing"
-  | "snapshotting"
-  | "publishing"
-  | "finished"
-  | string;
-
 /**
  * The published image of a succeeded build, in the sandbox-template shape
  * the merged catalog answers (derived by the core from the Image Service's
@@ -235,7 +267,7 @@ export type ImageBuildResult = SandboxTemplate;
 export interface ImageBuildInfo {
   buildId: string;
   clientRequestId?: string | null;
-  kind: string;
+  kind?: ImageBuildKind | null;
   name?: string | null;
   status: ImageBuildStatus;
   phase?: ImageBuildPhase | null;
@@ -257,7 +289,7 @@ export interface ImageBuildInfo {
  * request id: not a cancellation and no promise about a delayed admission).
  */
 export interface CancelImageBuildOutcome {
-  outcome: string;
+  outcome: ImageBuildCancellationOutcome;
   build: ImageBuildInfo | null;
   /** Whether the build is known not to publish. */
   confirmed: boolean;
@@ -276,20 +308,22 @@ function parseBuildInfo(raw: Record<string, unknown>): ImageBuildInfo {
       ? (camelizeRecord(raw.result as Record<string, unknown>) as unknown as ImageBuildResult)
       : null;
   return {
-    buildId: String(raw.build_id ?? ""),
+    buildId: String(camel.buildId ?? ""),
     clientRequestId: (camel.clientRequestId as string | null | undefined) ?? null,
-    kind: String(raw.kind ?? ""),
+    kind: raw.kind == null ? raw.kind : enumValue(ImageBuildKind, raw.kind),
     name: (raw.name as string | null | undefined) ?? null,
-    status: String(raw.status ?? ""),
-    phase: (raw.phase as string | null | undefined) ?? null,
-    attemptNo: Number(raw.attempt_no ?? 0),
+    status: enumValue(ImageBuildStatus, raw.status),
+    phase: raw.phase == null ? raw.phase : enumValue(ImageBuildPhase, raw.phase),
+    attemptNo: Number(camel.attemptNo ?? 0),
     builderSandboxId: (camel.builderSandboxId as string | null | undefined) ?? null,
     error: (raw.error as string | null | undefined) ?? null,
     result,
     operationDeadlineMs: (camel.operationDeadlineMs as number | null | undefined) ?? null,
     createdAtMs: (camel.createdAtMs as number | null | undefined) ?? null,
     updatedAtMs: (camel.updatedAtMs as number | null | undefined) ?? null,
-    raw,
+    raw: typeof raw.buildId === "string" && raw.raw && typeof raw.raw === "object"
+      ? raw.raw as Record<string, unknown>
+      : raw,
   };
 }
 
@@ -300,15 +334,15 @@ function parseResult(json: string): ImageBuildResult {
 // --- Native plumbing -----------------------------------------------------------
 
 export interface ImageBuildEvent {
-  type: string;
+  type: ImageBuildEventType;
   message?: string;
   stream?: string;
   build_id?: string;
   client_request_id?: string | null;
-  status?: string;
-  phase?: string | null;
+  status?: ImageBuildStatus;
+  phase?: ImageBuildPhase | null;
   attempt?: number;
-  outcome?: string;
+  outcome?: ImageBuildCancellationOutcome;
   confirmed?: boolean;
   [key: string]: unknown;
 }
@@ -343,12 +377,12 @@ function credentialsFromEnv(): Credentials {
   if (!context.apiKey) {
     if (context.personalAccessToken) {
       throw new ImageBuildError({
-        code: "auth",
+        code: ImageBuildErrorCode.AUTH,
         message:
           "Sandbox image SDKs require TENSORLAKE_API_KEY. Personal access tokens are CLI-only.",
       });
     }
-    throw new ImageBuildError({ code: "auth", message: "Missing TENSORLAKE_API_KEY credentials." });
+    throw new ImageBuildError({ code: ImageBuildErrorCode.AUTH, message: "Missing TENSORLAKE_API_KEY credentials." });
   }
   return { apiUrl: context.apiUrl, bearerToken: context.apiKey, namespace: context.namespace };
 }
@@ -368,18 +402,18 @@ function clientOptions(credentials: Credentials) {
  */
 function rejectLegacyReference(buildId: string): void {
   if (typeof buildId !== "string" || buildId.trim().length === 0) {
-    throw new ImageBuildError({ code: "usage", message: "buildId must be a non-empty string" });
+    throw new ImageBuildError({ code: ImageBuildErrorCode.USAGE, message: "buildId must be a non-empty string" });
   }
   if (buildId.startsWith("sandbox_template_")) {
     throw new ImageBuildError({
-      code: "usage",
+      code: ImageBuildErrorCode.USAGE,
       message: `'${buildId}' is a legacy sandbox template id; legacy images have no build operation to get, wait for or cancel`,
       buildId,
     });
   }
   if (buildId.startsWith("image_")) {
     throw new ImageBuildError({
-      code: "usage",
+      code: ImageBuildErrorCode.USAGE,
       message: `'${buildId}' is an image id, not a build id; look the image up with findSandboxImageByName or use the build id admission returned`,
       buildId,
     });
@@ -509,7 +543,7 @@ export class ImageBuildHandle {
     );
     emitter.rethrow();
     const result = parseResult(json);
-    this.#info = { ...this.#info, status: "succeeded", result };
+    this.#info = { ...this.#info, status: ImageBuildStatus.SUCCEEDED, result };
     return result;
   }
 
@@ -600,7 +634,7 @@ export async function startImageBuild(
   try {
     const credentials = credentialsFromEnv();
     const binding = __imageBuildInternals.loadNativeBinding();
-    emitter.emit({ type: "status", message: `Building image '${name}'...` });
+    emitter.emit({ type: ImageBuildEventType.STATUS, message: `Building image '${name}'...` });
     const json = await __runWithInterrupt(options.signal, (interruptId) =>
       binding.startImageBuild(
         {
@@ -646,7 +680,7 @@ export async function startImageImport(
   const emitter = makeEmitter({ emit: deps.emit ?? options.emit, verbose: options.verbose });
   const credentials = credentialsFromEnv();
   const binding = __imageBuildInternals.loadNativeBinding();
-  emitter.emit({ type: "status", message: `Importing image '${reference}' as '${name}'...` });
+  emitter.emit({ type: ImageBuildEventType.STATUS, message: `Importing image '${reference}' as '${name}'...` });
   const json = await __runWithInterrupt(options.signal, (interruptId) =>
     binding.startImageImport(
       {
@@ -742,11 +776,11 @@ async function cancelImageBuildWith(
     throw toImageBuildError(error);
   }
   const payload = JSON.parse(json) as { outcome: string; build?: Record<string, unknown> | null };
-  const outcome = String(payload.outcome ?? "");
+  const outcome = enumValue(ImageBuildCancellationOutcome, payload.outcome);
   return {
     outcome,
     build: payload.build ? parseBuildInfo(payload.build) : null,
-    confirmed: ["cancelled", "already_cancelled", "already_failed"].includes(outcome),
+    confirmed: isConfirmedCancellation(outcome),
   };
 }
 
@@ -758,7 +792,7 @@ export async function cancelImageBuild(
   const hasRequest = selector.clientRequestId != null;
   if (hasBuild === hasRequest) {
     throw new ImageBuildError({
-      code: "usage",
+      code: ImageBuildErrorCode.USAGE,
       message: "pass exactly one of buildId or clientRequestId",
     });
   }

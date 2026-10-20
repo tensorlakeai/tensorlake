@@ -45,6 +45,7 @@ export enum SnapshotStatus {
   FAILED = "failed",
   DELETING = "deleting",
   REPLICATING = "replicating",
+  UNKNOWN = "unknown",
 }
 
 /**

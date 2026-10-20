@@ -7,6 +7,7 @@ import { Image, ImageBuildOperationType, dockerfileContent } from "./image.js";
 import type { ImageBuildOperation } from "./image.js";
 import { loadNative } from "./native-binding.js";
 import { __runWithInterrupt } from "./image-builds.js";
+import { normalizeBuildEvent } from "./image-build-enums.js";
 
 /**
  * Sandbox-image build engine.
@@ -367,7 +368,7 @@ function eventToEmitDict(event: NativeBindingEvent): Record<string, unknown> {
   if (event.attempt != null) out.attempt = event.attempt;
   if (event.outcome != null) out.outcome = event.outcome;
   if (event.confirmed != null) out.confirmed = event.confirmed;
-  return out;
+  return normalizeBuildEvent(out);
 }
 
 /**

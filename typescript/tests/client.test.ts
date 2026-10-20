@@ -1826,6 +1826,46 @@ describe("SandboxClient", () => {
   });
 
   describe("snapshots", () => {
+    it.each([...Object.values(SnapshotStatus), "future_status"])(
+      "normalizes snapshot status %s through create, get and list",
+      async (status) => {
+        const info = { id: "snap-1", namespace: "default", sandbox_id: "sbx-1", status };
+        installNativeStub({ client: {
+          createSnapshot: vi.fn(async () => ({ traceId: "create-trace", json: JSON.stringify({ snapshot_id: "snap-1", status }) })),
+          getSnapshot: vi.fn(async () => ({ traceId: "get-trace", json: JSON.stringify(info) })),
+          listSnapshots: vi.fn(async () => ({ traceId: "list-trace", json: JSON.stringify({ snapshots: [info] }) })),
+        } });
+        const client = SandboxClient.forLocalhost();
+        const expected = status === "future_status" ? SnapshotStatus.UNKNOWN : status;
+        expect((await client.snapshot("sbx-1")).status).toBe(expected);
+        const snapshot = await client.getSnapshot("snap-1");
+        expect(snapshot.status).toBe(expected);
+        expect(snapshot.traceId).toBe("get-trace");
+        const snapshots = await client.listSnapshots();
+        expect(snapshots[0]?.status).toBe(expected);
+        expect(snapshots.traceId).toBe("list-trace");
+        client.close();
+      },
+    );
+
+    it("keeps waiting when the snapshot has an unknown status", async () => {
+      const getSnapshot = vi.fn();
+      for (const status of ["future_status", "completed"]) {
+        getSnapshot.mockResolvedValueOnce({ traceId: "t", json: JSON.stringify({
+          id: "snap-1", namespace: "default", sandbox_id: "sbx-1", status,
+        }) });
+      }
+      installNativeStub({ client: {
+        createSnapshot: vi.fn(async () => ({ traceId: "t", json: JSON.stringify({ snapshot_id: "snap-1", status: "in_progress" }) })),
+        getSnapshot,
+      } });
+      const client = SandboxClient.forLocalhost();
+      const info = await client.snapshotAndWait("sbx-1", { pollInterval: 0 });
+      expect(info.status).toBe(SnapshotStatus.COMPLETED);
+      expect(getSnapshot).toHaveBeenCalledTimes(2);
+      client.close();
+    });
+
     it("creates a snapshot", async () => {
       const stub = installNativeStub({
         client: {
