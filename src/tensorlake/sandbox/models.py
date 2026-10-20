@@ -877,7 +877,7 @@ class CreateSnapshotResponse(BaseModel):
     """Response from creating a snapshot."""
 
     snapshot_id: str
-    status: SnapshotStatus | str
+    status: SnapshotStatus | str = Field(union_mode="left_to_right")
 
 
 class SnapshotInfo(BaseModel):
@@ -887,7 +887,7 @@ class SnapshotInfo(BaseModel):
     namespace: str
     sandbox_id: str
     base_image: str | None = None
-    status: SnapshotStatus | str
+    status: SnapshotStatus | str = Field(union_mode="left_to_right")
     snapshot_type: SnapshotType | None = None
     error: str | None = None
     snapshot_uri: str | None = None

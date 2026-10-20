@@ -21,6 +21,7 @@ from tensorlake.sandbox import (
 )
 from tensorlake.sandbox.client import SandboxClient
 from tensorlake.sandbox.exceptions import RemoteAPIError, SandboxError
+from tensorlake.sandbox.models import CreateSnapshotResponse, SnapshotInfo
 
 
 def _pending_from_create(create_json: str) -> str:
@@ -2069,7 +2070,7 @@ class TestSandboxClientRustBackend(unittest.TestCase):
 
         info = client.snapshot_and_wait("sbx-1")
 
-        self.assertEqual(info.status, SnapshotStatus.LOCAL_READY)
+        self.assertIs(info.status, SnapshotStatus.LOCAL_READY)
         self.assertIsNone(info.snapshot_uri)
 
     def test_snapshot_and_wait_can_wait_for_completed(self):
@@ -2098,7 +2099,7 @@ class TestSandboxClientRustBackend(unittest.TestCase):
             wait_until=SnapshotWaitCondition.COMPLETED,
         )
 
-        self.assertEqual(info.status, SnapshotStatus.COMPLETED)
+        self.assertIs(info.status, SnapshotStatus.COMPLETED)
         self.assertEqual(fake.get_calls, 2)
 
     def test_snapshot_omits_snapshot_type_when_none(self):
@@ -2111,6 +2112,47 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         self.assertEqual(len(fake.create_snapshot_calls), 1)
         _, snapshot_type = fake.create_snapshot_calls[0]
         self.assertIsNone(snapshot_type)
+
+
+class TestSnapshotStatusCompatibility(unittest.TestCase):
+    def test_known_statuses_preserve_enum_values(self):
+        for model in (CreateSnapshotResponse, SnapshotInfo):
+            for status in SnapshotStatus:
+                payload = {
+                    "snapshot_id": "snap-1",
+                    "namespace": "default",
+                    "sandbox_id": "sbx-1",
+                    "status": status.value,
+                }
+                for mode, info in (
+                    ("python", model.model_validate(payload)),
+                    ("json", model.model_validate_json(json.dumps(payload))),
+                ):
+                    with self.subTest(model=model.__name__, status=status, mode=mode):
+                        self.assertIs(info.status, status)
+                        self.assertEqual(info.status.value, status.value)
+                        self.assertEqual(
+                            json.loads(info.model_dump_json())["status"], status.value
+                        )
+
+    def test_unknown_statuses_are_preserved_as_strings(self):
+        for model in (CreateSnapshotResponse, SnapshotInfo):
+            payload = {
+                "snapshot_id": "snap-1",
+                "namespace": "default",
+                "sandbox_id": "sbx-1",
+                "status": "future_status",
+            }
+            for mode, info in (
+                ("python", model.model_validate(payload)),
+                ("json", model.model_validate_json(json.dumps(payload))),
+            ):
+                with self.subTest(model=model.__name__, mode=mode):
+                    self.assertIs(type(info.status), str)
+                    self.assertEqual(info.status, "future_status")
+                    self.assertEqual(
+                        json.loads(info.model_dump_json())["status"], "future_status"
+                    )
 
 
 class TestSandboxFailureCompatibility(unittest.TestCase):

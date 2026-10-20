@@ -1842,7 +1842,7 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
 
         info = await client.snapshot_and_wait("sbx-1")
 
-        self.assertEqual(info.status, SnapshotStatus.LOCAL_READY)
+        self.assertIs(info.status, SnapshotStatus.LOCAL_READY)
         self.assertIsNone(info.snapshot_uri)
 
     async def test_snapshot_and_wait_can_wait_for_completed(self):
@@ -1870,7 +1870,7 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
             wait_until=SnapshotWaitCondition.COMPLETED,
         )
 
-        self.assertEqual(info.status, SnapshotStatus.COMPLETED)
+        self.assertIs(info.status, SnapshotStatus.COMPLETED)
         self.assertEqual(fake.get_calls, 2)
 
     async def test_snapshot_omits_snapshot_type_when_none(self):
