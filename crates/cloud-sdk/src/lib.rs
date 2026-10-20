@@ -71,6 +71,7 @@ pub mod cron;
 pub mod docker_config;
 pub mod error;
 pub mod http_transport;
+pub mod image_builds;
 mod image_service_builds;
 pub mod images;
 pub mod retry;

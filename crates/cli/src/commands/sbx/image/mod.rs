@@ -1,3 +1,4 @@
+pub mod build;
 pub mod create;
 pub mod describe;
 pub mod import;
@@ -41,6 +42,22 @@ impl ImageBuildEventRenderer {
             SandboxImageBuildEvent::Warning(message) => {
                 self.finish_progress_line();
                 eprintln!("⚠️  {message}");
+            }
+            // CAS only: the build id is printed as soon as admission answers,
+            // before any context upload or wait, so it can be used with
+            // `tl sbx image build get|wait|cancel`.
+            SandboxImageBuildEvent::Accepted { build_id, .. } => {
+                self.finish_progress_line();
+                eprintln!("⚙️  Build ID: {build_id}");
+            }
+            // The matching status line already reports progress.
+            SandboxImageBuildEvent::Progress { .. } | SandboxImageBuildEvent::Terminal { .. } => {}
+            SandboxImageBuildEvent::Interrupted(report) => {
+                self.finish_progress_line();
+                eprintln!("⚠️  {report}");
+                for hint in build::interruption_hints(&report) {
+                    eprintln!("    {hint}");
+                }
             }
         }
     }

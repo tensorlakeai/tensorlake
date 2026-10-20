@@ -27,7 +27,11 @@ use crate::{
     Traced,
     client::Client,
     error::SdkError,
-    sandbox_images::{cas_image_service_url, client_builder},
+    image_builds::{
+        ImageBuildError, ImageBuildInfo, ImageBuildWaitOptions, InterruptSignal,
+        new_client_request_id,
+    },
+    sandbox_images::{SandboxImageBuildEvent, cas_image_service_url, client_builder},
     sandbox_templates::{SandboxTemplatesClient, models::SandboxTemplate},
 };
 
@@ -217,30 +221,41 @@ pub fn sort_merged_images(images: &mut [SandboxTemplate]) {
 
 /// One logical image as the Image Service answers it (ADR 0107 D18): the
 /// platform template shape in snake_case plus the content digest and build
-/// provenance legacy templates lack.
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct ImageServiceImage {
-    pub(crate) id: String,
-    pub(crate) name: String,
-    pub(crate) snapshot_id: String,
-    pub(crate) snapshot_uri: String,
+/// provenance legacy templates lack. Also the immutable result a build
+/// publishes (`crate::image_builds::ImageBuildResult`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageServiceImage {
+    /// The mutable `image_` id: names the current image under `name`.
+    pub id: String,
+    pub name: String,
+    pub snapshot_id: String,
+    pub snapshot_uri: String,
     #[serde(default)]
-    pub(crate) snapshot_sandbox_id: Option<String>,
-    pub(crate) snapshot_format_version: String,
-    pub(crate) snapshot_size_bytes: u64,
-    pub(crate) rootfs_disk_bytes: u64,
-    pub(crate) rootfs_node_kind: String,
-    pub(crate) public: bool,
+    pub snapshot_sandbox_id: Option<String>,
+    pub snapshot_format_version: String,
+    pub snapshot_size_bytes: u64,
+    pub rootfs_disk_bytes: u64,
+    pub rootfs_node_kind: String,
+    pub public: bool,
     #[serde(default)]
-    pub(crate) dockerfile: String,
+    pub dockerfile: String,
     #[serde(default)]
-    pub(crate) created_by_user_id: Option<String>,
-    pub(crate) created_at: String,
-    pub(crate) updated_at: String,
+    pub created_by_user_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    /// The content digest of the published image.
     #[serde(default)]
-    pub(crate) image_id: Option<String>,
+    pub image_id: Option<String>,
+    /// Provenance: the build that published this image.
     #[serde(default)]
-    pub(crate) build_id: Option<String>,
+    pub build_id: Option<String>,
+}
+
+impl ImageServiceImage {
+    /// The platform template shape callers of both image families receive.
+    pub fn into_template(self) -> SandboxTemplate {
+        self.into()
+    }
 }
 
 impl From<ImageServiceImage> for SandboxTemplate {
@@ -394,16 +409,26 @@ impl ImageServiceCatalog {
     }
 
     /// Delete the project's image named `name`. `Ok(false)` only on a clean
-    /// 404; a 403 (the member role cannot delete) is reported as such.
+    /// 404; a 403 (the member role cannot delete) is reported as such, and
+    /// so is a 409 `image_build_in_progress` (the name has an unfinished
+    /// build: cancel it with the build id first; deleting never cancels).
+    /// A 202 means the deletion is still in progress and counts as done.
+    /// Deleting removes the published image only; a name whose only state is
+    /// an unfinished first build has no image and answers 404.
     pub async fn delete_by_name(&self, name: &str) -> Result<bool, SdkError> {
         self.delete_optional(&format!("/names/{name}")).await
     }
 
-    /// Delete the project's image with the `image_` id `image_id`.
+    /// Delete the project's image with the `image_` id `image_id`; the same
+    /// answers as [`Self::delete_by_name`].
     pub async fn delete_by_id(&self, image_id: &str) -> Result<bool, SdkError> {
         self.delete_optional(&format!("/images/{image_id}")).await
     }
 
+    /// `Ok(true)` on any success (204 done, 202 deletion in progress),
+    /// `Ok(false)` only on a clean 404. 202, 409, 5xx and transport failures
+    /// are never mistaken for absence, and a lost response is never
+    /// replayed here: the merged catalog decides what a miss means.
     async fn delete_optional(&self, path: &str) -> Result<bool, SdkError> {
         let request = self.client.request(Method::DELETE, path).build()?;
         match self.client.execute_traced(request).await {
@@ -418,29 +443,112 @@ impl ImageServiceCatalog {
     /// Register a completed CAS snapshot as the image `name` (ADR 0107
     /// D9-D12). `public` asks for global scope, which the service grants only
     /// to allowlisted publisher projects.
+    ///
+    /// The request is admitted under a fresh client request id
+    /// (`Idempotency-Key`), retained across its transport retries. The
+    /// service answers 201 with the published image, or 202 with a
+    /// [`ImageBuildInfo`] when the bounded inline wait expired; the caller
+    /// then waits on that operation ([`Self::adopt_snapshot_and_wait`] does
+    /// both). A 409 `image_build_in_progress` names the active operation to
+    /// cancel first. Transport acceptance is never reported as completion.
     pub async fn adopt_snapshot(
         &self,
         name: &str,
         snapshot_id: &str,
         public: bool,
-    ) -> Result<SandboxTemplate, SdkError> {
-        let request = self.client.build_post_json_request(
-            Method::POST,
-            "/images/from-snapshot",
-            &AdoptSnapshotRequest {
-                name,
-                snapshot_id,
-                public,
-            },
-        )?;
-        let image = self
-            .client
-            .execute_json::<ImageServiceImage>(request)
-            .await
-            .map_err(tidy_error)?
-            .into_inner();
-        Ok(image.into())
+    ) -> Result<SnapshotAdoption, ImageBuildError> {
+        let request_id = new_client_request_id();
+        self.adopt_snapshot_with_request_id(
+            name,
+            snapshot_id,
+            public,
+            &request_id,
+            &InterruptSignal::new(),
+        )
+        .await
     }
+
+    /// [`Self::adopt_snapshot`], then wait for a 202 operation to publish.
+    /// Returns the published image in the template shape either way, so
+    /// registration flows keep their completed-image result. `interrupt`
+    /// cancels a pending Direct operation through the bounded handshake.
+    pub async fn adopt_snapshot_and_wait<F>(
+        &self,
+        name: &str,
+        snapshot_id: &str,
+        public: bool,
+        interrupt: &InterruptSignal,
+        mut emit: F,
+    ) -> Result<SandboxTemplate, ImageBuildError>
+    where
+        F: FnMut(SandboxImageBuildEvent),
+    {
+        let request_id = new_client_request_id();
+        match self
+            .adopt_snapshot_with_request_id(name, snapshot_id, public, &request_id, interrupt)
+            .await?
+        {
+            SnapshotAdoption::Published(image) => Ok((*image).into_template()),
+            SnapshotAdoption::Accepted(info) => {
+                emit(SandboxImageBuildEvent::Status(format!(
+                    "Registration of '{name}' continues as build {}; waiting for publication...",
+                    info.build_id
+                )));
+                let build_id = info.build_id.clone();
+                let client_request_id = info.client_request_id.clone();
+                let terminal = crate::image_service_builds::wait_for_terminal(
+                    &self.client,
+                    None,
+                    &build_id,
+                    client_request_id.as_deref(),
+                    Some(*info),
+                    &ImageBuildWaitOptions {
+                        timeout: None,
+                        // A Direct operation runs no builder sandbox.
+                        follow_logs: false,
+                    },
+                    interrupt,
+                    &mut emit,
+                )
+                .await?;
+                let result = crate::image_service_builds::terminal_result(&terminal)?;
+                Ok(result.into_template())
+            }
+        }
+    }
+
+    async fn adopt_snapshot_with_request_id(
+        &self,
+        name: &str,
+        snapshot_id: &str,
+        public: bool,
+        request_id: &str,
+        interrupt: &InterruptSignal,
+    ) -> Result<SnapshotAdoption, ImageBuildError> {
+        let body = serde_json::to_value(AdoptSnapshotRequest {
+            name,
+            snapshot_id,
+            public,
+        })?;
+        crate::image_service_builds::admit_direct(
+            &self.client,
+            "/images/from-snapshot",
+            &body,
+            request_id,
+            interrupt,
+        )
+        .await
+    }
+}
+
+/// The answer to a direct publication: done, or admitted as an operation
+/// that outlived the service's bounded inline wait.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SnapshotAdoption {
+    /// 201: the image is published.
+    Published(Box<ImageServiceImage>),
+    /// 202: poll the build (its `result` carries the image once published).
+    Accepted(Box<ImageBuildInfo>),
 }
 
 /// Both catalogs behind one lookup, delete and list.
@@ -517,6 +625,13 @@ impl SandboxImageCatalog {
     /// Resolve one reference to its record, or `None` when neither catalog
     /// knows it. An id is tried in its own catalog first; a miss there falls
     /// through to the by-name order.
+    ///
+    /// Accepted merged-catalog behavior for legacy images: a name that fits
+    /// the Image Service grammar is looked up there first, and only a clean
+    /// 404 falls through to the platform registry. Any other Image Service
+    /// answer (unavailability, a deploy 5xx) fails the lookup of a legacy
+    /// name, where the released SDKs touched only platform-api. A
+    /// `sandbox_template_` id never consults the Image Service.
     pub async fn find(&self, reference: &str) -> Result<Option<SandboxTemplate>, SdkError> {
         match classify_image_reference(reference)? {
             ImageReference::TemplateId(id) => {
@@ -552,6 +667,16 @@ impl SandboxImageCatalog {
     /// [`SdkError::ServerError`] so every binding reports it the same way.
     /// Never retried on a lost response: a replay could delete a same-named
     /// image in the other catalog.
+    ///
+    /// Accepted merged-catalog behavior for legacy images: deleting a legacy
+    /// image removes the platform-api template (the released SDKs only
+    /// removed the engine registration and left the template listed), and an
+    /// unknown name is an error rather than a silent success. An untyped
+    /// name probes the Image Service first and falls through to platform-api
+    /// only on a clean 404; a 202 (deletion in progress) is success, and a
+    /// 409 `image_build_in_progress`, a 5xx or a transport failure is
+    /// reported as is. Deleting removes published images only; an unfinished
+    /// build is cancelled with its build id, never by deleting its name.
     pub async fn delete(&self, reference: &str) -> Result<(), SdkError> {
         let deleted = match classify_image_reference(reference)? {
             ImageReference::TemplateId(id) => {

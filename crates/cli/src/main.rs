@@ -1819,6 +1819,13 @@ enum ImageCommands {
         #[arg(long = "build-arg")]
         build_arg: Vec<String>,
 
+        /// Return as soon as the build is admitted and its context is
+        /// uploaded, printing the build ID instead of waiting for
+        /// publication. Follow it with `tl sbx image build wait BUILD_ID`.
+        /// CAS builds only (--cas).
+        #[arg(long = "no-wait", requires = "cas")]
+        no_wait: bool,
+
         /// Print the sandbox image result JSON to stdout
         #[arg(long = "json", hide = true)]
         json: bool,
@@ -1867,9 +1874,24 @@ enum ImageCommands {
         #[arg(long)]
         cas: bool,
 
+        /// Return as soon as the import is admitted, printing the build ID
+        /// instead of waiting for publication. Follow it with
+        /// `tl sbx image build wait BUILD_ID`. CAS imports only (--cas).
+        #[arg(long = "no-wait", requires = "cas")]
+        no_wait: bool,
+
         /// Print the sandbox image result JSON to stdout
         #[arg(long = "json")]
         json: bool,
+    },
+
+    /// Inspect, wait for or cancel a CAS image build or import (an Image
+    /// Service build operation). `tl sbx image create --cas` and `import
+    /// --cas` print the build ID at admission; `--no-wait` leaves the build
+    /// running. Legacy images have no build operation.
+    Build {
+        #[command(subcommand)]
+        command: ImageBuildCommands,
     },
 
     /// List all sandbox images
@@ -1890,11 +1912,67 @@ enum ImageCommands {
         name_or_id: String,
     },
 
-    /// Delete a sandbox image
+    /// Delete a published sandbox image. A build in progress is cancelled
+    /// with `tl sbx image build cancel BUILD_ID`, not by deleting its name:
+    /// a name whose only state is an unfinished first build has no
+    /// published image, so rm reports it as not found and leaves the build
+    /// running.
     #[command(alias = "delete")]
     Rm {
         /// Image name or ID
         name_or_id: String,
+    },
+}
+
+/// `tl sbx image build get|wait|cancel`. CAS only: every subcommand
+/// addresses the Image Service build operation by its service-generated
+/// build ID, which admission returns and the CLI prints.
+#[derive(Subcommand)]
+enum ImageBuildCommands {
+    /// Show a build: status, phase, image name, attempt, builder sandbox,
+    /// timestamps and deadlines, pending cleanup, result or error
+    Get {
+        /// Build ID printed at admission (e.g. by `tl sbx image create --cas`)
+        build_id: String,
+
+        /// Print the build record as JSON to stdout
+        #[arg(long = "json")]
+        json: bool,
+    },
+
+    /// Wait for a build to publish and print its result. Works after the
+    /// original command disconnected and returns that build's own result
+    /// even if the image was since rebuilt or deleted. Ctrl+C cancels the
+    /// build; a timeout only stops waiting.
+    Wait {
+        /// Build ID
+        build_id: String,
+
+        /// Give up waiting after this many seconds (the build keeps running)
+        #[arg(long)]
+        timeout: Option<f64>,
+
+        /// Print the published image record as JSON to stdout
+        #[arg(long = "json")]
+        json: bool,
+    },
+
+    /// Cancel a build by its build ID. Use --request-id only to cancel a
+    /// build whose admission response was lost (the CLI prints that ID in
+    /// that case); its `not_admitted` answer is an observation, not a
+    /// confirmed cancellation, and does not prevent a delayed admission.
+    Cancel {
+        /// Build ID (sufficient; the documented way to cancel)
+        #[arg(required_unless_present = "request_id", conflicts_with = "request_id")]
+        build_id: Option<String>,
+
+        /// Client request ID of an admission whose response was lost
+        #[arg(long = "request-id", value_name = "REQUEST_ID")]
+        request_id: Option<String>,
+
+        /// Print the cancel outcome as JSON to stdout
+        #[arg(long = "json")]
+        json: bool,
     },
 }
 
@@ -2781,6 +2859,7 @@ async fn run_command(
                             docker_compat,
                             cas,
                             build_arg,
+                            no_wait,
                             json,
                         } => {
                             let disk_mb = if let Some(value) = disk_mb {
@@ -2806,6 +2885,7 @@ async fn run_command(
                                 docker_compat,
                                 cas,
                                 &build_arg,
+                                no_wait,
                                 json,
                             )
                             .await
@@ -2820,6 +2900,7 @@ async fn run_command(
                             public,
                             docker_compat,
                             cas,
+                            no_wait,
                             json,
                         } => {
                             commands::sbx::image::import::run(
@@ -2833,10 +2914,37 @@ async fn run_command(
                                 public,
                                 docker_compat,
                                 cas,
+                                no_wait,
                                 json,
                             )
                             .await
                         }
+                        ImageCommands::Build { command } => match command {
+                            ImageBuildCommands::Get { build_id, json } => {
+                                commands::sbx::image::build::get(ctx, &build_id, json).await
+                            }
+                            ImageBuildCommands::Wait {
+                                build_id,
+                                timeout,
+                                json,
+                            } => {
+                                commands::sbx::image::build::wait(ctx, &build_id, timeout, json)
+                                    .await
+                            }
+                            ImageBuildCommands::Cancel {
+                                build_id,
+                                request_id,
+                                json,
+                            } => {
+                                commands::sbx::image::build::cancel(
+                                    ctx,
+                                    build_id.as_deref(),
+                                    request_id.as_deref(),
+                                    json,
+                                )
+                                .await
+                            }
+                        },
                         ImageCommands::Ls { cas, json } => {
                             commands::sbx::image::ls::run(ctx, json, cas).await
                         }

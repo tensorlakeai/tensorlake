@@ -6,7 +6,10 @@ use std::{
     time::Duration,
 };
 
-use crate::docker_config::resolve_docker_config_json;
+use crate::{
+    docker_config::resolve_docker_config_json,
+    image_builds::{ImageBuildError, ImageBuildHandle, InterruptSignal},
+};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use reqwest::{Method, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -173,6 +176,11 @@ pub enum SandboxImageBuildError {
     Json(#[from] serde_json::Error),
     #[error("{0}")]
     Sdk(#[from] SdkError),
+    /// A typed Image Service build-operation outcome (CAS paths only):
+    /// conflict, service-reported failure or cancellation, wait timeout, or
+    /// an explicit interruption. Legacy builds never produce it.
+    #[error(transparent)]
+    Build(#[from] crate::image_builds::ImageBuildError),
     #[error("{0}")]
     Other(String),
 }
@@ -266,11 +274,38 @@ pub struct SandboxImageImportOptions {
     pub image_reference: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SandboxImageBuildEvent {
     Status(String),
-    BuildLog { stream: String, message: String },
+    BuildLog {
+        stream: String,
+        message: String,
+    },
     Warning(String),
+    /// A CAS build was admitted. Emitted once, before any upload or wait, so
+    /// the build id is known as early as possible. Legacy builds never emit
+    /// it.
+    Accepted {
+        build_id: String,
+        client_request_id: Option<String>,
+    },
+    /// A CAS build's observed status, phase or attempt changed.
+    Progress {
+        build_id: String,
+        status: crate::image_builds::ImageBuildStatus,
+        phase: Option<crate::image_builds::ImageBuildPhase>,
+        attempt: u64,
+    },
+    /// A CAS build reached a terminal status.
+    Terminal {
+        build_id: String,
+        status: crate::image_builds::ImageBuildStatus,
+        phase: Option<crate::image_builds::ImageBuildPhase>,
+        attempt: u64,
+    },
+    /// An explicit interruption of a CAS operation finished its cancellation
+    /// handshake; the report says whether the remote build is cancelled.
+    Interrupted(crate::image_builds::InterruptionReport),
 }
 
 #[derive(Debug, Clone)]
@@ -429,6 +464,26 @@ struct CompleteSandboxTemplateBuildRequest {
 pub async fn build_sandbox_image<F>(
     options: SandboxImageBuildOptions,
     docker_config_json: Option<String>,
+    emit: F,
+) -> Result<Value>
+where
+    F: FnMut(SandboxImageBuildEvent),
+{
+    build_sandbox_image_with_interrupt(options, docker_config_json, &InterruptSignal::new(), emit)
+        .await
+}
+
+/// [`build_sandbox_image`] with an explicit interruption signal. The signal
+/// applies to CAS builds only (`options.common.cas`): triggering it cancels
+/// the remote Image Service operation through the bounded handshake and the
+/// call ends with [`SandboxImageBuildError::Build`] carrying the
+/// [`crate::image_builds::InterruptionReport`]. A legacy build ignores it:
+/// the legacy path keeps its own requests, output, errors and interruption
+/// behavior and never sends an Image Service cancellation.
+pub async fn build_sandbox_image_with_interrupt<F>(
+    options: SandboxImageBuildOptions,
+    docker_config_json: Option<String>,
+    interrupt: &InterruptSignal,
     mut emit: F,
 ) -> Result<Value>
 where
@@ -438,21 +493,7 @@ where
     emit(SandboxImageBuildEvent::Status(
         "Loading Dockerfile...".to_string(),
     ));
-    let plan = if let Some(dockerfile_text) = &options.dockerfile_text {
-        load_dockerfile_text_plan(
-            &options.dockerfile_path,
-            options.context_dir.as_deref(),
-            dockerfile_text.clone(),
-            options.common.registered_name.as_deref(),
-        )?
-    } else {
-        load_dockerfile_plan(
-            &options.dockerfile_path,
-            options.common.registered_name.as_deref(),
-        )?
-    };
-    crate::sandbox_image_catalog::validate_registered_name(&plan.registered_name)
-        .map_err(SandboxImageBuildError::usage)?;
+    let plan = load_build_plan(&options)?;
     if options.common.cas {
         // CAS images build through the Image Service: the SDK resolves the
         // plan's references and submits them; the service reconciler drives
@@ -465,6 +506,7 @@ where
             options.context_files,
             options.common,
             registry_credentials_json,
+            interrupt,
             emit,
         )
         .await;
@@ -494,6 +536,21 @@ where
 pub async fn import_sandbox_image<F>(
     options: SandboxImageImportOptions,
     docker_config_json: Option<String>,
+    emit: F,
+) -> Result<Value>
+where
+    F: FnMut(SandboxImageBuildEvent),
+{
+    import_sandbox_image_with_interrupt(options, docker_config_json, &InterruptSignal::new(), emit)
+        .await
+}
+
+/// [`import_sandbox_image`] with an explicit interruption signal, honored
+/// for CAS imports only; see [`build_sandbox_image_with_interrupt`].
+pub async fn import_sandbox_image_with_interrupt<F>(
+    options: SandboxImageImportOptions,
+    docker_config_json: Option<String>,
+    interrupt: &InterruptSignal,
     mut emit: F,
 ) -> Result<Value>
 where
@@ -504,12 +561,7 @@ where
         "Importing registry image {}...",
         options.image_reference
     )));
-    let plan = plan_image_import(
-        &options.image_reference,
-        options.common.registered_name.as_deref(),
-    )?;
-    crate::sandbox_image_catalog::validate_registered_name(&plan.registered_name)
-        .map_err(SandboxImageBuildError::usage)?;
+    let plan = load_import_plan(&options)?;
     if options.common.cas {
         return crate::image_service_builds::run_image_service_build(
             plan,
@@ -518,6 +570,7 @@ where
             Vec::new(),
             options.common,
             registry_credentials_json,
+            interrupt,
             emit,
         )
         .await;
@@ -530,6 +583,116 @@ where
         emit,
     )
     .await
+}
+
+/// Parse and validate the Dockerfile plan for a build, shared by the legacy
+/// and CAS entry points.
+fn load_build_plan(options: &SandboxImageBuildOptions) -> Result<DockerfileBuildPlan> {
+    let plan = if let Some(dockerfile_text) = &options.dockerfile_text {
+        load_dockerfile_text_plan(
+            &options.dockerfile_path,
+            options.context_dir.as_deref(),
+            dockerfile_text.clone(),
+            options.common.registered_name.as_deref(),
+        )?
+    } else {
+        load_dockerfile_plan(
+            &options.dockerfile_path,
+            options.common.registered_name.as_deref(),
+        )?
+    };
+    crate::sandbox_image_catalog::validate_registered_name(&plan.registered_name)
+        .map_err(SandboxImageBuildError::usage)?;
+    Ok(plan)
+}
+
+/// Plan and validate a registry import, shared by the legacy and CAS entry
+/// points.
+fn load_import_plan(options: &SandboxImageImportOptions) -> Result<DockerfileBuildPlan> {
+    let plan = plan_image_import(
+        &options.image_reference,
+        options.common.registered_name.as_deref(),
+    )?;
+    crate::sandbox_image_catalog::validate_registered_name(&plan.registered_name)
+        .map_err(SandboxImageBuildError::usage)?;
+    Ok(plan)
+}
+
+/// The Image Service operation behind [`crate::image_builds::start_build`]:
+/// admit a CAS Dockerfile build and upload and seal its context, without
+/// waiting. Refuses legacy options before any request.
+pub(crate) async fn start_cas_build<F>(
+    options: SandboxImageBuildOptions,
+    docker_config_json: Option<String>,
+    interrupt: &InterruptSignal,
+    mut emit: F,
+) -> std::result::Result<ImageBuildHandle, ImageBuildError>
+where
+    F: FnMut(SandboxImageBuildEvent),
+{
+    require_cas(&options.common, "start_build")?;
+    let registry_credentials_json = resolve_docker_config_json(docker_config_json)?;
+    emit(SandboxImageBuildEvent::Status(
+        "Loading Dockerfile...".to_string(),
+    ));
+    let plan = load_build_plan(&options)?;
+    let dockerfile_path = options.dockerfile_path.clone();
+    crate::image_service_builds::start_image_service_build(
+        plan,
+        Some(&dockerfile_path),
+        options.build_args,
+        options.context_files,
+        options.common,
+        registry_credentials_json,
+        interrupt,
+        emit,
+    )
+    .await
+}
+
+/// The Image Service operation behind [`crate::image_builds::start_import`].
+pub(crate) async fn start_cas_import<F>(
+    options: SandboxImageImportOptions,
+    docker_config_json: Option<String>,
+    interrupt: &InterruptSignal,
+    mut emit: F,
+) -> std::result::Result<ImageBuildHandle, ImageBuildError>
+where
+    F: FnMut(SandboxImageBuildEvent),
+{
+    require_cas(&options.common, "start_import")?;
+    let registry_credentials_json = resolve_docker_config_json(docker_config_json)?;
+    emit(SandboxImageBuildEvent::Status(format!(
+        "Importing registry image {}...",
+        options.image_reference
+    )));
+    let plan = load_import_plan(&options)?;
+    crate::image_service_builds::start_image_service_build(
+        plan,
+        None,
+        Vec::new(),
+        Vec::new(),
+        options.common,
+        registry_credentials_json,
+        interrupt,
+        emit,
+    )
+    .await
+}
+
+/// The new build operations exist for CAS images only. Options that
+/// positively select the legacy builder are refused locally, before any
+/// Image Service or platform request.
+fn require_cas(
+    options: &CommonBuildOptions,
+    operation: &str,
+) -> std::result::Result<(), ImageBuildError> {
+    if options.cas {
+        return Ok(());
+    }
+    Err(ImageBuildError::usage(format!(
+        "{operation} is an Image Service operation for CAS images and is unsupported for legacy          images; set cas (--cas) to use it, or build the legacy image with the existing          build/import call"
+    )))
 }
 
 /// Resolve the authenticated Image Service ingress used for CAS catalog

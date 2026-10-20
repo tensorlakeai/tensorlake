@@ -9,6 +9,17 @@ streaming) image through the Image Service with ``cas=True``. Lookups,
 listings and deletes go through the Rust core's merged catalog, so both
 families answer the same template-shaped record.
 
+CAS builds (``cas=True``) run as Image Service build operations: the build
+id is reported as a ``build_accepted`` event right after admission,
+``KeyboardInterrupt`` cancels the remote build through a bounded handshake
+(the outcome arrives as an ``interrupted`` event before the interrupt
+re-raises), and failures are the typed exceptions of
+:mod:`tensorlake.image.builds`, which also exposes start/get/wait/cancel for
+leaving a build running. Legacy builds (the default) keep their behavior:
+their callbacks' errors are swallowed, an interrupt is delivered only once
+the native call returns and sends no cancellation, and no Image Service
+request is made.
+
 This is the programmatic backend for :meth:`Image.build` and the
 ``tl sbx image create`` CLI command. The Rust core owns parsing and the
 warnings for instructions that run during the build but have no effect when a
@@ -246,29 +257,37 @@ def _run_rust_image_create(
 
     emit({"type": "status", "message": f"Building image '{registered_name}'..."})
 
-    result_json = _rust_build_sandbox_image(
-        ctx.api_url,
-        token,
-        dockerfile_path,
-        registered_name,
-        disk_mb,
-        builder_disk_mb,
-        cpus,
-        memory_mb,
-        is_public,
-        ctx.organization_id if use_explicit_scope else None,
-        ctx.project_id if use_explicit_scope else None,
-        ctx.namespace,
-        use_explicit_scope,
-        USER_AGENT,
-        docker_compat,
-        dockerfile_text,
-        context_dir,
-        cas=cas,
-        build_args=build_args,
-        emit=_forwarder(emit),
-        docker_config_json=docker_config_json,
-    )
+    try:
+        result_json = _rust_build_sandbox_image(
+            ctx.api_url,
+            token,
+            dockerfile_path,
+            registered_name,
+            disk_mb,
+            builder_disk_mb,
+            cpus,
+            memory_mb,
+            is_public,
+            ctx.organization_id if use_explicit_scope else None,
+            ctx.project_id if use_explicit_scope else None,
+            ctx.namespace,
+            use_explicit_scope,
+            USER_AGENT,
+            docker_compat,
+            dockerfile_text,
+            context_dir,
+            cas=cas,
+            build_args=build_args,
+            emit=_forwarder(emit),
+            docker_config_json=docker_config_json,
+        )
+    except Exception as exc:
+        # CAS only: surface the Image Service's typed outcome (conflict,
+        # failed, cancelled, timeout). The legacy path keeps its generic
+        # wrapping in the public function.
+        if cas:
+            _raise_typed_cas_error(exc)
+        raise
     return _finish_image_registration(result_json, registered_name, emit)
 
 
@@ -299,27 +318,42 @@ def _run_rust_image_import(
         }
     )
 
-    result_json = _rust_import_sandbox_image(
-        ctx.api_url,
-        token,
-        image_reference,
-        registered_name,
-        disk_mb,
-        builder_disk_mb,
-        cpus,
-        memory_mb,
-        is_public,
-        ctx.organization_id if use_explicit_scope else None,
-        ctx.project_id if use_explicit_scope else None,
-        ctx.namespace,
-        use_explicit_scope,
-        USER_AGENT,
-        docker_compat,
-        cas=cas,
-        emit=_forwarder(emit),
-        docker_config_json=docker_config_json,
-    )
+    try:
+        result_json = _rust_import_sandbox_image(
+            ctx.api_url,
+            token,
+            image_reference,
+            registered_name,
+            disk_mb,
+            builder_disk_mb,
+            cpus,
+            memory_mb,
+            is_public,
+            ctx.organization_id if use_explicit_scope else None,
+            ctx.project_id if use_explicit_scope else None,
+            ctx.namespace,
+            use_explicit_scope,
+            USER_AGENT,
+            docker_compat,
+            cas=cas,
+            emit=_forwarder(emit),
+            docker_config_json=docker_config_json,
+        )
+    except Exception as exc:
+        if cas:
+            _raise_typed_cas_error(exc)
+        raise
     return _finish_image_registration(result_json, registered_name, emit)
+
+
+def _raise_typed_cas_error(exc: BaseException) -> None:
+    """Re-raise a CAS build failure as its typed :mod:`builds` exception when
+    the Rust core reported one; otherwise let the caller's wrapping apply."""
+    from .builds import _typed_build_error
+
+    typed = _typed_build_error(exc)
+    if typed is not None:
+        raise typed from exc
 
 
 def _resolve_build_credentials(*, allow_pat: bool = False) -> tuple[Context, str]:
@@ -375,6 +409,21 @@ def delete_sandbox_image(image_name: str) -> None:
     registered only in the platform registry deletes a legacy image. Uses the
     same environment-based Tensorlake auth and namespace context as
     :func:`build_sandbox_image`.
+
+    Deleting removes a *published* image. An unfinished CAS build is
+    cancelled with :func:`tensorlake.image.builds.cancel_build` (or
+    ``tl sbx image build cancel BUILD_ID``), never by deleting its name: a
+    name whose only state is an unfinished first build has no image, so the
+    Image Service answers 404 and the lookup falls through to the platform
+    registry as usual. A 202 (deletion still in progress) counts as success;
+    a 409 ``image_build_in_progress``, a 5xx or a transport failure is
+    raised as is and never falls through to the platform registry.
+
+    Accepted merged-catalog differences from the released SDKs, for legacy
+    images: this deletes the platform-api template itself (the released
+    SDKs only removed the engine registration and left the template
+    listed), and an unknown name raises :class:`SandboxImageDeleteError`
+    instead of succeeding silently.
 
     Raises:
         TypeError: ``image_name`` is not a non-empty string.
@@ -443,6 +492,18 @@ def find_sandbox_image_by_name(image_name: str) -> dict | None:
     Service nor the platform registry knows the reference. Uses the same
     environment-based Tensorlake auth as :func:`build_sandbox_image`. Ingress
     derives project scope from the API key.
+
+    An ``image_`` id names the *current* image under its name; a rebuild
+    replaces it. A build's own immutable result is read with
+    :func:`tensorlake.image.builds.get_build`.
+
+    Accepted merged-catalog difference from the released SDKs, for legacy
+    images: a name that fits the Image Service grammar is looked up there
+    first and only a clean 404 falls through to the platform registry, so
+    Image Service unavailability (or a deploy 5xx) raises
+    :class:`SandboxImageLookupError` for a legacy name where the released
+    SDKs touched only platform-api. A ``sandbox_template_`` id never
+    consults the Image Service.
 
     Raises:
         TypeError: ``image_name`` is not a non-empty string.
