@@ -290,8 +290,8 @@ class TestCasBuildOptions(unittest.TestCase):
 
         self.assertIs(rust_importer_mock.call_args.kwargs["cas"], True)
 
-    def test_image_build_stays_legacy(self):
-        """``Image.build`` and application images never opt into CAS."""
+    def test_image_build_defaults_to_non_cas(self):
+        """``Image.build`` defaults to a non-CAS image."""
         ctx = _make_ctx()
         image = Image(name="legacy", base_image="python:3.12-slim")
 

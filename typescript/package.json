@@ -1,6 +1,6 @@
 {
   "name": "@tensorlakeai/tensorlake",
-  "version": "0.5.154",
+  "version": "0.5.155",
   "description": "TensorLake SDK for applications, sandboxes, and cloud services",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -98,11 +98,11 @@
     "ws": "^8.20.0"
   },
   "optionalDependencies": {
-    "@tensorlakeai/native-darwin-arm64": "0.5.154",
-    "@tensorlakeai/native-linux-arm64-gnu": "0.5.154",
-    "@tensorlakeai/native-linux-arm64-musl": "0.5.154",
-    "@tensorlakeai/native-linux-x64-gnu": "0.5.154",
-    "@tensorlakeai/native-linux-x64-musl": "0.5.154",
-    "@tensorlakeai/native-win32-x64": "0.5.154"
+    "@tensorlakeai/native-darwin-arm64": "0.5.155",
+    "@tensorlakeai/native-linux-arm64-gnu": "0.5.155",
+    "@tensorlakeai/native-linux-arm64-musl": "0.5.155",
+    "@tensorlakeai/native-linux-x64-gnu": "0.5.155",
+    "@tensorlakeai/native-linux-x64-musl": "0.5.155",
+    "@tensorlakeai/native-win32-x64": "0.5.155"
   }
 }
