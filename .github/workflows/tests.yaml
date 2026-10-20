@@ -51,6 +51,7 @@ jobs:
             tests.applications.test_parse_gitignore \
             tests.applications.test_request_context_headers \
             tests.cli.test_parse \
+            tests.document_ai.test_error_response \
             tests.utils.test_retries
           do
             poetry run python -m unittest "$module"
