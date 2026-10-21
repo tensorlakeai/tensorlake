@@ -52,8 +52,8 @@ def sandbox_url_from_ingress_endpoint(
     return urlunparse((parsed.scheme, netloc, "", "", "", ""))
 
 
-def _parse_timestamp(v: int | float | datetime | None) -> datetime | None:
-    """Convert a numeric timestamp to a UTC datetime.
+def _parse_timestamp(v: int | float | str | datetime | None) -> datetime | str | None:
+    """Convert numeric epochs to UTC datetimes; let Pydantic parse ISO strings.
 
     Handles seconds, milliseconds, and microseconds by checking magnitude.
     """
@@ -61,6 +61,13 @@ def _parse_timestamp(v: int | float | datetime | None) -> datetime | None:
         return None
     if isinstance(v, datetime):
         return v
+    if isinstance(v, str):
+        try:
+            v = float(v)
+        except ValueError:
+            # JSON serialization emits ISO timestamps. Leave those strings to
+            # the datetime validator, which also rejects malformed dates.
+            return v
     ts = float(v)
     if ts > 1e15:
         # Microseconds
