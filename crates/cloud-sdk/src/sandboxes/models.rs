@@ -781,6 +781,10 @@ pub struct SandboxInfo {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ListSandboxesResponse {
     pub sandboxes: Vec<SandboxInfo>,
+    /// Where the next page starts. The Sandbox Engine pages its listing; a
+    /// server that answers in one response sends none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
 }
 
 /// Sandbox information plus the archival timestamp. Returned by
