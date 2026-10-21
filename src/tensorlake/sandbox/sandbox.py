@@ -1286,10 +1286,7 @@ class Sandbox:
             TracedIterator[SnapshotInfo] — iterable over this sandbox's snapshots.
         """
         self._require_lifecycle_client("list_snapshots")
-        all_snaps = self._lifecycle_client.list_snapshots()
-        my_id = self.sandbox_id
-        filtered = [s for s in all_snaps if s.sandbox_id == my_id]
-        return TracedIterator(all_snaps.trace_id, filtered)
+        return self._lifecycle_client.list_sandbox_snapshots(self.sandbox_id)
 
     def get_logs(
         self,

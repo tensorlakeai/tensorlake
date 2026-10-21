@@ -1423,6 +1423,32 @@ async fn list_sandboxes_follows_the_cursor() {
 }
 
 #[tokio::test]
+async fn list_sandbox_snapshots_reads_the_sandbox_listing() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = listener.local_addr().expect("address");
+    let server = tokio::spawn(serve_snapshot_pages(
+        listener,
+        vec![
+            r#"{"snapshots":[{"snapshot_id":"s1","namespace":"default","sandbox_id":"sb","status":"completed"}]}"#,
+        ],
+    ));
+    let client = ClientBuilder::new(&format!("http://{address}"))
+        .build()
+        .expect("client");
+    let sandboxes = SandboxesClient::new(client, "default", false);
+    let listed = sandboxes
+        .list_sandbox_snapshots("sb")
+        .await
+        .expect("list sandbox snapshots")
+        .into_inner();
+    assert_eq!(listed[0].snapshot_id, "s1");
+    assert_eq!(
+        server.await.expect("server"),
+        ["GET /sandboxes/sb/snapshots HTTP/1.1"]
+    );
+}
+
+#[tokio::test]
 async fn list_snapshots_refuses_a_cursor_that_does_not_advance() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let address = listener.local_addr().expect("address");

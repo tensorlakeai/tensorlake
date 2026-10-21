@@ -8,6 +8,7 @@ import {
   loadNativeSandboxBinding,
   type NativeErrorContext,
   type NativeSandboxClient,
+  type TracedJson,
 } from "./native-sandbox.js";
 import {
   type ArchivedSandboxInfo,
@@ -995,19 +996,19 @@ export class SandboxClient {
 
   /** List all snapshots in the namespace. */
   async listSnapshots(): Promise<Traced<SnapshotInfo[]>> {
-    const { traceId, json } = await callNative(() =>
-      this.native.listSnapshots(),
+    return parseSnapshotList(
+      await callNative(() => this.native.listSnapshots()),
     );
-    const parsed = JSON.parse(json) as { snapshots?: unknown } | null;
-    if (parsed !== null && (typeof parsed !== "object" || Array.isArray(parsed))) {
-      throw new SandboxError("Invalid snapshot list response: expected an object");
-    }
-    const records = parsed?.snapshots ?? [];
-    if (!Array.isArray(records)) {
-      throw new SandboxError("Invalid snapshot list response: snapshots must be an array");
-    }
-    const snapshots = records.map((s) => parseSnapshot<SnapshotInfo>(s));
-    return Object.assign(snapshots, { traceId });
+  }
+
+  /**
+   * List snapshots taken from one sandbox (its ID or name), from the
+   * sandbox's own listing rather than the whole namespace's.
+   */
+  async listSandboxSnapshots(sandboxId: string): Promise<Traced<SnapshotInfo[]>> {
+    return parseSnapshotList(
+      await callNative(() => this.native.listSandboxSnapshots(sandboxId)),
+    );
   }
 
   /** Delete a snapshot by ID. */
@@ -1468,4 +1469,18 @@ function validateResizeWait(options: ResourceResizeWaitOptions): void {
   if (typeof poll !== "number" || !Number.isFinite(poll) || poll <= 0) {
     throw new SandboxError("pollInterval must be finite and positive");
   }
+}
+
+/** Parse a `{ snapshots: [...] }` listing into traced snapshot records. */
+function parseSnapshotList({ traceId, json }: TracedJson): Traced<SnapshotInfo[]> {
+  const parsed = JSON.parse(json) as { snapshots?: unknown } | null;
+  if (parsed !== null && (typeof parsed !== "object" || Array.isArray(parsed))) {
+    throw new SandboxError("Invalid snapshot list response: expected an object");
+  }
+  const records = parsed?.snapshots ?? [];
+  if (!Array.isArray(records)) {
+    throw new SandboxError("Invalid snapshot list response: snapshots must be an array");
+  }
+  const snapshots = records.map((s) => parseSnapshot<SnapshotInfo>(s));
+  return Object.assign(snapshots, { traceId });
 }

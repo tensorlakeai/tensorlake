@@ -920,6 +920,17 @@ impl SandboxesClient {
             .await
     }
 
+    /// Every snapshot taken from `sandbox_id` (an id or a name), from the
+    /// sandbox's own listing rather than the whole namespace's.
+    pub async fn list_sandbox_snapshots(
+        &self,
+        sandbox_id: &str,
+    ) -> Result<Traced<Vec<SnapshotInfo>>, SdkError> {
+        let uri = self.endpoint(&format!("sandboxes/{sandbox_id}/snapshots"));
+        self.list_all::<ListSnapshotsResponse>(&uri, MAX_LIST_PAGES)
+            .await
+    }
+
     pub async fn delete_snapshot(&self, snapshot_id: &str) -> Result<Traced<()>, SdkError> {
         let uri = self.endpoint(&format!("snapshots/{snapshot_id}"));
         let req = self.client.request(Method::DELETE, &uri).build()?;

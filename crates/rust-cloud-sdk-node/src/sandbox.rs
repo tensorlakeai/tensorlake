@@ -782,6 +782,20 @@ impl NativeSandboxClient {
     }
 
     #[napi]
+    pub async fn list_sandbox_snapshots(&self, sandbox_id: String) -> napi::Result<TracedJson> {
+        with_retry(self.client().await?, 5, move |c| {
+            let sandbox_id = sandbox_id.clone();
+            async move {
+                let traced = c.list_sandbox_snapshots(&sandbox_id).await?;
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&serde_json::json!({ "snapshots": *traced }))?;
+                Ok(TracedJson { trace_id, json })
+            }
+        })
+        .await
+    }
+
+    #[napi]
     pub async fn delete_snapshot(&self, snapshot_id: String) -> napi::Result<String> {
         with_retry(self.client().await?, 5, move |c| {
             let snapshot_id = snapshot_id.clone();

@@ -1625,6 +1625,31 @@ class SandboxClient:
         except Exception as e:
             _raise_as_sandbox_error(e)
 
+    def list_sandbox_snapshots(self, sandbox_id: str) -> TracedIterator[SnapshotInfo]:
+        """List snapshots taken from one sandbox.
+
+        Reads the sandbox's own snapshot listing, so its cost does not grow with
+        the rest of the namespace.
+
+        Args:
+            sandbox_id: The sandbox's ID or name.
+
+        Returns:
+            TracedIterator[SnapshotInfo] — iterable over the sandbox's snapshots, with .trace_id
+
+        Raises:
+            RemoteAPIError: If the API request fails
+            SandboxConnectionError: If the server is unreachable
+        """
+        try:
+            trace_id, response_json = self._rust_client.list_sandbox_snapshots_json(
+                sandbox_id
+            )
+            data = ListSnapshotsResponse.from_response(response_json)
+            return TracedIterator(trace_id, data.snapshots)
+        except Exception as e:
+            _raise_as_sandbox_error(e)
+
     def delete_snapshot(self, snapshot_id: str) -> Traced[None]:
         """Delete a snapshot.
 

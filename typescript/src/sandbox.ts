@@ -1172,9 +1172,7 @@ export class Sandbox {
    */
   async listSnapshots(): Promise<Traced<SnapshotInfo[]>> {
     const client = this.requireLifecycleClient("listSnapshots");
-    const all = await client.listSnapshots();
-    const filtered = all.filter((s) => s.sandboxId === this.lifecycleIdentifier);
-    return Object.assign(filtered, { traceId: all.traceId });
+    return client.listSandboxSnapshots(this.lifecycleIdentifier);
   }
 
   /** Close the proxy connection. The sandbox keeps running. */
