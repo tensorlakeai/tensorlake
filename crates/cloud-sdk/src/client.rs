@@ -21,6 +21,8 @@ mod read_retry;
 pub use read_retry::ReadRetryConfig;
 
 pub const REQUEST_TIMEOUT_HEADER: &str = "X-Tensorlake-Request-Timeout-Ms";
+/// Part of the request timeout a server-side wait leaves for its answer.
+pub const REQUEST_TIMEOUT_GRACE_HEADER: &str = "X-Tensorlake-Request-Timeout-Grace-Ms";
 
 /// Wraps any SDK operation result with the W3C `trace_id` so callers can
 /// correlate the request with its server-side spans in Datadog APM or any

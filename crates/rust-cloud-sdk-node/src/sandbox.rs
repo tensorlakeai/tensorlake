@@ -402,6 +402,26 @@ impl NativeSandboxClient {
         })
     }
 
+    /// Blocking create for create-and-connect: resolves with the server's
+    /// `running`, `failed` or `timeout` record, each with the sandbox id.
+    /// Replays only failures that provably never reached the server.
+    #[napi]
+    pub async fn create_sandbox_and_wait(&self, request_json: String) -> napi::Result<TracedJson> {
+        let request: CreateSandboxRequest = parse_json_payload(&request_json)?;
+        let traced = replay_if_never_delivered(self.client().await?, |client| {
+            let request = request.clone();
+            async move { client.create_and_wait(&request).await }
+        })
+        .await
+        .map_err(into_napi_error)?;
+        let json =
+            serde_json::to_string(&*traced).map_err(|e| into_napi_error(SdkError::from(e)))?;
+        Ok(TracedJson {
+            trace_id: traced.trace_id.clone(),
+            json,
+        })
+    }
+
     /// Wait-free create (ADR 0086): sends `wait: false` and returns the
     /// acknowledgement as soon as the sandbox is durable. Like the blocking
     /// create it is not idempotent, so only failures that provably never

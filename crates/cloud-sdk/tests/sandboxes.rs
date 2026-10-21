@@ -888,6 +888,77 @@ async fn blocking_create_omits_wait_and_an_unset_bound() {
 }
 
 #[tokio::test]
+async fn create_and_wait_returns_every_server_answer_as_a_record() {
+    let (url, server) = scripted_server(vec![
+        (200, r#"{"sandbox_id":"sbx-1","status":"running","sandbox_url":"https://sbx-1.sandbox.tensorlake.ai"}"#),
+        (422, r#"{"sandbox_id":"sbx-2","status":"failed","reason":"no_capacity"}"#),
+        (504, r#"{"sandbox_id":"sbx-3","status":"timeout"}"#),
+    ])
+    .await;
+    let client = ClientBuilder::new(&url)
+        .timeout(Duration::from_secs(8))
+        .build()
+        .expect("build client");
+    let sandboxes = SandboxesClient::new(client, "default", true);
+
+    let running = sandboxes
+        .create_and_wait(&create_request())
+        .await
+        .expect("running");
+    assert_eq!(running.status, "running");
+    let failed = sandboxes
+        .create_and_wait(&create_request())
+        .await
+        .expect("a startup failure is a record, not an error");
+    assert_eq!(failed.sandbox_id, "sbx-2");
+    assert_eq!(failed.status, "failed");
+    assert_eq!(failed.reason.as_deref(), Some("no_capacity"));
+    let timed_out = sandboxes
+        .create_and_wait(&create_request())
+        .await
+        .expect("a timeout is a record, not an error");
+    assert_eq!(timed_out.sandbox_id, "sbx-3");
+    assert_eq!(timed_out.status, "timeout");
+
+    for request in server.await.expect("server join") {
+        let lowered = request.to_ascii_lowercase();
+        // A quarter of the 8 s request timeout is left for the answer.
+        assert!(
+            lowered.contains("x-tensorlake-request-timeout-ms: 8000"),
+            "{request}"
+        );
+        assert!(
+            lowered.contains("x-tensorlake-request-timeout-grace-ms: 2000"),
+            "{request}"
+        );
+        assert!(!request_body(&request).contains("\"wait\""), "{request}");
+    }
+}
+
+#[tokio::test]
+async fn create_and_wait_caps_the_response_grace() {
+    let (url, server) =
+        scripted_server(vec![(200, r#"{"sandbox_id":"sbx-1","status":"running"}"#)]).await;
+    let client = ClientBuilder::new(&url)
+        .timeout(Duration::from_secs(300))
+        .build()
+        .expect("build client");
+    let sandboxes = SandboxesClient::new(client, "default", true);
+    sandboxes
+        .create_and_wait(&create_request())
+        .await
+        .expect("running");
+    let requests = server.await.expect("server join");
+    assert!(
+        requests[0]
+            .to_ascii_lowercase()
+            .contains("x-tensorlake-request-timeout-grace-ms: 5000"),
+        "{}",
+        requests[0]
+    );
+}
+
+#[tokio::test]
 async fn create_no_wait_accepts_the_legacy_blocking_shape_from_older_servers() {
     // A server that predates `wait: false` ignores it and answers the
     // blocking create's shape, possibly already running or timed out.

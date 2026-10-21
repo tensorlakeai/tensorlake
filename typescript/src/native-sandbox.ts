@@ -85,6 +85,8 @@ export interface NativeSandboxProxyClient {
 
 export interface NativeSandboxClient {
   createSandbox(requestJson: string): Promise<TracedJson>;
+  /** Blocking create for createAndConnect: a `running`, `failed` or `timeout` record. */
+  createSandboxAndWait(requestJson: string): Promise<TracedJson>;
   /** Wait-free create (`wait: false`, ADR 0086). */
   createSandboxNoWait(requestJson: string): Promise<TracedJson>;
   /** Poll the sandbox until it leaves `pending` or the budget runs out; resolves with the last `SandboxInfo`. */

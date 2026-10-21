@@ -1546,6 +1546,22 @@ impl CloudSandboxClient {
         })
     }
 
+    /// Blocking create for create-and-connect: returns the server's
+    /// `running`, `failed` or `timeout` record, each with the sandbox id.
+    /// Replays only failures that provably never reached the server.
+    fn create_sandbox_and_wait(&self, request_json: String) -> PyResult<(String, String)> {
+        let request: CreateSandboxRequest = parse_json_payload(&request_json)?;
+        self.run_with_connect_replay(move |client| {
+            let request = request.clone();
+            async move {
+                let traced = client.create_and_wait(&request).await?;
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
+                Ok((trace_id, json))
+            }
+        })
+    }
+
     /// Wait-free create (ADR 0086): sends `wait: false` and returns the
     /// acknowledgement as soon as the sandbox is durable. Like the blocking
     /// create it is not idempotent, so only failures that provably never
@@ -1996,6 +2012,27 @@ impl CloudSandboxClient {
             let traced = replay_if_never_delivered(client, move |c| {
                 let request = request.clone();
                 async move { c.create(&request).await }
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            let trace_id = traced.trace_id.clone();
+            let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
+            Ok((trace_id, json))
+        })
+    }
+
+    /// Awaitable counterpart of `create_sandbox_and_wait`.
+    fn create_sandbox_and_wait_async<'py>(
+        &self,
+        py: Python<'py>,
+        request_json: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let request: CreateSandboxRequest = parse_json_payload(&request_json)?;
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = replay_if_never_delivered(client, move |c| {
+                let request = request.clone();
+                async move { c.create_and_wait(&request).await }
             })
             .await
             .map_err(into_sandbox_py_error)?;
