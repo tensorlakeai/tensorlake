@@ -41,6 +41,9 @@ pub const TERMINATION_REASON_CANCELLED: &str = "cancelled";
 /// rollout keeps going. A pending sandbox is not routable yet, so the
 /// lifecycle gateway can answer a transient proxy error until it starts.
 const WAIT_TRANSIENT_RETRIES: usize = 10;
+/// Most pages `list_snapshots` follows. A server answers at most 100
+/// snapshots a page, so this bounds a listing at 100,000 snapshots.
+const MAX_SNAPSHOT_LIST_PAGES: usize = 1000;
 
 /// Whether a sandbox `status` is one a readiness wait keeps polling through.
 pub fn is_sandbox_pending(status: &str) -> bool {
@@ -850,14 +853,39 @@ impl SandboxesClient {
         self.client.execute_read_json(req).await
     }
 
+    /// Every snapshot in the namespace, following the listing's cursor to its
+    /// end. The trace id is the first page's.
     pub async fn list_snapshots(&self) -> Result<Traced<Vec<SnapshotInfo>>, SdkError> {
         let uri = self.endpoint("snapshots");
-        let req = self.client.request(Method::GET, &uri).build()?;
-        Ok(self
-            .client
-            .execute_read_json::<ListSnapshotsResponse>(req)
-            .await?
-            .map(|r| r.snapshots))
+        let mut trace_id = None;
+        let mut snapshots = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..MAX_SNAPSHOT_LIST_PAGES {
+            let mut request = self.client.request(Method::GET, &uri);
+            if let Some(cursor) = cursor.as_deref() {
+                request = request.query(&[("cursor", cursor)]);
+            }
+            let page = self
+                .client
+                .execute_read_json::<ListSnapshotsResponse>(request.build()?)
+                .await?;
+            trace_id.get_or_insert_with(|| page.trace_id.clone());
+            let page = page.into_inner();
+            snapshots.extend(page.snapshots);
+            match page.cursor.filter(|next| !next.is_empty()) {
+                // A cursor the server hands back unchanged would never advance.
+                Some(next) if cursor.as_deref() != Some(next.as_str()) => cursor = Some(next),
+                Some(_) => {
+                    return Err(SdkError::ClientError(
+                        "snapshot listing returned the cursor it was given".to_string(),
+                    ));
+                }
+                None => return Ok(Traced::new(trace_id.unwrap_or_default(), snapshots)),
+            }
+        }
+        Err(SdkError::ClientError(format!(
+            "snapshot listing did not end within {MAX_SNAPSHOT_LIST_PAGES} pages"
+        )))
     }
 
     pub async fn delete_snapshot(&self, snapshot_id: &str) -> Result<Traced<()>, SdkError> {

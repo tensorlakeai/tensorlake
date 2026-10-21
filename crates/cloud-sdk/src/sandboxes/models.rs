@@ -911,6 +911,10 @@ pub struct SnapshotInfo {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ListSnapshotsResponse {
     pub snapshots: Vec<SnapshotInfo>,
+    /// Where the next page starts. The Sandbox Engine pages its listing; a
+    /// server that answers in one response sends none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
