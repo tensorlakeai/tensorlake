@@ -18,28 +18,42 @@ _TRACE_ID = "00-deadbeefdeadbeefdeadbeefdeadbeef-cafebabecafebabe-01"
 
 
 class _FakeOutputStream:
-    """Stand-in for the native ``OutputEventStream``: hands out one event per call."""
+    """Stand-in for the native ``OutputEventStream``: hands out one event per call.
 
-    def __init__(self, events, error=None):
+    Mirrors the native contract: the follow request opens on ``open()`` or on
+    the first ``next``, the trace id is known from then on, and ``close()``
+    drops the events not yet taken.
+    """
+
+    def __init__(self, events, error=None, open_error=None):
         self._events = [json.dumps(event) for event in events]
         self._error = error
-        self._done = False
+        self._open_error = open_error
+        self.opened = False
         self.closed = False
 
+    def open(self):
+        if self._open_error is not None:
+            raise self._open_error
+        self.opened = True
+
     def next(self):
+        if not self.opened:
+            self.open()
+        if self.closed:
+            return None
         if self._events:
             return self._events.pop(0)
         if self._error is not None:
             error, self._error = self._error, None
             raise error
-        self._done = True
         return None
 
     async def next_async(self):
         return self.next()
 
     def trace_id(self):
-        return _TRACE_ID if self._done else None
+        return _TRACE_ID if self.opened else None
 
     def close(self):
         self.closed = True
@@ -56,6 +70,7 @@ class _FakeRustProxyClient:
         self.followed = None
         self.follow_stream = None
         self.follow_error = None
+        self.follow_open_error = None
 
     def close(self):
         return None
@@ -161,7 +176,9 @@ class _FakeRustProxyClient:
         )
 
     def _follow_stream(self, events):
-        self.follow_stream = _FakeOutputStream(events, error=self.follow_error)
+        self.follow_stream = _FakeOutputStream(
+            events, error=self.follow_error, open_error=self.follow_open_error
+        )
         return self.follow_stream
 
     def run_process_json(self, payload_json):
@@ -352,11 +369,13 @@ class TestSandboxRustBackend(unittest.TestCase):
         stream = sandbox.follow_output(101)
 
         self.assertIsInstance(stream, OutputStream)
+        # The follow request opened before the stream was returned.
+        self.assertTrue(fake.follow_stream.opened)
+        self.assertEqual(stream.trace_id, _TRACE_ID)
         # Events are pulled one at a time, not collected up front.
         self.assertEqual(fake.follow_stream.pending, 2)
         self.assertEqual(next(stream).line, "hello")
         self.assertEqual(fake.follow_stream.pending, 1)
-        self.assertIsNone(stream.trace_id)
         self.assertEqual(next(stream).line, "world")
         with self.assertRaises(StopIteration):
             next(stream)
@@ -390,6 +409,29 @@ class TestSandboxRustBackend(unittest.TestCase):
             next(stream)
 
         self.assertIn("stream dropped", str(ctx.exception))
+
+    def test_follow_output_open_error_raises_at_call_time(self):
+        fake = _FakeRustProxyClient()
+        fake.follow_open_error = RuntimeError("process not found")
+        sandbox, _ = _make_sandbox(fake)
+
+        with self.assertRaises(SandboxError) as ctx:
+            sandbox.follow_output(101)
+
+        self.assertIn("process not found", str(ctx.exception))
+
+    def test_follow_output_close_drops_pending_events(self):
+        sandbox, fake = _make_sandbox()
+
+        stream = sandbox.follow_output(101)
+        self.assertFalse(stream.closed)
+        stream.close()
+
+        self.assertTrue(stream.closed)
+        self.assertTrue(fake.follow_stream.closed)
+        with self.assertRaises(StopIteration):
+            next(stream)
+        self.assertEqual(stream.trace_id, _TRACE_ID)
 
     def test_run_uses_streaming_endpoint(self):
         sandbox, fake = _make_sandbox()

@@ -8,6 +8,7 @@ asyncio event loop instead of blocking a worker thread.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 from collections.abc import Coroutine, Mapping
@@ -89,9 +90,14 @@ class AsyncOutputStream(Coroutine[Any, Any, TracedIterator[OutputEvent]]):
     also a coroutine, so ``asyncio.create_task(sandbox.follow_output(pid))``
     and ``TaskGroup.create_task(...)`` schedule that collection as before.
 
+    The follow request opens on the first ``await``, which is where an
+    unknown process raises. ``trace_id`` is the W3C trace ID of the follow
+    request: ``None`` before that first ``await``, set from then on. The SDK
+    reconnects across transient failures and resumes after the events
+    already received.
+
     Use the stream as an async context manager, or call ``close()``, to stop
-    early. ``trace_id`` is the W3C trace ID of the follow request. It is
-    ``None`` until the stream ends.
+    early.
     """
 
     def __init__(self, native: Any) -> None:
@@ -101,6 +107,11 @@ class AsyncOutputStream(Coroutine[Any, Any, TracedIterator[OutputEvent]]):
     @property
     def trace_id(self) -> str | None:
         return self._native.trace_id()
+
+    @property
+    def closed(self) -> bool:
+        """Whether ``close()`` was called."""
+        return self._native.closed
 
     def __aiter__(self) -> AsyncOutputStream:
         return self
@@ -136,15 +147,29 @@ class AsyncOutputStream(Coroutine[Any, Any, TracedIterator[OutputEvent]]):
 
     async def _collect(self) -> TracedIterator[OutputEvent]:
         items = [event async for event in self]
-        return TracedIterator(self.trace_id, items)
+        trace_id = self.trace_id
+        if trace_id is None:
+            # The stream ends only after its follow request opened, even
+            # when closed first. Reaching this means the native task died.
+            raise SandboxError("the follow request ended before it opened")
+        return TracedIterator(trace_id, items)
 
     def close(self) -> None:
         """Stop following. The sandbox process keeps running.
 
-        A pending ``await`` or task on this stream ends normally with the
-        events received so far once the sandbox side closes.
+        Events not yet received are dropped. A pending ``await`` or task on
+        this stream ends normally with the events received so far, once the
+        follow request has opened. Safe to call more than once.
         """
         self._native.close()
+        collector = self._collector
+        if collector is not None and (
+            inspect.getcoroutinestate(collector) == inspect.CORO_CREATED
+        ):
+            # Created by ``__await__`` but never driven: close it so Python
+            # does not warn that it was never awaited. One that is running
+            # or suspended belongs to the task driving it.
+            collector.close()
 
     async def __aenter__(self) -> AsyncOutputStream:
         return self
@@ -1408,16 +1433,14 @@ class AsyncSandbox:
 
         Use ``async for`` to receive each ``OutputEvent`` as the sandbox
         emits it, or ``await`` the result to collect all events after the
-        process exits.
+        process exits. The follow request opens on the first ``await``,
+        which is where an unknown process raises.
 
         Args:
             process: PID or process name given on creation.
         """
         seg = _resolve_process_arg(process, pid)
-        try:
-            return AsyncOutputStream(self._rust_client.follow_stdout_stream(seg))
-        except Exception as e:
-            _raise_as_sandbox_error(e)
+        return AsyncOutputStream(self._rust_client.follow_stdout_stream(seg))
 
     def follow_stderr(
         self,
@@ -1429,16 +1452,14 @@ class AsyncSandbox:
 
         Use ``async for`` to receive each ``OutputEvent`` as the sandbox
         emits it, or ``await`` the result to collect all events after the
-        process exits.
+        process exits. The follow request opens on the first ``await``,
+        which is where an unknown process raises.
 
         Args:
             process: PID or process name given on creation.
         """
         seg = _resolve_process_arg(process, pid)
-        try:
-            return AsyncOutputStream(self._rust_client.follow_stderr_stream(seg))
-        except Exception as e:
-            _raise_as_sandbox_error(e)
+        return AsyncOutputStream(self._rust_client.follow_stderr_stream(seg))
 
     def follow_output(
         self,
@@ -1450,16 +1471,14 @@ class AsyncSandbox:
 
         Use ``async for`` to receive each ``OutputEvent`` as the sandbox
         emits it, or ``await`` the result to collect all events after the
-        process exits.
+        process exits. The follow request opens on the first ``await``,
+        which is where an unknown process raises.
 
         Args:
             process: PID or process name given on creation.
         """
         seg = _resolve_process_arg(process, pid)
-        try:
-            return AsyncOutputStream(self._rust_client.follow_output_stream(seg))
-        except Exception as e:
-            _raise_as_sandbox_error(e)
+        return AsyncOutputStream(self._rust_client.follow_output_stream(seg))
 
     # --- File operations ---
 
