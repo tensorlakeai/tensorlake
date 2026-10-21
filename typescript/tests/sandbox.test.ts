@@ -1070,7 +1070,7 @@ describe("Sandbox", () => {
       client.close();
     });
 
-    it("listSnapshots() filters by canonical sandbox ID after renaming a SandboxClient.connect(name) handle", async () => {
+    it("listSnapshots() reads the canonical sandbox ID's listing after renaming a SandboxClient.connect(name) handle", async () => {
       const updateSandbox = vi.fn(async (id: string) => {
         expect(id).toBe("my-original-name");
         return {
@@ -1078,16 +1078,16 @@ describe("Sandbox", () => {
           json: sandboxInfoBody({ id: "sbx-1", name: "renamed-by-handle" }),
         };
       });
-      const listSnapshots = vi.fn(async () => ({
-        traceId: "t",
-        json: JSON.stringify({
-          snapshots: [
-            { snapshot_id: "snap-1", sandbox_id: "sbx-1", status: "completed" },
-            { snapshot_id: "snap-2", sandbox_id: "other-sbx", status: "completed" },
-          ],
-        }),
-      }));
-      installNativeStub({ client: { updateSandbox, listSnapshots } });
+      const listSandboxSnapshots = vi.fn(async (id: string) => {
+        expect(id).toBe("sbx-1");
+        return {
+          traceId: "t",
+          json: JSON.stringify({
+            snapshots: [{ snapshot_id: "snap-1", sandbox_id: "sbx-1", status: "completed" }],
+          }),
+        };
+      });
+      installNativeStub({ client: { updateSandbox, listSandboxSnapshots } });
 
       const client = new SandboxClient({ apiUrl: "http://localhost:8900" }, true);
       const sbx = client.connect("my-original-name");
@@ -1096,6 +1096,7 @@ describe("Sandbox", () => {
       await sbx.update({ name: "renamed-by-handle" });
       const snaps = await sbx.listSnapshots();
 
+      expect(listSandboxSnapshots).toHaveBeenCalledTimes(1);
       expect(snaps).toHaveLength(1);
       expect(snaps[0].snapshotId).toBe("snap-1");
       sbx.close();

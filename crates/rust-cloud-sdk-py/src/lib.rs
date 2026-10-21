@@ -1901,6 +1901,19 @@ impl CloudSandboxClient {
         })
     }
 
+    fn list_sandbox_snapshots_json(&self, sandbox_id: String) -> PyResult<(String, String)> {
+        self.run_with_retry(5, move |client| {
+            let sandbox_id = sandbox_id.clone();
+            async move {
+                let traced = client.list_sandbox_snapshots(&sandbox_id).await?;
+                let trace_id = traced.trace_id.clone();
+                let response = serde_json::json!({ "snapshots": *traced });
+                let json = serde_json::to_string(&response).map_err(SdkError::from)?;
+                Ok((trace_id, json))
+            }
+        })
+    }
+
     fn delete_snapshot(&self, snapshot_id: String) -> PyResult<String> {
         self.run_with_retry(5, move |client| {
             let snapshot_id = snapshot_id.clone();
@@ -2426,6 +2439,26 @@ impl CloudSandboxClient {
                 retry_async_op(client, 5, move |c| async move { c.list_snapshots().await })
                     .await
                     .map_err(into_sandbox_py_error)?;
+            let trace_id = traced.trace_id.clone();
+            let response = serde_json::json!({ "snapshots": *traced });
+            let json = serde_json::to_string(&response).map_err(sandbox_serde_err)?;
+            Ok((trace_id, json))
+        })
+    }
+
+    fn list_sandbox_snapshots_json_async<'py>(
+        &self,
+        py: Python<'py>,
+        sandbox_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = retry_async_op(client, 5, move |c| {
+                let sandbox_id = sandbox_id.clone();
+                async move { c.list_sandbox_snapshots(&sandbox_id).await }
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
             let trace_id = traced.trace_id.clone();
             let response = serde_json::json!({ "snapshots": *traced });
             let json = serde_json::to_string(&response).map_err(sandbox_serde_err)?;

@@ -135,6 +135,7 @@ export interface NativeSandboxClient {
   ): Promise<TracedJson>;
   getSnapshot(snapshotId: string): Promise<TracedJson>;
   listSnapshots(): Promise<TracedJson>;
+  listSandboxSnapshots(sandboxId: string): Promise<TracedJson>;
   deleteSnapshot(snapshotId: string): Promise<string>;
   createPool(requestJson: string): Promise<TracedJson>;
   getPool(poolId: string): Promise<TracedJson>;

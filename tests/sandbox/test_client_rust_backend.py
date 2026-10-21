@@ -2060,6 +2060,27 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         self.assertEqual(info.snapshot_id, "snap-1")
         self.assertEqual(info.snapshot_type, SnapshotType.FILESYSTEM)
 
+    def test_list_sandbox_snapshots_reads_the_sandbox_listing(self):
+        calls = []
+
+        class _SandboxListingRustClient(_FakeRustClient):
+            def list_sandbox_snapshots_json(self, sandbox_id):
+                calls.append(sandbox_id)
+                return (
+                    "trace-sandbox-snaps",
+                    '{"snapshots":[{"id":"snap-1","namespace":"default",'
+                    '"sandbox_id":"sbx-1","status":"completed"}]}',
+                )
+
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        client._rust_client = _SandboxListingRustClient()
+
+        snapshots = client.list_sandbox_snapshots("sbx-1")
+
+        self.assertEqual(calls, ["sbx-1"])
+        self.assertEqual([s.snapshot_id for s in snapshots], ["snap-1"])
+        self.assertEqual(snapshots.trace_id, "trace-sandbox-snaps")
+
     def test_snapshot_and_wait_returns_on_local_ready_by_default(self):
         class _LocalReadyRustClient(_FakeRustClient):
             def get_snapshot_json(self, snapshot_id):

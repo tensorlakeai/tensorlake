@@ -41,6 +41,32 @@ pub const TERMINATION_REASON_CANCELLED: &str = "cancelled";
 /// rollout keeps going. A pending sandbox is not routable yet, so the
 /// lifecycle gateway can answer a transient proxy error until it starts.
 const WAIT_TRANSIENT_RETRIES: usize = 10;
+/// Most pages a listing follows. Each page after the first asks for
+/// `LIST_PAGE_LIMIT` items, so this bounds a listing at about 100,000.
+const MAX_LIST_PAGES: usize = 1000;
+/// Items each page after the first asks for: the Sandbox Engine's maximum.
+const LIST_PAGE_LIMIT: &str = "100";
+
+/// A listing the server may answer in pages: its items, and where the next
+/// page starts.
+trait ListingPage: serde::de::DeserializeOwned {
+    type Item;
+    fn into_page(self) -> (Vec<Self::Item>, Option<String>);
+}
+
+impl ListingPage for ListSandboxesResponse {
+    type Item = SandboxInfo;
+    fn into_page(self) -> (Vec<SandboxInfo>, Option<String>) {
+        (self.sandboxes, self.cursor)
+    }
+}
+
+impl ListingPage for ListSnapshotsResponse {
+    type Item = SnapshotInfo;
+    fn into_page(self) -> (Vec<SnapshotInfo>, Option<String>) {
+        (self.snapshots, self.cursor)
+    }
+}
 
 /// Whether a sandbox `status` is one a readiness wait keeps polling through.
 pub fn is_sandbox_pending(status: &str) -> bool {
@@ -646,14 +672,50 @@ impl SandboxesClient {
         self.client.execute_read_json_once(req).await
     }
 
+    /// Every sandbox in the namespace, following the listing's cursor to its
+    /// end.
     pub async fn list(&self) -> Result<Traced<Vec<SandboxInfo>>, SdkError> {
         let uri = self.endpoint("sandboxes");
-        let req = self.client.request(Method::GET, &uri).build()?;
-        Ok(self
-            .client
-            .execute_read_json::<ListSandboxesResponse>(req)
-            .await?
-            .map(|r| r.sandboxes))
+        self.list_all::<ListSandboxesResponse>(&uri, MAX_LIST_PAGES)
+            .await
+    }
+
+    /// Every item of a listing, following its cursor until a page has none.
+    /// The first request carries no query, so a server that answers in one
+    /// response (the Indexify Server) gets exactly one request; later pages
+    /// ask for `LIST_PAGE_LIMIT` items. The trace id is the first page's.
+    async fn list_all<P: ListingPage>(
+        &self,
+        uri: &str,
+        max_pages: usize,
+    ) -> Result<Traced<Vec<P::Item>>, SdkError> {
+        let mut trace_id = None;
+        let mut items = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..max_pages {
+            let mut request = self.client.request(Method::GET, uri);
+            if let Some(cursor) = cursor.as_deref() {
+                request = request.query(&[("cursor", cursor), ("limit", LIST_PAGE_LIMIT)]);
+            }
+            let page = self.client.execute_read_json::<P>(request.build()?).await?;
+            trace_id.get_or_insert_with(|| page.trace_id.clone());
+            let (page_items, next) = page.into_inner().into_page();
+            items.extend(page_items);
+            match next.filter(|next| !next.is_empty()) {
+                // A cursor seen before would revisit pages it already returned.
+                Some(next) if seen.insert(next.clone()) => cursor = Some(next),
+                Some(next) => {
+                    return Err(SdkError::ClientError(format!(
+                        "listing {uri} returned cursor {next} a second time"
+                    )));
+                }
+                None => return Ok(Traced::new(trace_id.unwrap_or_default(), items)),
+            }
+        }
+        Err(SdkError::ClientError(format!(
+            "listing {uri} did not end within {max_pages} pages"
+        )))
     }
 
     /// List archived (terminated) sandboxes in the namespace. Archived sandboxes
@@ -850,14 +912,23 @@ impl SandboxesClient {
         self.client.execute_read_json(req).await
     }
 
+    /// Every snapshot in the namespace, following the listing's cursor to its
+    /// end.
     pub async fn list_snapshots(&self) -> Result<Traced<Vec<SnapshotInfo>>, SdkError> {
         let uri = self.endpoint("snapshots");
-        let req = self.client.request(Method::GET, &uri).build()?;
-        Ok(self
-            .client
-            .execute_read_json::<ListSnapshotsResponse>(req)
-            .await?
-            .map(|r| r.snapshots))
+        self.list_all::<ListSnapshotsResponse>(&uri, MAX_LIST_PAGES)
+            .await
+    }
+
+    /// Every snapshot taken from `sandbox_id` (an id or a name), from the
+    /// sandbox's own listing rather than the whole namespace's.
+    pub async fn list_sandbox_snapshots(
+        &self,
+        sandbox_id: &str,
+    ) -> Result<Traced<Vec<SnapshotInfo>>, SdkError> {
+        let uri = self.endpoint(&format!("sandboxes/{sandbox_id}/snapshots"));
+        self.list_all::<ListSnapshotsResponse>(&uri, MAX_LIST_PAGES)
+            .await
     }
 
     pub async fn delete_snapshot(&self, snapshot_id: &str) -> Result<Traced<()>, SdkError> {
@@ -1692,5 +1763,60 @@ mod process_ref_tests {
                 "unexpected error for {bad:?}: {error}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod listing_tests {
+    use super::{ListSnapshotsResponse, SandboxesClient};
+    use crate::{ClientBuilder, error::SdkError};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// Answer one GET per connection with each of `bodies` in turn.
+    async fn serve(listener: TcpListener, bodies: Vec<String>) {
+        for body in bodies {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut request = Vec::new();
+            let mut buf = [0_u8; 4096];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = socket.read(&mut buf).await.expect("read request");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buf[..read]);
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        }
+    }
+
+    #[tokio::test]
+    async fn listing_stops_at_its_page_cap() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("address");
+        let bodies = (0..3)
+            .map(|page| format!(r#"{{"snapshots":[],"cursor":"page-{page}"}}"#))
+            .collect();
+        let server = tokio::spawn(serve(listener, bodies));
+        let client = ClientBuilder::new(&format!("http://{address}"))
+            .build()
+            .expect("client");
+        let sandboxes = SandboxesClient::new(client, "default", false);
+        let error = sandboxes
+            .list_all::<ListSnapshotsResponse>("/snapshots", 3)
+            .await
+            .expect_err("a listing past its cap must fail");
+        assert!(
+            matches!(&error, SdkError::ClientError(message) if message.contains("did not end within 3 pages")),
+            "{error:?}"
+        );
+        server.await.expect("server");
     }
 }

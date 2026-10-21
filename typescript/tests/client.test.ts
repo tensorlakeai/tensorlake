@@ -2086,6 +2086,21 @@ describe("SandboxClient", () => {
       client.close();
     });
 
+    it("listSandboxSnapshots reads the sandbox's own listing", async () => {
+      const listSandboxSnapshots = vi.fn(async () => ({
+        traceId: "trace-sandbox-snaps",
+        json: JSON.stringify({ snapshots: [] }),
+      }));
+      installNativeStub({ client: { listSandboxSnapshots } });
+
+      const client = SandboxClient.forLocalhost();
+      const snaps = await client.listSandboxSnapshots("sbx-1");
+      expect(listSandboxSnapshots).toHaveBeenCalledWith("sbx-1");
+      expect(Array.isArray(snaps)).toBe(true);
+      expect(snaps.traceId).toBe("trace-sandbox-snaps");
+      client.close();
+    });
+
     it("listSnapshots returns traceId on the array", async () => {
       installNativeStub({
         client: {

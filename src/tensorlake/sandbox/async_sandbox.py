@@ -861,9 +861,7 @@ class AsyncSandbox:
     async def list_snapshots(self) -> TracedIterator[SnapshotInfo]:
         self._require_lifecycle_client("list_snapshots")
         my_id = self._sandbox_id or (await self._fetch_info()).sandbox_id
-        all_snaps = await self._lifecycle_client.list_snapshots()
-        filtered = [s for s in all_snaps if s.sandbox_id == my_id]
-        return TracedIterator(all_snaps.trace_id, filtered)
+        return await self._lifecycle_client.list_sandbox_snapshots(my_id)
 
     async def get_logs(
         self,

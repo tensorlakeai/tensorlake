@@ -1078,6 +1078,19 @@ class AsyncSandboxClient:
         except Exception as e:
             _raise_as_sandbox_error(e)
 
+    async def list_sandbox_snapshots(
+        self, sandbox_id: str
+    ) -> TracedIterator[SnapshotInfo]:
+        """List snapshots taken from one sandbox (its ID or name)."""
+        try:
+            trace_id, response_json = (
+                await self._rust_client.list_sandbox_snapshots_json_async(sandbox_id)
+            )
+            data = ListSnapshotsResponse.from_response(response_json)
+            return TracedIterator(trace_id, data.snapshots)
+        except Exception as e:
+            _raise_as_sandbox_error(e)
+
     async def delete_snapshot(self, snapshot_id: str) -> Traced[None]:
         try:
             trace_id = await self._rust_client.delete_snapshot_async(
