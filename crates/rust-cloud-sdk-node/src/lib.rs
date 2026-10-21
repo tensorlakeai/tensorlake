@@ -76,11 +76,11 @@ pub struct SandboxImageBuildOptionsJs {
     pub docker_config_json: Option<String>,
     pub dockerfile_text: Option<String>,
     pub context_dir: Option<String>,
-    /// Opt into the non-default CAS (content-addressed streaming) image
-    /// format.
+    /// Build a CAS (content-addressed streaming) image, the default.
+    /// `false` builds a legacy image.
     pub cas: Option<bool>,
     /// Dockerfile build args forwarded to BuildKit inside the builder. CAS
-    /// builds only.
+    /// images only.
     pub build_args: Option<std::collections::HashMap<String, String>>,
 }
 
@@ -108,8 +108,8 @@ pub struct SandboxImageImportOptionsJs {
     pub docker_compat: Option<bool>,
     /// Docker config JSON contents. Omission discovers local configuration.
     pub docker_config_json: Option<String>,
-    /// Opt into the non-default CAS (content-addressed streaming) image
-    /// format.
+    /// Build a CAS (content-addressed streaming) image, the default.
+    /// `false` builds a legacy image.
     pub cas: Option<bool>,
 }
 
@@ -209,8 +209,8 @@ fn event_to_js(event: SandboxImageBuildEvent) -> SandboxImageBuildEventJs {
 /// threadsafe callback boundary.
 ///
 /// `interrupt_id` (from [`create_image_build_interrupt`]) is honored only
-/// for CAS builds: triggering it cancels the remote Image Service operation
-/// through the bounded handshake. A legacy build ignores it and keeps its
+/// for CAS image builds: triggering it cancels the remote CAS image build
+/// through the bounded handshake. A legacy image build ignores it and keeps its
 /// existing error path; nothing is cancelled remotely on its behalf.
 #[napi]
 pub async fn build_sandbox_image(
@@ -218,7 +218,7 @@ pub async fn build_sandbox_image(
     emit: Option<ThreadsafeFunction<SandboxImageBuildEventJs, ErrorStrategy::Fatal>>,
     interrupt_id: Option<u32>,
 ) -> Result<String> {
-    let cas = options.cas.unwrap_or(false);
+    let cas = options.cas.unwrap_or(true);
     let docker_config_json = options.docker_config_json.clone();
     let build_options = build_options_from_js(options);
     if cas {
@@ -265,7 +265,7 @@ fn build_options_from_js(options: SandboxImageBuildOptionsJs) -> SandboxImageBui
             cpus: options.cpus,
             memory_mb: options.memory_mb,
             is_public: options.is_public.unwrap_or(false),
-            cas: options.cas.unwrap_or(false),
+            cas: options.cas.unwrap_or(true),
             user_agent: options.user_agent,
             docker_compat: options.docker_compat.unwrap_or(false),
         },
@@ -300,7 +300,7 @@ pub async fn import_sandbox_image(
     emit: Option<ThreadsafeFunction<SandboxImageBuildEventJs, ErrorStrategy::Fatal>>,
     interrupt_id: Option<u32>,
 ) -> Result<String> {
-    let cas = options.cas.unwrap_or(false);
+    let cas = options.cas.unwrap_or(true);
     let docker_config_json = options.docker_config_json.clone();
     let import_options = import_options_from_js(options);
     if cas {
@@ -347,7 +347,7 @@ fn import_options_from_js(options: SandboxImageImportOptionsJs) -> SandboxImageI
             cpus: options.cpus,
             memory_mb: options.memory_mb,
             is_public: options.is_public.unwrap_or(false),
-            cas: options.cas.unwrap_or(false),
+            cas: options.cas.unwrap_or(true),
             user_agent: options.user_agent,
             docker_compat: options.docker_compat.unwrap_or(false),
         },
@@ -615,7 +615,7 @@ pub async fn cancel_image_build(
 }
 
 /// Credentials and scope for the merged image catalog (ADR 0107): the
-/// platform template registry plus the Image Service behind one lookup,
+/// legacy image registry plus the CAS image registry behind one lookup,
 /// delete and list.
 #[napi(object)]
 pub struct SandboxImageCatalogOptionsJs {
@@ -668,18 +668,41 @@ pub async fn find_sandbox_image(
         .map_err(|error| Error::from_reason(error.to_string()))
 }
 
-/// Delete one sandbox image by name or id. Not found in either catalog is a
-/// 404 `remote_api` error. Replayed only when the request provably never
-/// reached a server.
+/// The same-named legacy image a name's CAS delete left behind and could not
+/// remove.
+#[napi(object)]
+pub struct SandboxImageLegacyCleanupFailureJs {
+    /// The legacy image's name: the deleted CAS image's canonical name.
+    pub legacy_image_name: String,
+    /// The legacy image's `sandbox_template_` id, when known.
+    pub legacy_image_id: Option<String>,
+    pub error: String,
+}
+
+/// Delete one sandbox image by name or id. A name whose CAS image is deleted
+/// also loses its same-named legacy image, which can no longer start
+/// sandboxes. Not found in either catalog is a 404 `remote_api` error.
+/// Replayed only when the request provably never reached a server. Resolves
+/// to the legacy image that could not be deleted, or null; the delete still
+/// succeeded and the TypeScript layer turns it into a warning.
 #[napi]
 pub async fn delete_sandbox_image(
     options: SandboxImageCatalogOptionsJs,
     reference: String,
-) -> Result<()> {
+) -> Result<Option<SandboxImageLegacyCleanupFailureJs>> {
     let catalog = sandbox_image_catalog(options)?;
     retry(catalog, RetryPolicy::non_idempotent(), |catalog| {
         let reference = reference.clone();
-        async move { catalog.delete(&reference).await }
+        async move {
+            let deletion = catalog.delete_reporting(&reference).await?;
+            Ok(deletion.failed_legacy_cleanup().map(|(name, id, error)| {
+                SandboxImageLegacyCleanupFailureJs {
+                    legacy_image_name: name.to_string(),
+                    legacy_image_id: id.map(str::to_string),
+                    error: error.to_string(),
+                }
+            }))
+        }
     })
     .await
     .map_err(sandbox::into_napi_error)

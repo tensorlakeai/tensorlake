@@ -1006,6 +1006,8 @@ async fn build_application_images(
                     cpus: None,
                     memory_mb: None,
                     is_public: false,
+                    // Applications runtime images stay legacy images while
+                    // CAS is the default for sandbox images.
                     cas: false,
                     user_agent: Some(format!(
                         "Tensorlake CLI (rust/{})",

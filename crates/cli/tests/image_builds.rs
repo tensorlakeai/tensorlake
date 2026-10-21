@@ -154,7 +154,7 @@ async fn build_wait_returns_the_operations_own_result() {
     assert!(
         waited
             .stderr()
-            .contains("Image 'img' registered (image_ok)"),
+            .contains("CAS image 'img' registered (image_ok)"),
         "{}",
         waited.stderr()
     );
@@ -396,7 +396,7 @@ async fn build_cancel_by_build_id_is_sufficient_and_distinguishes_outcomes() {
     assert!(
         completed
             .stdout()
-            .contains("Image 'img' registered (image_ok)"),
+            .contains("CAS image 'img' registered (image_ok)"),
         "{}",
         completed.stdout()
     );
@@ -499,15 +499,7 @@ async fn build_cancel_by_request_id_reports_not_admitted_as_an_observation() {
 async fn cas_import_no_wait_prints_the_build_id_after_admission() {
     let dir = tempfile::tempdir().unwrap();
     let admitted = run(
-        &[
-            "image",
-            "import",
-            "--cas",
-            "--no-wait",
-            "-n",
-            "img",
-            "ubuntu:24.04",
-        ],
+        &["image", "import", "--no-wait", "-n", "img", "ubuntu:24.04"],
         vec![
             introspection(),
             reply(
@@ -545,7 +537,6 @@ async fn cas_import_no_wait_prints_the_build_id_after_admission() {
         &[
             "image",
             "import",
-            "--cas",
             "--no-wait",
             "--json",
             "-n",
@@ -598,15 +589,7 @@ async fn cas_create_no_wait_uploads_and_seals_then_prints_the_build_id() {
     ]);
     let output = image_support::command(
         &server.url,
-        &[
-            "image",
-            "create",
-            "--cas",
-            "--no-wait",
-            "-n",
-            "img",
-            "Dockerfile",
-        ],
+        &["image", "create", "--no-wait", "-n", "img", "Dockerfile"],
         dir.path(),
     )
     .output()
@@ -641,26 +624,108 @@ async fn cas_create_no_wait_uploads_and_seals_then_prints_the_build_id() {
     assert!(stderr.contains("Sealing build context"), "{stderr}");
 }
 
+/// A CAS image takes the CAS image registry's spelling before anything is
+/// shown or sent: an explicit name is lowercased, a generated default from
+/// the Dockerfile's directory becomes a valid CAS image name.
 #[tokio::test]
-async fn no_wait_without_cas_is_a_usage_error_before_any_request() {
+async fn cas_names_are_canonical_before_they_are_shown_or_sent() {
+    let dir = tempfile::tempdir().unwrap();
+    let explicit = run(
+        &[
+            "image",
+            "import",
+            "--no-wait",
+            "-n",
+            "MyBase",
+            "ubuntu:24.04",
+        ],
+        vec![
+            introspection(),
+            reply(
+                "POST",
+                "/images/v4/builds",
+                201,
+                build_json("build-7", "pending", None),
+            ),
+        ],
+        dir.path(),
+    )
+    .await;
+    assert!(explicit.output.status.success(), "{}", explicit.stderr());
+    assert_eq!(explicit.requests[0].json()["name"], "mybase");
+    assert!(
+        explicit.stderr().contains("Selected image name: mybase"),
+        "{}",
+        explicit.stderr()
+    );
+
+    let project = dir.path().join("My Project");
+    std::fs::create_dir(&project).unwrap();
+    write_dockerfile(&project, "FROM scratch\n");
+    let server = start(vec![]).await;
+    let mut admission = build_json("build-9", "pending", None);
+    admission["kind"] = json!("dockerfile");
+    admission["context_upload"] = json!({
+        "url": format!("{}/upload/build-9", server.url),
+        "max_bytes": 10_000_000,
+    });
+    server.script(vec![
+        introspection(),
+        reply("POST", "/images/v4/builds", 201, admission),
+        reply("PUT", "/upload/build-9", 200, json!({})),
+        reply(
+            "POST",
+            "/images/v4/builds/build-9/context/seal",
+            200,
+            json!({"sealed": true}),
+        ),
+    ]);
+    let output = image_support::command(
+        &server.url,
+        &["image", "create", "--no-wait", "My Project/Dockerfile"],
+        dir.path(),
+    )
+    .output()
+    .await
+    .unwrap();
+    let requests = server.finish().await;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("Selected image name: my-project"),
+        "{stderr}"
+    );
+    let admission = requests
+        .iter()
+        .find(|request| request.line == "POST /images/v4/builds HTTP/1.1")
+        .expect("admission request");
+    assert_eq!(admission.json()["name"], "my-project");
+}
+
+#[tokio::test]
+async fn no_wait_with_no_cas_is_a_usage_error_before_any_request() {
     let dir = tempfile::tempdir().unwrap();
     write_dockerfile(dir.path(), "FROM scratch\n");
     let refused = run(
-        &["image", "create", "--no-wait", "Dockerfile"],
+        &["image", "create", "--no-cas", "--no-wait", "Dockerfile"],
         vec![introspection()],
         dir.path(),
     )
     .await;
     assert_eq!(refused.code(), Some(2), "{}", refused.stderr());
     assert!(refused.requests.is_empty(), "{:?}", refused.lines());
-    assert!(refused.stderr().contains("--cas"), "{}", refused.stderr());
+    assert!(
+        refused.stderr().contains("--no-cas"),
+        "{}",
+        refused.stderr()
+    );
 }
 
 #[tokio::test]
 async fn cas_import_conflict_names_the_active_build_and_its_cancel_command() {
     let dir = tempfile::tempdir().unwrap();
     let conflict = run(
-        &["image", "import", "--cas", "-n", "img", "ubuntu:24.04"],
+        &["image", "import", "-n", "img", "ubuntu:24.04"],
         vec![
             introspection(),
             reply(
@@ -698,15 +763,7 @@ async fn cas_import_conflict_names_the_active_build_and_its_cancel_command() {
 async fn cas_import_waits_to_publication_and_prints_the_registration_line() {
     let dir = tempfile::tempdir().unwrap();
     let published = run(
-        &[
-            "image",
-            "import",
-            "--cas",
-            "-n",
-            "img",
-            "--json",
-            "ubuntu:24.04",
-        ],
+        &["image", "import", "-n", "img", "--json", "ubuntu:24.04"],
         vec![
             introspection(),
             reply(
@@ -733,7 +790,7 @@ async fn cas_import_waits_to_publication_and_prints_the_registration_line() {
     let stderr = published.stderr();
     assert!(stderr.contains("Build ID: build-1"), "{stderr}");
     assert!(
-        stderr.contains("Image 'img' registered (image_ok)"),
+        stderr.contains("CAS image 'img' registered (image_ok)"),
         "{stderr}"
     );
     let parsed: Value = serde_json::from_str(&published.stdout()).expect("valid JSON on stdout");
@@ -782,7 +839,7 @@ async fn cas_ctrl_c_cancels_by_build_id_and_exits_with_the_interrupt_status() {
     .await;
     let child = image_support::command(
         &server.url,
-        &["image", "import", "--cas", "-n", "img", "ubuntu:24.04"],
+        &["image", "import", "-n", "img", "ubuntu:24.04"],
         dir.path(),
     )
     .stdout(std::process::Stdio::piped())
@@ -839,7 +896,7 @@ async fn cas_ctrl_c_before_admission_resolves_by_request_id() {
     .await;
     let child = image_support::command(
         &server.url,
-        &["image", "import", "--cas", "-n", "img", "ubuntu:24.04"],
+        &["image", "import", "-n", "img", "ubuntu:24.04"],
         dir.path(),
     )
     .stdout(std::process::Stdio::piped())
@@ -938,12 +995,12 @@ async fn cas_register_retries_a_pending_registration_and_keeps_its_final_output(
         "{}",
         registered.stderr()
     );
-    // The shared printer's output is unchanged: the CAS branch prints the
+    // The shared printer names the image family: the CAS branch prints the
     // derived `snapshot://` handle where the legacy branch prints the
     // archive URI.
     assert_eq!(
         registered.stdout(),
-        "Registered image 'img' -> snapshot snap-cas (rootfs 10 GiB)\nTemplate: image_reg\n\
+        "Registered CAS image 'img' -> snapshot snap-cas (rootfs 10 GiB)\nTemplate: image_reg\n\
          snapshot://snap-cas\n"
     );
     assert!(
@@ -1031,7 +1088,10 @@ async fn help_uses_the_real_tl_sbx_spelling() {
         help.contains("Usage: tl sbx image build <COMMAND>"),
         "{help}"
     );
-    assert!(help.contains("tl sbx image create --cas"), "{help}");
+    assert!(
+        help.contains("`tl sbx image create` and `import`"),
+        "{help}"
+    );
     for subcommand in ["get", "wait", "cancel"] {
         assert!(help.contains(subcommand), "{help}");
     }

@@ -149,14 +149,36 @@ async fn ids_go_straight_to_their_catalog() {
     );
 }
 
+/// The CAS image registry lowercases names, so a mixed-case name is asked
+/// for in lowercase; the legacy image registry matches names exactly, so the
+/// fallback after a clean CAS 404 keeps the spelling given.
 #[tokio::test]
-async fn names_outside_the_image_service_grammar_skip_it() {
-    let (catalog, server) = scripted_server(vec![(200, LEGACY_RECORD.to_string())]).await;
+async fn mixed_case_names_use_the_cas_spelling_then_the_exact_legacy_spelling() {
+    let (catalog, server) = scripted_server(vec![
+        (404, NOT_FOUND.to_string()),
+        (200, LEGACY_RECORD.to_string()),
+    ])
+    .await;
     assert!(catalog.find("MyImage").await.unwrap().is_some());
     assert_eq!(
         server.await.unwrap(),
         vec![
-            "GET /platform/v1/organizations/org-1/projects/proj-1/sandbox-templates/by-name/MyImage HTTP/1.1"
+            "GET /images/v4/images/name/myimage HTTP/1.1",
+            "GET /platform/v1/organizations/org-1/projects/proj-1/sandbox-templates/by-name/MyImage HTTP/1.1",
+        ]
+    );
+}
+
+/// A name the CAS image registry could never hold, even lowercased, goes
+/// straight to the legacy image registry.
+#[tokio::test]
+async fn names_outside_the_cas_grammar_skip_it() {
+    let (catalog, server) = scripted_server(vec![(200, LEGACY_RECORD.to_string())]).await;
+    assert!(catalog.find("My Image").await.unwrap().is_some());
+    assert_eq!(
+        server.await.unwrap(),
+        vec![
+            "GET /platform/v1/organizations/org-1/projects/proj-1/sandbox-templates/by-name/My%20Image HTTP/1.1"
         ]
     );
 }

@@ -129,7 +129,7 @@ class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
             False,
             None,
             None,
-            cas=False,
+            cas=True,
             build_args=None,
             emit=ANY,
             docker_config_json=None,
@@ -200,7 +200,7 @@ class TestBuildSandboxImageFromDockerfileOptions(unittest.TestCase):
             False,
             None,
             None,
-            cas=False,
+            cas=True,
             build_args=None,
             emit=ANY,
             docker_config_json=None,
@@ -253,7 +253,7 @@ class TestBuildSandboxImageFromDockerfileOptions(unittest.TestCase):
             )
 
         self.assertIn(
-            {"type": "status", "message": "Building image 'img'..."},
+            {"type": "status", "message": "Building legacy image 'img'..."},
             emitted,
         )
         self.assertIn({"type": "status", "message": "builder running"}, emitted)
@@ -321,18 +321,27 @@ class TestCasBuildOptions(unittest.TestCase):
 
         self.assertIs(rust_importer_mock.call_args.kwargs["cas"], True)
 
-    def test_image_build_defaults_to_non_cas(self):
-        """``Image.build`` defaults to a non-CAS image."""
+    def test_image_build_defaults_to_cas(self):
+        """``Image.build`` defaults to a CAS image."""
         ctx = _make_ctx()
-        image = Image(name="legacy", base_image="python:3.12-slim")
+        image = Image(name="app", base_image="python:3.12-slim")
 
         build_ctx, rust_builder = _make_build_patches(ctx)
         with build_ctx, rust_builder as rust_builder_mock:
             image.build()
 
         kwargs = rust_builder_mock.call_args.kwargs
-        self.assertIs(kwargs["cas"], False)
+        self.assertIs(kwargs["cas"], True)
         self.assertIsNone(kwargs["build_args"])
+
+    def test_import_defaults_to_cas(self):
+        """``import_sandbox_image`` defaults to a CAS image."""
+        ctx = _make_ctx()
+        build_ctx, rust_importer = _make_import_patches(ctx)
+        with build_ctx, rust_importer as rust_importer_mock:
+            sbm.import_sandbox_image("ubuntu:24.04")
+
+        self.assertIs(rust_importer_mock.call_args.kwargs["cas"], True)
 
     def test_registration_event_reads_the_template_shaped_record(self):
         emitted = []
@@ -355,14 +364,97 @@ class TestCasBuildOptions(unittest.TestCase):
         )
 
 
+# The CAS image naming rule's cases, identical to the Rust core's
+# CAS_IMAGE_NAME_CASES and the TypeScript SDK's table.
+CAS_IMAGE_NAME_CASES = [
+    ("app", "app"),
+    ("MyProject", "myproject"),
+    ("App:V1", "app:v1"),
+    ("app.v2", "app.v2"),
+    ("My Project", "my-project"),
+    ("my  project", "my-project"),
+    ("my__app", "my_app"),
+    ("-app-", "app"),
+    ("._app_.", "app"),
+    ("\u00dcn\u00efcode", "n-code"),
+    ("\u65e5\u672c", "sandbox-image"),
+    ("", "sandbox-image"),
+    ("...", "sandbox-image"),
+    ("image_foo", "sandbox-image"),
+    ("sandbox_template_x", "sandbox-image"),
+    ("0123456789abcdef" * 4, "sandbox-image"),
+]
+
+
+class TestCasImageNames(unittest.TestCase):
+    def test_generated_names_follow_the_shared_rule(self):
+        for raw, expected in CAS_IMAGE_NAME_CASES:
+            with self.subTest(raw=raw):
+                self.assertEqual(
+                    sbm._cas_image_name_from(raw, "sandbox-image"), expected
+                )
+        # The 255-character cap, then trailing separators are dropped again.
+        self.assertEqual(
+            sbm._cas_image_name_from("a" * 254 + "-bc", "sandbox-image"), "a" * 254
+        )
+
+    def test_generated_names_are_valid_and_already_canonical(self):
+        for raw, _ in CAS_IMAGE_NAME_CASES:
+            name = sbm._cas_image_name_from(raw, "sandbox-image")
+            with self.subTest(name=name):
+                self.assertTrue(sbm._is_addressable_cas_image_name(name))
+                self.assertEqual(sbm._canonical_cas_image_name(name), name)
+
+    def test_canonical_names_lowercase_ascii_only(self):
+        self.assertEqual(sbm._canonical_cas_image_name("Team/App:V1"), "team/app:v1")
+        self.assertEqual(
+            sbm._canonical_cas_image_name("\u00c9t\u00c9"), "\u00c9t\u00c9"
+        )
+
+    def test_cas_builds_and_imports_send_the_cas_spelling(self):
+        ctx = _make_ctx()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = Path(tmpdir) / "My Project"
+            project.mkdir()
+            dockerfile = project / "Dockerfile"
+            dockerfile.write_text("FROM scratch\n", encoding="utf-8")
+            with (
+                patch.object(sbm, "_build_context_from_env", return_value=ctx),
+                patch.object(sbm, "_run_rust_image_create", return_value={}) as create,
+                patch.object(sbm, "_run_rust_image_import", return_value={}) as imp,
+            ):
+                sbm.build_sandbox_image(str(dockerfile))
+                sbm.build_sandbox_image(str(dockerfile), registered_name="MyApp")
+                sbm.build_sandbox_image(str(dockerfile), cas=False)
+                sbm.build_sandbox_image(
+                    str(dockerfile), registered_name="MyApp", cas=False
+                )
+                sbm.import_sandbox_image("ubuntu:24.04", registered_name="MyBase")
+                sbm.import_sandbox_image(
+                    "ubuntu:24.04", registered_name="MyBase", cas=False
+                )
+
+        self.assertEqual(
+            [call.args[1] for call in create.call_args_list],
+            ["my-project", "myapp", "My Project", "MyApp"],
+        )
+        self.assertEqual(
+            [call.args[1] for call in imp.call_args_list], ["mybase", "MyBase"]
+        )
+
+
 class TestDeleteSandboxImage(unittest.TestCase):
     def test_deletes_sandbox_image_with_env_context(self):
         ctx = _make_ctx()
 
         with (
             patch.object(sbm, "_build_context_from_env", return_value=ctx),
-            patch.object(sbm, "_rust_delete_sandbox_image") as rust_delete,
+            patch.object(
+                sbm, "_rust_delete_sandbox_image", return_value=None
+            ) as rust_delete,
+            warnings.catch_warnings(record=True) as caught,
         ):
+            warnings.simplefilter("always")
             sbm.delete_sandbox_image("tensorlake/test:1")
 
         rust_delete.assert_called_once_with(
@@ -373,6 +465,59 @@ class TestDeleteSandboxImage(unittest.TestCase):
             None,
             "default",
         )
+        self.assertEqual(caught, [])
+
+    def test_delete_warns_when_the_same_named_legacy_image_remains(self):
+        """The CAS image is gone, so the delete succeeds; the legacy image
+        it could not delete is reported as a warning with the call that
+        finishes the job. The binding returns ``(legacy_image_name,
+        legacy_image_id, error)``."""
+        ctx = _make_ctx()
+
+        with (
+            patch.object(sbm, "_build_context_from_env", return_value=ctx),
+            patch.object(
+                sbm,
+                "_rust_delete_sandbox_image",
+                return_value=(
+                    "app",
+                    "sandbox_template_1",
+                    "Server error: 409 Conflict - retry the delete",
+                ),
+            ),
+        ):
+            with self.assertWarns(UserWarning) as caught:
+                sbm.delete_sandbox_image("app")
+
+        message = str(caught.warning)
+        self.assertIn("Deleted CAS image 'app'", message)
+        self.assertIn("legacy image of the same name (sandbox_template_1)", message)
+        self.assertIn("409 Conflict - retry the delete", message)
+        self.assertIn("delete_sandbox_image('sandbox_template_1')", message)
+        self.assertEqual(caught.filename, __file__)
+
+    def test_delete_warning_uses_the_legacy_name_when_its_id_is_unknown(self):
+        """``MyProject`` deleted the CAS image ``myproject``; the legacy image
+        left behind is ``myproject`` too, and legacy names are case-sensitive,
+        so recovery must name it in that spelling, not the caller's."""
+        ctx = _make_ctx()
+
+        with (
+            patch.object(sbm, "_build_context_from_env", return_value=ctx),
+            patch.object(
+                sbm,
+                "_rust_delete_sandbox_image",
+                return_value=("myproject", None, "Server error: 500 - internal error"),
+            ),
+        ):
+            with self.assertWarns(UserWarning) as caught:
+                sbm.delete_sandbox_image("MyProject")
+
+        message = str(caught.warning)
+        self.assertIn("Deleted CAS image 'myproject'", message)
+        self.assertIn("legacy image of the same name, which", message)
+        self.assertIn("delete_sandbox_image('myproject')", message)
+        self.assertNotIn("MyProject", message)
 
     def test_delete_requires_credentials(self):
         ctx = _make_ctx(api_key=None, personal_access_token=None)
@@ -628,7 +773,7 @@ class TestImportSandboxImage(unittest.TestCase):
             False,
             sbm.USER_AGENT,
             False,
-            cas=False,
+            cas=True,
             emit=ANY,
             docker_config_json=None,
         )

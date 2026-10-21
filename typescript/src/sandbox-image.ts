@@ -27,6 +27,14 @@ export interface CreateSandboxImageOptions {
    */
   dockerConfigJson?: string;
 
+  /**
+   * Name to register the image under. Defaults to the image's `name` or the
+   * Dockerfile stem (the parent directory's name for a file named
+   * `Dockerfile`).
+   * A CAS image name is lowercased, as the CAS image registry stores it; a
+   * default CAS image name is also made valid (other characters become `-`).
+   * Legacy image names are kept as given.
+   */
   registeredName?: string;
   cpus?: number;
   memoryMb?: number;
@@ -49,22 +57,22 @@ export interface CreateSandboxImageOptions {
    */
   dockerCompat?: boolean;
   /**
-   * Build a CAS (content-addressed streaming) image through the Image
-   * Service instead of a legacy template. Off by default.
+   * Build a CAS (content-addressed streaming) image, the default. Pass
+   * `false` to build a legacy image instead.
    */
   cas?: boolean;
   /**
    * Dockerfile build args (`--build-arg KEY=VALUE`), forwarded to BuildKit
-   * and expanded in `FROM` references. CAS builds only; a legacy build with
-   * build args is rejected.
+   * and expanded in `FROM` references. CAS images only; a legacy image build
+   * with build args is rejected.
    */
   buildArgs?: Record<string, string>;
   /**
-   * CAS builds only (`cas: true`): aborting requests *remote cancellation*
-   * of the Image Service build through a bounded handshake, and the call
-   * rejects with `ImageBuildInterruptedError` carrying the outcome. It is
-   * rejected for legacy builds, which have no build operation to cancel.
-   * Abandoning the promise alone never cancels anything.
+   * CAS images only: aborting requests *remote cancellation* of the CAS
+   * image build through a bounded handshake, and the call rejects with
+   * `ImageBuildInterruptedError` carrying the outcome. It is rejected for a
+   * legacy image build (`cas: false`), which has no build operation to
+   * cancel. Abandoning the promise alone never cancels anything.
    */
   signal?: AbortSignal;
   /**
@@ -87,6 +95,9 @@ export interface ImportSandboxImageOptions {
    * Name to register the image under. Defaults to the image reference's last
    * path segment with any tag/digest stripped (e.g. `pytorch/pytorch:2.4.1`
    * -> `pytorch`).
+   * A CAS image name is lowercased, as the CAS image registry stores it; a
+   * default CAS image name is also made valid (other characters become `-`).
+   * Legacy image names are kept as given.
    */
   registeredName?: string;
   cpus?: number;
@@ -100,13 +111,13 @@ export interface ImportSandboxImageOptions {
    */
   dockerCompat?: boolean;
   /**
-   * Import as a CAS (content-addressed streaming) image through the Image
-   * Service instead of a legacy template. Off by default.
+   * Import as a CAS (content-addressed streaming) image, the default. Pass
+   * `false` to import a legacy image instead.
    */
   cas?: boolean;
   /**
-   * CAS imports only (`cas: true`): aborting requests remote cancellation of
-   * the Image Service import; see `CreateSandboxImageOptions.signal`.
+   * CAS images only: aborting requests remote cancellation of the CAS image
+   * import; see `CreateSandboxImageOptions.signal`.
    */
   signal?: AbortSignal;
   /**
@@ -206,7 +217,7 @@ interface NativeBinding {
     emit?: ((event: NativeBindingEvent) => void) | null | undefined,
     interruptId?: number | undefined | null,
   ): Promise<string>;
-  // --- Image Service build operations (CAS only) ---
+  // --- CAS image build operations ---
   createImageBuildInterrupt(): number;
   triggerImageBuildInterrupt(id: number): void;
   releaseImageBuildInterrupt(id: number): void;
@@ -243,11 +254,15 @@ interface NativeBinding {
     options: NativeBindingCatalogOptions,
     reference: string,
   ): Promise<string | null>;
-  /** Delete one image by name or id; unknown in both catalogs rejects. */
+  /**
+   * Delete one image by name or id; a name is deleted from both catalogs.
+   * Unknown in both catalogs rejects. Resolves to the same-named legacy
+   * image a name's CAS delete could not remove, or null.
+   */
   deleteSandboxImage(
     options: NativeBindingCatalogOptions,
     reference: string,
-  ): Promise<void>;
+  ): Promise<NativeLegacyCleanupFailure | null | undefined>;
 }
 
 let cachedNativeBinding: NativeBinding | undefined;
@@ -305,14 +320,112 @@ export function buildContextFromEnv(): BuildContext {
 // --- Default-name helper ---------------------------------------------------
 
 const DEFAULT_IMAGE_NAME = "default";
+const DEFAULT_SANDBOX_IMAGE_NAME = "sandbox-image";
+const DEFAULT_IMPORTED_IMAGE_NAME = "imported-image";
+const CAS_NAME_SEPARATORS = "._-";
+const RESERVED_IMAGE_NAME_PREFIXES = ["sandbox_template_", "image_", "cas-v1:"];
+const MAX_CAS_IMAGE_NAME_LENGTH = 255;
 
 function defaultRegisteredName(dockerfilePath: string): string {
   const parsed = path.parse(dockerfilePath);
   if (parsed.name.toLowerCase() === "dockerfile") {
     const parentName = path.basename(path.dirname(dockerfilePath)).trim();
-    return parentName || "sandbox-image";
+    return parentName || DEFAULT_SANDBOX_IMAGE_NAME;
   }
-  return parsed.name || "sandbox-image";
+  return parsed.name || DEFAULT_SANDBOX_IMAGE_NAME;
+}
+
+/**
+ * Mirror the Rust core's `registered_image_name`: the name a build or import
+ * registers, decided before anything is shown or sent. A CAS image takes the
+ * CAS image registry's spelling: an explicit name is lowercased as the
+ * registry would, and a generated default is turned into a valid CAS image
+ * name. Legacy image names are kept as they are.
+ */
+function registeredImageName(
+  explicit: string | undefined,
+  generated: string | undefined,
+  cas: boolean,
+  fallback: string = DEFAULT_SANDBOX_IMAGE_NAME,
+): string {
+  if (explicit || generated === undefined) {
+    const name = explicit ?? "";
+    return cas ? canonicalCasImageName(name) : name;
+  }
+  return cas ? casImageNameFrom(generated, fallback) : generated;
+}
+
+/**
+ * Mirror the Rust core's `canonical_cas_image_name`: the CAS image registry
+ * ASCII-lowercases every name, so `MyProject` and `myproject` name one CAS
+ * image.
+ */
+function canonicalCasImageName(name: string): string {
+  return name.replace(/[A-Z]/g, (c) => c.toLowerCase());
+}
+
+/**
+ * Mirror the Rust core's `cas_image_name_from`: a valid CAS image name for a
+ * generated default. The name is ASCII-lowercased and kept if that makes it
+ * valid. Otherwise every character other than `a-z`, `0-9`, `.`, `_` and `-`
+ * becomes `-`, each run of separators collapses to its first character,
+ * leading and trailing separators are dropped and the result is capped at
+ * 255 characters. `fallback` is used when no valid name remains.
+ */
+function casImageNameFrom(raw: string, fallback: string): string {
+  const lowered = canonicalCasImageName(raw);
+  if (isAddressableCasImageName(lowered)) {
+    return lowered;
+  }
+  let name = "";
+  for (const original of lowered) {
+    const ch = /^[a-z0-9._-]$/.test(original) ? original : "-";
+    const previous = name[name.length - 1];
+    if (
+      CAS_NAME_SEPARATORS.includes(ch) &&
+      previous !== undefined &&
+      CAS_NAME_SEPARATORS.includes(previous)
+    ) {
+      continue;
+    }
+    name += ch;
+  }
+  name = name
+    .replace(/^[._-]+|[._-]+$/g, "")
+    .slice(0, MAX_CAS_IMAGE_NAME_LENGTH)
+    .replace(/[._-]+$/, "");
+  return isAddressableCasImageName(name) ? name : fallback;
+}
+
+/**
+ * Mirror the Rust core's CAS image name grammar: valid in the CAS image
+ * registry and not mistaken for a content digest.
+ */
+function isAddressableCasImageName(name: string): boolean {
+  if (
+    name.length === 0 ||
+    name.length > MAX_CAS_IMAGE_NAME_LENGTH ||
+    RESERVED_IMAGE_NAME_PREFIXES.some((prefix) => name.startsWith(prefix)) ||
+    /^[0-9a-f]{64}$/.test(name)
+  ) {
+    return false;
+  }
+  const colon = name.indexOf(":");
+  const repository = colon === -1 ? name : name.slice(0, colon);
+  if (!repository.split("/").every((component) => /^[a-z0-9]+(?:[._-][a-z0-9]+)*$/.test(component))) {
+    return false;
+  }
+  if (colon === -1) {
+    return true;
+  }
+  const tag = name.slice(colon + 1);
+  return (
+    tag.length > 0 &&
+    tag.length <= 128 &&
+    /^[a-z0-9._-]+$/.test(tag) &&
+    !tag.startsWith(".") &&
+    !tag.startsWith("-")
+  );
 }
 
 /**
@@ -329,7 +442,7 @@ function defaultRegisteredNameFromImage(imageReference: string): string {
     colonIndex > 0 && colonIndex < lastSegment.length - 1
       ? lastSegment.slice(0, colonIndex)
       : lastSegment;
-  return name || "imported-image";
+  return name || DEFAULT_IMPORTED_IMAGE_NAME;
 }
 
 // --- Emit helpers ----------------------------------------------------------
@@ -371,9 +484,9 @@ function eventToEmitDict(event: NativeBindingEvent): Record<string, unknown> {
 }
 
 /**
- * @internal Shared with `image-builds.ts`, which implements the Image
- * Service build operations on top of the same native binding and
- * environment context.
+ * @internal Shared with `image-builds.ts`, which implements the CAS image
+ * build operations on top of the same native binding and environment
+ * context.
  */
 export const __imageBuildInternals = {
   loadNativeBinding: () => loadNativeBinding(),
@@ -385,6 +498,16 @@ export const __imageBuildInternals = {
   defaultRegisteredName: (dockerfilePath: string) => defaultRegisteredName(dockerfilePath),
   defaultRegisteredNameFromImage: (reference: string) =>
     defaultRegisteredNameFromImage(reference),
+  registeredImageName: (
+    explicit: string | undefined,
+    generated: string | undefined,
+    cas: boolean,
+    fallback?: string,
+  ) => registeredImageName(explicit, generated, cas, fallback),
+  casImageNameFrom: (raw: string, fallback: string) => casImageNameFrom(raw, fallback),
+  canonicalCasImageName: (name: string) => canonicalCasImageName(name),
+  isAddressableCasImageName: (name: string) => isAddressableCasImageName(name),
+  defaultImportedImageName: DEFAULT_IMPORTED_IMAGE_NAME,
 };
 
 /**
@@ -499,7 +622,11 @@ export async function createSandboxImage(
     if (!text.endsWith("\n")) text += "\n";
     dockerfileText = text;
     nativeContextDir = resolvedContext;
-    effectiveName = options.registeredName ?? source.name;
+    effectiveName = registeredImageName(
+      options.registeredName ?? source.name,
+      undefined,
+      options.cas ?? true,
+    );
   } else if (typeof source === "string") {
     const resolvedPath = path.resolve(source);
     if (!existsSync(resolvedPath)) {
@@ -508,8 +635,11 @@ export async function createSandboxImage(
     dockerfilePath = resolvedPath;
     dockerfileText = undefined;
     nativeContextDir = undefined;
-    effectiveName =
-      options.registeredName ?? defaultRegisteredName(resolvedPath);
+    effectiveName = registeredImageName(
+      options.registeredName,
+      defaultRegisteredName(resolvedPath),
+      options.cas ?? true,
+    );
   } else {
     throw new TypeError(
       `source must be an Image or a Dockerfile path, got ${typeof source}`,
@@ -540,14 +670,18 @@ export async function createSandboxImage(
       );
     }
 
-    if (options.signal !== undefined && !options.cas) {
+    const cas = options.cas ?? true;
+    if (options.signal !== undefined && !cas) {
       throw new Error(
-        "signal is only supported for CAS image builds (cas: true); a legacy build has no " +
-          "Image Service build operation to cancel",
+        "signal is not supported for legacy image builds (cas: false): a legacy image build " +
+          "has no build operation to cancel",
       );
     }
 
-    emit({ type: "status", message: `Building image '${effectiveName}'...` });
+    emit({
+      type: "status",
+      message: `Building ${cas ? "CAS" : "legacy"} image '${effectiveName}'...`,
+    });
 
     const binding = loadNativeBinding();
     let emitError: unknown;
@@ -570,7 +704,7 @@ export async function createSandboxImage(
       dockerConfigJson: options.dockerConfigJson,
       dockerfileText,
       contextDir: nativeContextDir,
-      cas: options.cas ?? false,
+      cas,
       buildArgs: options.buildArgs,
     };
     const forward = (event: NativeBindingEvent) => {
@@ -580,10 +714,11 @@ export async function createSandboxImage(
         emitError ??= error;
       }
     };
-    // CAS builds run through the interrupt-aware bridge so an AbortSignal
-    // reaches the Rust cancellation handshake and typed build errors are
-    // decoded. Legacy builds keep the plain call and its error path.
-    const resultJson = options.cas
+    // CAS image builds run through the interrupt-aware bridge so an
+    // AbortSignal reaches the Rust cancellation handshake and typed build
+    // errors are decoded. Legacy image builds keep the plain call and its
+    // error path.
+    const resultJson = cas
       ? await __runWithInterrupt(options.signal, (interruptId) =>
           binding.buildSandboxImage(nativeOptions, forward, interruptId),
         )
@@ -638,8 +773,12 @@ export async function importSandboxImage(
   const reference = imageReference.trim();
 
   const context = buildContextFromEnv();
-  const effectiveName =
-    options.registeredName ?? defaultRegisteredNameFromImage(reference);
+  const effectiveName = registeredImageName(
+    options.registeredName,
+    defaultRegisteredNameFromImage(reference),
+    options.cas ?? true,
+    DEFAULT_IMPORTED_IMAGE_NAME,
+  );
 
   if (effectiveName === DEFAULT_IMAGE_NAME) {
     console.warn(
@@ -664,16 +803,17 @@ export async function importSandboxImage(
     );
   }
 
-  if (options.signal !== undefined && !options.cas) {
+  const cas = options.cas ?? true;
+  if (options.signal !== undefined && !cas) {
     throw new Error(
-      "signal is only supported for CAS image imports (cas: true); a legacy import has no " +
-        "Image Service build operation to cancel",
+      "signal is not supported for legacy image imports (cas: false): a legacy image import " +
+        "has no build operation to cancel",
     );
   }
 
   emit({
     type: "status",
-    message: `Importing image '${reference}' as '${effectiveName}'...`,
+    message: `Importing '${reference}' as ${cas ? "CAS" : "legacy"} image '${effectiveName}'...`,
   });
 
   const binding = loadNativeBinding();
@@ -695,7 +835,7 @@ export async function importSandboxImage(
     userAgent: undefined,
     dockerCompat: options.dockerCompat ?? false,
     dockerConfigJson: options.dockerConfigJson,
-    cas: options.cas ?? false,
+    cas,
   };
   const forward = (event: NativeBindingEvent) => {
     try {
@@ -704,7 +844,7 @@ export async function importSandboxImage(
       emitError ??= error;
     }
   };
-  const resultJson = options.cas
+  const resultJson = cas
     ? await __runWithInterrupt(options.signal, (interruptId) =>
         binding.importSandboxImage(nativeOptions, forward, interruptId),
       )
@@ -783,30 +923,42 @@ function parseTemplate(json: string): SandboxTemplate {
 }
 
 /**
- * Delete a registered sandbox image by name or id. Both families are
- * covered: an `image_` id or a name registered in the Image Service deletes
- * a CAS image, a `sandbox_template_` id or a name registered only in the
- * platform registry deletes a legacy image. Rejects when neither catalog
- * knows the reference.
+ * Delete a registered CAS or legacy sandbox image by name or id. Both
+ * families are covered: an `image_` id or a name registered in the CAS image
+ * registry deletes a CAS image, a `sandbox_template_` id or a name registered
+ * only in the legacy image registry deletes a legacy image. Rejects when
+ * neither the CAS nor the legacy image registry knows the reference.
  *
- * Deleting removes a *published* image. An unfinished CAS build is cancelled
- * with `cancelImageBuild({ buildId })` (or `tl sbx image build cancel
- * BUILD_ID`), never by deleting its name: a name whose only state is an
- * unfinished first build has no image, so the Image Service answers 404 and
- * the lookup falls through to the platform registry as usual. A 202
- * (deletion in progress) counts as success; a 409 `image_build_in_progress`,
- * a 5xx or a transport failure rejects as is and never falls through.
+ * A name is deleted from both the CAS and the legacy image registries: once
+ * its CAS image is deleted, a legacy image of the same name can no longer
+ * start sandboxes, so it is deleted too. CAS image names ignore case
+ * (`MyProject` deletes the CAS image `myproject`), legacy image names match
+ * exactly. Failing to delete that legacy image
+ * does not reject, since the CAS image is already gone: a `console.warn`
+ * names the legacy image, the error and the call that deletes it. An
+ * `image_` or `sandbox_template_` id deletes only the image it names.
+ *
+ * Deleting removes a *published* image. An unfinished CAS image build is
+ * cancelled with `cancelImageBuild({ buildId })` (or `tl sbx image build
+ * cancel BUILD_ID`), never by deleting its name: a name whose only state is
+ * an unfinished first build has no CAS image, so the CAS image registry
+ * answers 404 and the lookup falls through to the legacy image registry as
+ * usual. A 202 (deletion in progress) counts as success; a 409
+ * `image_build_in_progress`, a 5xx or a transport failure rejects as is and
+ * never falls through.
  *
  * Accepted merged-catalog differences from the released SDKs, for legacy
- * images: this deletes the platform-api template itself (the released SDKs
- * only removed the engine registration and left the template listed), and
- * an unknown name rejects instead of succeeding silently.
+ * images: this removes the legacy image from the legacy image registry (the
+ * released SDKs only made it unusable and left it listed), and an unknown
+ * name rejects instead of succeeding silently.
  */
 export async function deleteSandboxImage(imageName: string): Promise<void> {
   if (typeof imageName !== "string" || imageName.length === 0) {
     throw new TypeError("imageName must be a non-empty string");
   }
-  await loadNativeBinding().deleteSandboxImage(catalogOptionsFromEnv(), imageName);
+  warnIncompleteLegacyCleanup(
+    await loadNativeBinding().deleteSandboxImage(catalogOptionsFromEnv(), imageName),
+  );
 }
 
 /** @internal `APIClient.deleteSandboxImage` with the client's credentials. */
@@ -817,31 +969,70 @@ export async function deleteSandboxImageWithCredentials(
   if (typeof imageName !== "string" || imageName.length === 0) {
     throw new TypeError("imageName must be a non-empty string");
   }
-  await loadNativeBinding().deleteSandboxImage(
-    catalogOptionsFromCredentials(credentials),
-    imageName,
+  warnIncompleteLegacyCleanup(
+    await loadNativeBinding().deleteSandboxImage(
+      catalogOptionsFromCredentials(credentials),
+      imageName,
+    ),
   );
 }
 
 /**
- * Look up a registered sandbox image by its registered name or id.
+ * The same-named legacy image a name's CAS delete could not remove. Its name
+ * is the deleted CAS image's name, in the CAS image registry's lowercase
+ * spelling.
+ */
+interface NativeLegacyCleanupFailure {
+  legacyImageName: string;
+  legacyImageId?: string | null;
+  error: string;
+}
+
+// The CAS image is gone, so the delete succeeded; report the legacy image it
+// left behind, which can no longer start sandboxes, and how to delete it.
+// Legacy names are case-sensitive, so recovery uses the returned name rather
+// than the caller's spelling.
+function warnIncompleteLegacyCleanup(
+  failure: NativeLegacyCleanupFailure | null | undefined,
+): void {
+  if (failure == null) {
+    return;
+  }
+  const legacyImageId = failure.legacyImageId ?? undefined;
+  const label = legacyImageId ? ` (${legacyImageId})` : "";
+  console.warn(
+    `Deleted CAS image '${failure.legacyImageName}', but could not delete the legacy ` +
+      `image of the same name${label}, which can no longer start sandboxes: ` +
+      `${failure.error}. Delete it with ` +
+      `deleteSandboxImage("${legacyImageId ?? failure.legacyImageName}").`,
+  );
+}
+
+/**
+ * Look up a registered CAS or legacy sandbox image by its registered name or
+ * id.
  *
  * Returns the image in the sandbox-template shape (CAS images carry
  * `snapshotFormatVersion === "content_addressed_streaming_v1"`; the shape is
- * derived from the Image Service's trimmed record, so no content digest or
- * build provenance rides on it), or `null` if neither the Image Service nor
- * the platform registry knows the reference. Uses the same environment-based Tensorlake
- * auth as `createSandboxImage`. Ingress derives project scope from the API key.
+ * derived from the CAS image registry's trimmed record, so no content digest
+ * or build provenance rides on it), or `null` if neither the CAS nor the
+ * legacy image registry knows the reference. Uses the same environment-based
+ * Tensorlake auth as `createSandboxImage`. Ingress derives project scope from
+ * the API key.
  *
- * An `image_` id names the *current* image under its name; a rebuild
+ * An `image_` id names the *current* CAS image under its name; a rebuild
  * replaces it. A build's own immutable result is read with `getImageBuild`.
  *
+ * A name is looked up in the CAS image registry in lowercase, as the
+ * registry stores it, and in the legacy image registry exactly as given.
+ *
  * Accepted merged-catalog difference from the released SDKs, for legacy
- * images: a name that fits the Image Service grammar is looked up there first
- * and only a clean 404 falls through to the platform registry, so Image
- * Service unavailability (or a deploy 5xx) rejects the lookup of a legacy name
- * where the released SDKs touched only platform-api. A `sandbox_template_` id
- * never consults the Image Service.
+ * images: a name that fits the CAS image registry's grammar is looked up
+ * there first and only a clean 404 falls through to the legacy image
+ * registry, so CAS image registry unavailability (or a deploy 5xx) rejects
+ * the lookup of a legacy image name where the released SDKs touched only the
+ * legacy image registry. A `sandbox_template_` id never consults the CAS
+ * image registry.
  */
 export async function findSandboxImageByName(
   imageName: string,
@@ -904,13 +1095,14 @@ export async function runCreateSandboxImageCli(argv = process.argv.slice(2)) {
       builder_disk_mb: { type: "string" },
       docker_compat: { type: "boolean", default: false },
       public: { type: "boolean", default: false },
+      "no-cas": { type: "boolean", default: false },
     },
   });
 
   const dockerfilePath = parsed.positionals[0];
   if (!dockerfilePath) {
     throw new Error(
-      "Usage: tensorlake-create-sandbox-image <dockerfile_path> [--name NAME] [--cpus N] [--memory MiB] [--disk_mb MiB] [--builder_disk_mb MiB] [--docker_compat] [--public]",
+      "Usage: tensorlake-create-sandbox-image <dockerfile_path> [--name NAME] [--cpus N] [--memory MiB] [--disk_mb MiB] [--builder_disk_mb MiB] [--docker_compat] [--public] [--no-cas]",
     );
   }
 
@@ -951,6 +1143,7 @@ export async function runCreateSandboxImageCli(argv = process.argv.slice(2)) {
       builderDiskMb,
       dockerCompat: parsed.values.docker_compat,
       isPublic: parsed.values.public,
+      cas: !parsed.values["no-cas"],
     },
     { emit: ndjsonStdoutEmit, _allowPat: true },
   );
@@ -968,13 +1161,14 @@ export async function runImportSandboxImageCli(argv = process.argv.slice(2)) {
       builder_disk_mb: { type: "string" },
       docker_compat: { type: "boolean", default: false },
       public: { type: "boolean", default: false },
+      "no-cas": { type: "boolean", default: false },
     },
   });
 
   const imageReference = parsed.positionals[0];
   if (!imageReference) {
     throw new Error(
-      "Usage: tensorlake-import-sandbox-image <image_reference> [--name NAME] [--cpus N] [--memory MiB] [--disk_mb MiB] [--builder_disk_mb MiB] [--docker_compat] [--public]",
+      "Usage: tensorlake-import-sandbox-image <image_reference> [--name NAME] [--cpus N] [--memory MiB] [--disk_mb MiB] [--builder_disk_mb MiB] [--docker_compat] [--public] [--no-cas]",
     );
   }
 
@@ -1015,6 +1209,7 @@ export async function runImportSandboxImageCli(argv = process.argv.slice(2)) {
       builderDiskMb,
       dockerCompat: parsed.values.docker_compat,
       isPublic: parsed.values.public,
+      cas: !parsed.values["no-cas"],
     },
     { emit: ndjsonStdoutEmit, _allowPat: true },
   );

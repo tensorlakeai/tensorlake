@@ -159,7 +159,7 @@ where
     // The record is returned in the platform template shape so callers of
     // both build paths receive one record kind (ADR 0107 D18, D28).
     emit(SandboxImageBuildEvent::Status(format!(
-        "Image '{registered_name}' registered ({})",
+        "CAS image '{registered_name}' registered ({})",
         result.id.as_deref().unwrap_or("-")
     )));
     Ok(serde_json::to_value(result)?)
@@ -265,9 +265,7 @@ where
         )
         .await?;
         let upload = created.context_upload.clone().ok_or_else(|| {
-            ImageBuildError::other(
-                "Image Service build creation returned no context upload capability",
-            )
+            ImageBuildError::other("CAS image build creation returned no context upload capability")
         })?;
         let sealed = tokio::select! {
             biased;
@@ -399,7 +397,7 @@ fn build_request(
 ) -> Value {
     let object = body
         .as_object_mut()
-        .expect("Image Service build request body must be an object");
+        .expect("CAS image build request body must be an object");
     object.insert("disk_mb".to_string(), Value::Number(disk_mb.into()));
     if is_public {
         object.insert(
@@ -453,8 +451,8 @@ fn warn_ignored_options(
 ) {
     if options.builder_disk_mb.is_some() {
         emit(SandboxImageBuildEvent::Warning(
-            "builder_disk_mb is ignored for CAS builds: the builder's disk is sized from \
-             disk_mb, the size of the published image."
+            "builder_disk_mb is ignored for CAS image builds: the builder's disk is sized \
+             from disk_mb, the size of the published CAS image."
                 .to_string(),
         ));
     }
@@ -603,15 +601,16 @@ async fn resolve_parents(
         let Some(public_id) = public_id else {
             if templates.find_by_name(reference).await?.is_some() {
                 return Err(SandboxImageBuildError::usage(format!(
-                    "'{reference}' is a legacy image; a CAS build can use CAS images or \
-                     registry references as a base; rebuild '{reference}' with --cas first"
+                    "'{reference}' is a legacy image, and CAS image builds can't use legacy \
+                     images as a base. Rebuild '{reference}' first (CAS is now the default), or \
+                     build this image as a legacy image with --no-cas (cas=False in the SDKs)"
                 )));
             }
             continue; // external registry reference, pulled by the guest
         };
         if catalog_reference.as_ref() == reference {
             emit(SandboxImageBuildEvent::Status(format!(
-                "Resolved '{reference}' to registered image {public_id}"
+                "Resolved '{reference}' to CAS image {public_id}"
             )));
         } else {
             emit(SandboxImageBuildEvent::Status(format!(
@@ -689,7 +688,7 @@ async fn lookup_catalog_name(client: &Client, reference: &str) -> Result<Option<
         status => {
             let body = response.text().await.unwrap_or_default();
             Err(SandboxImageBuildError::other(format!(
-                "Image Service name lookup for '{reference}' failed (HTTP {status}): {body}"
+                "CAS image lookup for '{reference}' failed (HTTP {status}): {body}"
             )))
         }
     }
@@ -1042,10 +1041,10 @@ pub(crate) async fn admit_build(
     emit: &mut impl FnMut(SandboxImageBuildEvent),
 ) -> BuildResult<AdmittedBuild> {
     emit(SandboxImageBuildEvent::Status(
-        "Creating Image Service build...".to_string(),
+        "Creating CAS image build...".to_string(),
     ));
     let deadline = Instant::now() + ADMISSION_RETRY_BUDGET;
-    let attempted = with_reconnects("Image Service", deadline, Some(interrupt), emit, || async {
+    let attempted = with_reconnects("CAS image API", deadline, Some(interrupt), emit, || async {
         let request = client
             .request(Method::POST, path)
             .header(IDEMPOTENCY_KEY_HEADER, request_id)
@@ -1103,7 +1102,7 @@ pub(crate) async fn admit_direct(
     let deadline = (Instant::now() + ADMISSION_RETRY_BUDGET).min(wait.deadline);
     let mut silent = |_event| {};
     let attempted = with_reconnects(
-        "Image Service",
+        "CAS image API",
         deadline,
         Some(interrupt),
         &mut silent,
@@ -1245,7 +1244,7 @@ fn redact_xml_element(text: &str, element: &str) -> String {
 pub(crate) async fn get_build(client: &Client, build_id: &str) -> BuildResult<ImageBuildInfo> {
     let deadline = Instant::now() + LOOKUP_RETRY_BUDGET;
     let mut silent = |_event| {};
-    match with_reconnects("Image Service", deadline, None, &mut silent, || {
+    match with_reconnects("CAS image API", deadline, None, &mut silent, || {
         get_build_attempt(client, build_id)
     })
     .await
@@ -1290,7 +1289,7 @@ pub(crate) async fn cancel_build(
     let deadline = Instant::now() + budget;
     let mut silent = |_event| {};
     let body = selector.body();
-    let attempted = with_reconnects("Image Service", deadline, None, &mut silent, || async {
+    let attempted = with_reconnects("CAS image API", deadline, None, &mut silent, || async {
         let request = client
             .request(Method::POST, "/builds/cancel")
             .json(&body)
@@ -1431,7 +1430,7 @@ async fn upload_and_seal_context(
         && tar_bytes > max_bytes
     {
         return Err(ImageBuildError::usage(format!(
-            "build context is {tar_bytes} bytes, above the Image Service cap of {max_bytes}"
+            "build context is {tar_bytes} bytes, above the CAS image build cap of {max_bytes}"
         )));
     }
 
@@ -1476,7 +1475,7 @@ async fn upload_and_seal_context(
     let deadline = Instant::now() + ADMISSION_RETRY_BUDGET;
     let seal_body = json!({ "digest": digest });
     let path = format!("/builds/{build_id}/context/seal");
-    let attempted = with_reconnects("Image Service", deadline, None, emit, || async {
+    let attempted = with_reconnects("CAS image API", deadline, None, emit, || async {
         let request = client
             .request(Method::POST, &path)
             .json(&seal_body)
@@ -1647,7 +1646,7 @@ where
         None => started + LOOKUP_RETRY_BUDGET,
     };
     let attempted = with_reconnects(
-        "Image Service",
+        "CAS image API",
         lookup_deadline,
         Some(interrupt),
         &mut emit,
@@ -1836,7 +1835,7 @@ where
     loop {
         drain_ready_builder_logs(&mut log_receiver, &dropped_logs, &mut emit);
         let attempted = with_reconnects(
-            "Image Service",
+            "CAS image API",
             deadline,
             Some(interrupt),
             &mut emit,
@@ -1921,7 +1920,7 @@ where
         {
             let attempt = info.attempt_no;
             emit(SandboxImageBuildEvent::Status(format!(
-                "Following Image Service builder logs for attempt {attempt}..."
+                "Following CAS image builder logs for attempt {attempt}..."
             )));
             let follower = follow_builder.clone();
             let follower_ctx = ctx.clone();
@@ -2300,7 +2299,7 @@ mod tests {
         assert!(matches!(
             &events[0],
             SandboxImageBuildEvent::Warning(message)
-                if message.contains("builder_disk_mb is ignored for CAS builds")
+                if message.contains("builder_disk_mb is ignored for CAS image builds")
         ));
     }
 
@@ -2447,11 +2446,11 @@ mod tests {
             .to_string();
         assert!(error.contains("'old-base' is a legacy image"), "{error}");
         assert!(
-            error.contains("rebuild 'old-base' with --cas first"),
+            error.contains("Rebuild 'old-base' first (CAS is now the default)"),
             "{error}"
         );
         assert!(events.contains(&SandboxImageBuildEvent::Status(
-            "Resolved 'team/base' to registered image image_base1".to_string()
+            "Resolved 'team/base' to CAS image image_base1".to_string()
         )));
         image_service.await.unwrap();
         platform.await.unwrap();

@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  __imageBuildInternals,
   __setNativeBindingForTest,
   createSandboxImage,
   deleteSandboxImage,
@@ -292,7 +293,7 @@ describe("createSandboxImage", () => {
     expect(captured.options.dockerCompat).toBe(true);
   });
 
-  it("forwards cas and buildArgs to the native build binding and defaults them off", async () => {
+  it("forwards cas and buildArgs to the native build binding, defaulting to a CAS image", async () => {
     const tempDir = await mkdir(
       path.join(os.tmpdir(), `tensorlake-images-${Date.now()}-cas`),
       { recursive: true },
@@ -313,8 +314,11 @@ describe("createSandboxImage", () => {
     expect(captured.options.buildArgs).toEqual({ PY_TAG: "3.13" });
 
     await createSandboxImage(dockerfilePath);
-    expect(captured.options.cas).toBe(false);
+    expect(captured.options.cas).toBe(true);
     expect(captured.options.buildArgs).toBeUndefined();
+
+    await createSandboxImage(dockerfilePath, { cas: false });
+    expect(captured.options.cas).toBe(false);
   });
 
   it("forwards native events back through the user emit callback", async () => {
@@ -341,7 +345,7 @@ describe("createSandboxImage", () => {
     await createSandboxImage(dockerfilePath, {}, { emit: (e) => events.push(e) });
 
     expect(events).toEqual([
-      { type: "status", message: "Building image 'my-img'..." },
+      { type: "status", message: "Building CAS image 'my-img'..." },
       { type: "status", message: "Preparing rootfs build..." },
       { type: "build_log", stream: "stdout", message: "build line" },
       { type: "warning", message: "Skipping LABEL" },
@@ -383,7 +387,7 @@ describe("createSandboxImage", () => {
     ).rejects.toBe(emitError);
 
     expect(events).toEqual([
-      { type: "status", message: "Building image 'my-img'..." },
+      { type: "status", message: "Building CAS image 'my-img'..." },
       { type: "status", message: "Preparing rootfs build..." },
       { type: "build_log", stream: "stdout", message: "build line" },
     ]);
@@ -601,11 +605,13 @@ describe("importSandboxImage", () => {
     expect(result).toEqual({ id: "tpl-1", snapshot_id: "snap-1" });
   });
 
-  it("forwards cas to the native import binding and defaults it off", async () => {
+  it("forwards cas to the native import binding, defaulting to a CAS image", async () => {
     const { captured } = makeFakeBinding();
     await importSandboxImage("ubuntu:24.04", { cas: true });
     expect(captured.options.cas).toBe(true);
     await importSandboxImage("ubuntu:24.04");
+    expect(captured.options.cas).toBe(true);
+    await importSandboxImage("ubuntu:24.04", { cas: false });
     expect(captured.options.cas).toBe(false);
   });
 
@@ -649,7 +655,7 @@ describe("importSandboxImage", () => {
     expect(events).toEqual([
       {
         type: "status",
-        message: "Importing image 'pytorch/pytorch:2.4.1' as 'pytorch'...",
+        message: "Importing 'pytorch/pytorch:2.4.1' as CAS image 'pytorch'...",
       },
       { type: "status", message: "Pulling layers..." },
       { type: "build_log", stream: "stdout", message: "applied layer" },
@@ -691,6 +697,27 @@ describe("importSandboxImage", () => {
       projectId: "proj_1",
       useScopeHeaders: true,
     });
+  });
+
+  it("builds and imports CAS images from the standalone CLIs unless --no-cas is passed", async () => {
+    vi.stubEnv("TENSORLAKE_API_KEY", "tl_apiKey_test");
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const tempDir = await mkdir(
+      path.join(os.tmpdir(), `tensorlake-images-${Date.now()}-cli-cas`),
+      { recursive: true },
+    );
+    const dockerfilePath = path.join(tempDir, "Dockerfile");
+    await writeFile(dockerfilePath, "FROM python:3.12-slim\n", "utf8");
+
+    const { captured } = makeFakeBinding();
+    await runCreateSandboxImageCli([dockerfilePath]);
+    expect(captured.options.cas).toBe(true);
+    await runCreateSandboxImageCli([dockerfilePath, "--no-cas"]);
+    expect(captured.options.cas).toBe(false);
+    await runImportSandboxImageCli(["ubuntu:24.04"]);
+    expect(captured.options.cas).toBe(true);
+    await runImportSandboxImageCli(["ubuntu:24.04", "--no-cas"]);
+    expect(captured.options.cas).toBe(false);
   });
 });
 
@@ -750,6 +777,42 @@ describe("sandbox image catalog", () => {
       new Error('{"category":"remote_api","status":404,"message":"image \'missing\' not found"}'),
     );
     await expect(deleteSandboxImage("missing")).rejects.toThrow("not found");
+  });
+
+  it("warns, without rejecting, when a name's same-named legacy image could not be deleted", async () => {
+    const { binding } = makeFakeBinding();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await deleteSandboxImage("app");
+    expect(warn).not.toHaveBeenCalled();
+
+    binding.deleteSandboxImage.mockResolvedValueOnce({
+      legacyImageName: "app",
+      legacyImageId: "sandbox_template_1",
+      error: "Server error: 409 Conflict - retry the delete",
+    });
+    await expect(deleteSandboxImage("app")).resolves.toBeUndefined();
+    expect(warn).toHaveBeenCalledTimes(1);
+    const message = String(warn.mock.calls[0]![0]);
+    expect(message).toContain("Deleted CAS image 'app'");
+    expect(message).toContain("legacy image of the same name (sandbox_template_1)");
+    expect(message).toContain("409 Conflict - retry the delete");
+    expect(message).toContain('deleteSandboxImage("sandbox_template_1")');
+
+    // `MyProject` deleted the CAS image `myproject`; the legacy image left
+    // behind is `myproject` too, and legacy names are case-sensitive, so
+    // recovery names it in that spelling, not the caller's.
+    binding.deleteSandboxImage.mockResolvedValueOnce({
+      legacyImageName: "myproject",
+      legacyImageId: null,
+      error: "Server error: 500 - internal error",
+    });
+    await deleteSandboxImage("MyProject");
+    const unnamed = String(warn.mock.calls[1]![0]);
+    expect(unnamed).toContain("Deleted CAS image 'myproject'");
+    expect(unnamed).toContain("legacy image of the same name, which");
+    expect(unnamed).toContain('deleteSandboxImage("myproject")');
+    expect(unnamed).not.toContain("MyProject");
   });
 
   it("requires an API key", async () => {
@@ -837,6 +900,16 @@ describe("CloudClient sandbox image methods", () => {
     await client.deleteSandboxImage("team/app");
     expect(binding.deleteSandboxImage).toHaveBeenCalledWith(credentials, "team/app");
     await expect(client.deleteSandboxImage("")).rejects.toThrow(TypeError);
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    binding.deleteSandboxImage.mockResolvedValueOnce({
+      legacyImageName: "team/app",
+      legacyImageId: "sandbox_template_1",
+      error: "Server error: 409 Conflict",
+    });
+    await client.deleteSandboxImage("team/app");
+    expect(String(warn.mock.calls[0]![0])).toContain("Deleted CAS image 'team/app'");
+    warn.mockRestore();
     client.close();
   });
 
@@ -913,5 +986,78 @@ describe("CloudClient sandbox image methods", () => {
       useScopeHeaders: false,
     });
     client.close();
+  });
+});
+
+// The CAS image naming rule's cases, identical to the Rust core's
+// CAS_IMAGE_NAME_CASES and the Python SDK's table.
+const CAS_IMAGE_NAME_CASES: Array<[string, string]> = [
+  ["app", "app"],
+  ["MyProject", "myproject"],
+  ["App:V1", "app:v1"],
+  ["app.v2", "app.v2"],
+  ["My Project", "my-project"],
+  ["my  project", "my-project"],
+  ["my__app", "my_app"],
+  ["-app-", "app"],
+  ["._app_.", "app"],
+  ["\u00dcn\u00efcode", "n-code"],
+  ["\u65e5\u672c", "sandbox-image"],
+  ["", "sandbox-image"],
+  ["...", "sandbox-image"],
+  ["image_foo", "sandbox-image"],
+  ["sandbox_template_x", "sandbox-image"],
+  ["0123456789abcdef".repeat(4), "sandbox-image"],
+];
+
+describe("CAS image names", () => {
+  beforeEach(() => {
+    vi.stubEnv("TENSORLAKE_API_URL", "https://api.tensorlake.test");
+    vi.stubEnv("TENSORLAKE_API_KEY", "tl_key_test");
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    __setNativeBindingForTest(undefined);
+  });
+
+  it("derives generated names by the shared rule", () => {
+    for (const [raw, expected] of CAS_IMAGE_NAME_CASES) {
+      expect(__imageBuildInternals.casImageNameFrom(raw, "sandbox-image"), raw).toBe(expected);
+    }
+    // The 255-character cap, then trailing separators are dropped again.
+    expect(__imageBuildInternals.casImageNameFrom(`${"a".repeat(254)}-bc`, "sandbox-image")).toBe(
+      "a".repeat(254),
+    );
+  });
+
+  it("generates names that are valid and already canonical", () => {
+    for (const [raw] of CAS_IMAGE_NAME_CASES) {
+      const name = __imageBuildInternals.casImageNameFrom(raw, "sandbox-image");
+      expect(__imageBuildInternals.isAddressableCasImageName(name), name).toBe(true);
+      expect(__imageBuildInternals.canonicalCasImageName(name)).toBe(name);
+    }
+    expect(__imageBuildInternals.canonicalCasImageName("Team/App:V1")).toBe("team/app:v1");
+    expect(__imageBuildInternals.canonicalCasImageName("\u00c9t\u00c9")).toBe("\u00c9t\u00c9");
+  });
+
+  it("sends the CAS image registry spelling for CAS images and keeps legacy names", async () => {
+    const project = path.join(os.tmpdir(), `tensorlake-images-${Date.now()}`, "My Project");
+    await mkdir(project, { recursive: true });
+    const dockerfilePath = path.join(project, "Dockerfile");
+    await writeFile(dockerfilePath, "FROM scratch\n", "utf8");
+    const { captured } = makeFakeBinding();
+
+    const names: unknown[] = [];
+    for (const options of [{}, { registeredName: "MyApp" }, { cas: false }, { registeredName: "MyApp", cas: false }]) {
+      await createSandboxImage(dockerfilePath, options);
+      names.push(captured.options.registeredName);
+    }
+    expect(names).toEqual(["my-project", "myapp", "My Project", "MyApp"]);
+
+    await importSandboxImage("ubuntu:24.04", { registeredName: "MyBase" });
+    expect(captured.options.registeredName).toBe("mybase");
+    await importSandboxImage("ubuntu:24.04", { registeredName: "MyBase", cas: false });
+    expect(captured.options.registeredName).toBe("MyBase");
   });
 });

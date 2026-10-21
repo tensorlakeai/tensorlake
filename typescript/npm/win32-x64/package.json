@@ -1,6 +1,6 @@
 {
   "name": "@tensorlakeai/native-win32-x64",
-  "version": "0.5.155",
+  "version": "0.5.156",
   "description": "Tensorlake native Node.js binding for Windows x64",
   "repository": {
     "type": "git",

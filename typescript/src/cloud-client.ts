@@ -113,10 +113,12 @@ export class CloudClient {
   }
 
   /**
-   * Delete a registered sandbox image by name or id through the merged
-   * catalog, with this client's credentials: an `image_` id or a name the
-   * Image Service knows deletes a CAS image, a `sandbox_template_` id or a
-   * name registered only in the platform registry deletes a legacy image.
+   * Delete a registered CAS or legacy sandbox image by name or id through the
+   * merged catalog, with this client's credentials: an `image_` id or a name
+   * the CAS image registry knows deletes a CAS image, a `sandbox_template_` id
+   * or a name registered only in the legacy image registry deletes a legacy
+   * image.
+   * A name is deleted from both the CAS and the legacy image registries.
    * Rejects when neither catalog knows the reference. The same semantics
    * and accepted differences as the module-level `deleteSandboxImage`.
    */
@@ -125,10 +127,10 @@ export class CloudClient {
   }
 
   /**
-   * Look up a registered sandbox image by name or id through the merged
-   * catalog, with this client's credentials. Returns the image in the
-   * sandbox-template shape, or `null` when neither the Image Service nor the
-   * platform registry knows the reference. An explicit organization/project
+   * Look up a registered CAS or legacy sandbox image by name or id through
+   * the merged catalog, with this client's credentials. Returns the image in
+   * the sandbox-template shape, or `null` when neither the CAS nor the legacy
+   * image registry knows the reference. An explicit organization/project
    * scope (the client's, or the call's override) addresses that project's
    * routes directly, as before; without one the key's own scope applies.
    */

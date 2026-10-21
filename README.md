@@ -180,6 +180,36 @@ support live resize. Resource arguments match create, and updates wait for
 confirmed completion by default.
 See [sandbox resource resize](docs/sandbox-resize.md).
 
+### CAS and legacy sandbox images
+
+`tl sbx image create`, `tl sbx image import` and the SDK build and import calls
+(`Image.build()`, `build_sandbox_image()`, `import_sandbox_image()`,
+`createSandboxImage()`, `importSandboxImage()`) build CAS images by default. A
+CAS image cold-boots by faulting content in on demand instead of copying a whole
+snapshot first, and GPU sandboxes require one. Pass `--no-cas` in the CLI, or
+`cas=False` / `cas: false` in the SDKs, to build a legacy image instead.
+
+```bash
+tl sbx image create -n app ./Dockerfile            # CAS image
+tl sbx image import -n base ubuntu:24.04           # CAS image
+tl sbx image create --no-cas -n app ./Dockerfile   # legacy image
+```
+
+- **CAS images only:** `--build-arg` / `build_args`, `--no-wait` and the build
+  operations below.
+- **Legacy images only:** `--builder_disk_mb` / `builder_disk_mb` and
+  `--docker_compat` / `docker_compat`. A CAS image build ignores them.
+- **Names.** The CAS image registry stores names in lowercase, so `-n MyApp`
+  registers the CAS image `myapp`, and `MyApp` still finds and deletes it. A
+  default CAS image name (the Dockerfile's directory or the imported image's
+  name) is lowercased and made valid, with other characters replaced by `-`:
+  `My Project/Dockerfile` becomes `my-project`. Legacy image names are kept and
+  matched exactly as given.
+- **Base images.** A CAS image build can use CAS images and registry images as a
+  base, but not legacy images: rebuild a legacy base image as a CAS image first.
+  A `FROM tensorlake/<name>` reference uses the CAS image `tensorlake/cas/<name>`.
+- Application images built by `tensorlake deploy` stay legacy images.
+
 ### Registry credentials for image builds and imports
 
 Supply Docker `config.json` contents per operation when importing private images
@@ -214,7 +244,7 @@ provisioning. Supplied contents replace discovery entirely; pass `"{}"` to use n
 registry credentials. Empty strings and malformed configurations are errors.
 Credential helpers (`credHelpers` and `credsStore`) run locally using the captured
 configuration; only resolved registry credentials are forwarded to the builder.
-Both CAS and non-CAS image builds use this behavior.
+Both CAS and legacy image builds use this behavior.
 
 The CLI captures Docker configuration immediately after parsing a build/import or
 deploy command, before authentication and application loading. It looks for
@@ -240,8 +270,8 @@ bounded deadline and address failover. See [read resilience and timeout behavior
 
 ### CAS image build operations
 
-A CAS image (`cas=True` / `--cas`) is built or imported by an Image Service
-*build operation* with a service-generated build ID. The convenience calls
+A CAS image is built or imported by a *build operation* with a
+service-generated build ID. The convenience calls
 above still wait to publication; the operation can also be driven directly,
 which is how a build is left running, inspected or cancelled:
 
@@ -263,7 +293,7 @@ await cancelImageBuild({ buildId: handle.buildId });
 ```
 
 ```bash
-tl sbx image create --cas --no-wait -n app ./Dockerfile   # prints the build ID
+tl sbx image create --no-wait -n app ./Dockerfile   # prints the build ID
 tl sbx image build get BUILD_ID [--json]
 tl sbx image build wait BUILD_ID [--json] [--timeout SECS]
 tl sbx image build cancel BUILD_ID
@@ -271,23 +301,24 @@ tl sbx image build cancel BUILD_ID
 
 Behavior shared by every language:
 
-- **CAS only.** These operations address the Image Service. Legacy images
-  (create/import without `--cas`, `sandbox_template_` ids, `.tlsnap` snapshots)
-  have no build operation; passing a legacy reference fails locally before any
-  request, and the legacy create/import/describe/ls/rm/register/snapshot flows
-  keep their existing requests, output, errors and interrupt behavior.
+- **CAS images only.** Legacy images (create/import with `--no-cas` or
+  `cas=False`, `sandbox_template_` ids, `.tlsnap` snapshots) have no build
+  operation; passing a legacy reference fails locally before any request, and
+  the legacy create/import/describe/ls/register/snapshot flows keep their
+  existing requests, output, errors and interrupt behavior.
 - **The build ID is the record.** Admission returns it and the CLI prints it
   (`Build ID: ...`) before any upload or wait. `wait` returns that build's own
-  published result even after the image was rebuilt or deleted; an image name
-  or `image_` id names the *current* image, which a rebuild replaces.
+  published result even after the CAS image was rebuilt or deleted; a CAS
+  image name or `image_` id names the *current* CAS image, which a rebuild
+  replaces.
 - **Cancel by build ID.** `cancel` takes only the build ID. The admission's
   client request ID (`Idempotency-Key`) is kept as a recovery aid for an
   admission whose response was lost (`tl sbx image build cancel --request-id`);
   its `not_admitted` answer is an observation, not a cancellation. One
-  unfinished build or import per image name: a second one is refused with
+  unfinished build or import per CAS image name: a second one is refused with
   `image_build_in_progress` naming the active build to cancel first; nothing is
-  cancelled automatically. `rm` removes published images and never cancels a
-  build.
+  cancelled automatically. `rm` removes published CAS and legacy images and
+  never cancels a build.
 - **Interrupts cancel, timeouts do not.** Ctrl+C in the CLI, `KeyboardInterrupt`
   in Python and an `AbortSignal` in TypeScript request remote cancellation
   through a bounded (30 s) handshake and report `cancelled`, `already
@@ -296,7 +327,25 @@ Behavior shared by every language:
   A wait timeout only stops waiting and leaves the build running. Disconnecting,
   dropping a handle or losing the process never cancels a build. Waits
   otherwise run until the service-reported operation deadline plus a recovery
-  allowance, reconnecting across transient Image Service failures.
+  allowance, reconnecting across transient service failures.
+
+### Deleting sandbox images
+
+`tl sbx image rm`, `delete_sandbox_image()` in Python and `deleteSandboxImage()`
+in TypeScript delete a published CAS or legacy image by name or ID.
+
+- **A name is deleted from both registries.** Deleting a name removes its CAS
+  image and any legacy image of the same name. Once the CAS image is deleted, a
+  legacy image of the same name can no longer start sandboxes, so it is deleted
+  too. The CLI reports it with `Also deleted legacy image ...`. If deleting the
+  legacy image fails, the call still succeeds because the CAS image is gone; the
+  CLI prints the `tl sbx image rm sandbox_template_...` command that removes it,
+  and the SDKs warn (`warnings.warn` in Python, `console.warn` in TypeScript)
+  with the legacy image, the error and the delete call that removes it.
+- **An ID deletes only that image.** An `image_` ID deletes that CAS image and a
+  `sandbox_template_` ID that legacy image. When deleting an `image_` ID leaves a
+  legacy image of the same name behind, the CLI warns that it can no longer be
+  used: rebuild or re-import it with `--no-cas` to use it again, or delete it.
 
 ### Snapshots
 

@@ -29,7 +29,7 @@ try:
 except ImportError:
     _cloud_sdk = None
 
-from tensorlake.image import builds
+from tensorlake.image import builds, sandbox_builder
 
 
 def _build(build_id="build-1", status="pending", **extra):
@@ -300,9 +300,7 @@ class TestCasInterruption(unittest.TestCase):
             # The build ran to its baseline failure; the callback's errors
             # never surfaced and never stopped it.
             self.assertNotIsInstance(raised.exception, RuntimeError)
-            self.assertIn(
-                "failed to prepare sandbox image build", str(raised.exception)
-            )
+            self.assertIn("failed to prepare legacy image build", str(raised.exception))
             self.assertGreaterEqual(len(seen), 2, seen)
             self.assertEqual(
                 len(service.recorded("POST", "/platform/v1/sandbox-template-builds")), 1
@@ -576,6 +574,42 @@ class TestBuildOperationsNative(unittest.TestCase):
             self.assertEqual(raised.exception.build_id, "build-1")
             self.assertIn("may still be running", str(raised.exception))
             self.assertEqual(service.recorded("POST", "/images/v4/builds/cancel"), [])
+
+
+@unittest.skipIf(_cloud_sdk is None, "requires the built native SDK")
+class TestDeleteThroughTheNativeBoundary(unittest.TestCase):
+    def test_failed_legacy_cleanup_warns_in_the_cas_spelling(self):
+        """``MyProject`` deletes the CAS image ``myproject``; when the legacy
+        image of that name cannot be deleted, the call still succeeds and the
+        warning, built from the binding's real return value, names
+        ``myproject`` for recovery."""
+        with (
+            ScriptedService() as service,
+            _env(),
+            patch.dict(os.environ, {"TENSORLAKE_API_URL": service.url}),
+        ):
+            service.handlers[("DELETE", "/images/v4/images/name/myproject")] = (
+                202,
+                {"deleting": True},
+            )
+            service.handlers[
+                ("GET", "/platform/v1/sandbox-templates/by-name/myproject")
+            ] = (500, {"message": "internal error"})
+            with self.assertWarns(UserWarning) as caught:
+                sandbox_builder.delete_sandbox_image("MyProject")
+
+        message = str(caught.warning)
+        self.assertIn("Deleted CAS image 'myproject'", message)
+        self.assertIn("internal error", message)
+        self.assertIn("delete_sandbox_image('myproject')", message)
+        self.assertNotIn("MyProject", message)
+        self.assertEqual(
+            [(method, path) for method, path, _, _ in service.requests],
+            [
+                ("DELETE", "/images/v4/images/name/myproject"),
+                ("GET", "/platform/v1/sandbox-templates/by-name/myproject"),
+            ],
+        )
 
 
 if __name__ == "__main__":

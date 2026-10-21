@@ -518,7 +518,9 @@ class TestStartBuild(unittest.TestCase):
         self.assertEqual(handle.client_request_id, "rid-generated")
         self.assertEqual(handle.info.status, "pending")
         self.assertEqual(handle.info.raw["future_field"], {"ignored": True})
-        self.assertIn({"type": "status", "message": "Building image 'img'..."}, events)
+        self.assertIn(
+            {"type": "status", "message": "Building CAS image 'img'..."}, events
+        )
 
     def test_start_build_renders_an_image_with_an_empty_context(self):
         image = Image(name="cas-img", base_image="python:3.12-slim")
@@ -535,6 +537,17 @@ class TestStartBuild(unittest.TestCase):
         self.assertEqual(args[3], "cas-img")
         self.assertIn("FROM python:3.12-slim", args[13])
         self.assertTrue(args[14])  # a temporary, empty context directory
+
+    def test_start_import_sends_the_cas_image_registry_spelling(self):
+        started = json.dumps({"build": _build_json(), "client_request_id": "rid"})
+        with (
+            patch.object(builds, "_build_context_from_env", return_value=_ctx()),
+            patch.object(
+                builds, "_rust_start_image_import", return_value=started
+            ) as native,
+        ):
+            builds.start_import("ubuntu:24.04", registered_name="MyBase")
+        self.assertEqual(native.call_args.args[3], "mybase")
 
     def test_start_import_forwards_exact_positional_arguments(self):
         started = json.dumps({"build": _build_json(), "client_request_id": "rid"})
@@ -954,7 +967,9 @@ class TestLegacyBoundary(unittest.TestCase):
                 patch.object(builds, "_rust_start_image_build") as start_native,
             ):
                 with self.assertRaises(sbm.SandboxImageBuildError) as raised:
-                    sbm.build_sandbox_image(str(dockerfile), registered_name="img")
+                    sbm.build_sandbox_image(
+                        str(dockerfile), registered_name="img", cas=False
+                    )
         self.assertIs(type(raised.exception), sbm.SandboxImageBuildError)
         self.assertEqual(
             str(raised.exception),
@@ -973,7 +988,7 @@ class TestLegacyBoundary(unittest.TestCase):
             ) as native,
         ):
             with self.assertRaises(sbm.SandboxImageBuildError) as raised:
-                sbm.import_sandbox_image("ubuntu:24.04")
+                sbm.import_sandbox_image("ubuntu:24.04", cas=False)
         self.assertIs(type(raised.exception), sbm.SandboxImageBuildError)
         self.assertIs(native.call_args.kwargs["cas"], False)
 

@@ -42,9 +42,9 @@ pub struct CreateSandboxTemplateRequest {
     pub additional_local_images: Option<Vec<LocalImageInput>>,
 }
 
-/// One registered sandbox image in the platform template shape. Both image
-/// families answer it: legacy templates verbatim from the platform API, and
-/// CAS images mapped from the Image Service record by
+/// One registered CAS or legacy sandbox image in the sandbox-template shape.
+/// Both image families answer it: legacy images verbatim from the legacy
+/// image registry, and CAS images mapped from the CAS image registry record by
 /// [`crate::sandbox_image_catalog`]. Fields the server did not send stay
 /// `None`; keys the model does not know are kept verbatim in `extra` so
 /// machine consumers see the complete record (the CAS provenance fields

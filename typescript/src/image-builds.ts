@@ -10,18 +10,18 @@ import {
 } from "./sandbox-image.js";
 
 /**
- * Image Service build operations for CAS sandbox images.
+ * Build operations for CAS sandbox images.
  *
- * A CAS (content-addressed streaming) image is built or imported by an Image
- * Service *build operation*. This module exposes that operation directly:
+ * A CAS (content-addressed streaming) image is built or imported by a *build
+ * operation*. This module exposes that operation directly:
  * {@link startImageBuild} / {@link startImageImport} admit a build (and upload
  * and seal its context) and return an {@link ImageBuildHandle} without
  * waiting; {@link getImageBuild} looks a build up by id; the handle's
  * `refresh`, `wait` and `cancel` read, wait for and cancel it.
  *
- * **CAS only.** Everything here addresses the Image Service. Legacy images
- * (`createSandboxImage` without `cas`, `sandbox_template_` ids, `.tlsnap`
- * snapshots) have no build operation: a `sandbox_template_` or `image_`
+ * **CAS images only.** Everything here addresses a CAS image build. Legacy
+ * images (`createSandboxImage` with `cas: false`, `sandbox_template_` ids,
+ * `.tlsnap` snapshots) have no build operation: a `sandbox_template_` or `image_`
  * reference passed as a build id is refused locally, before any request, and
  * the legacy functions in `sandbox-image.ts` keep their own requests,
  * results, errors and interruption behavior.
@@ -127,7 +127,7 @@ export interface ImageBuildErrorDetails {
   status?: number | null;
 }
 
-/** An Image Service build operation failed. `code` is stable. */
+/** A CAS image build operation failed. `code` is stable. */
 export class ImageBuildError extends Error {
   readonly code: ImageBuildErrorCode;
   readonly buildId?: string;
@@ -273,15 +273,15 @@ export function toImageBuildError(error: unknown): unknown {
 // --- Models ------------------------------------------------------------------
 
 /**
- * The published image of a succeeded build, in the sandbox-template shape
- * the merged catalog answers (derived by the core from the Image Service's
- * trimmed record): one image representation for `findSandboxImageByName`,
- * `listSandboxImages` and build results.
+ * The published CAS image of a succeeded build, in the sandbox-template
+ * shape the merged catalog answers (derived by the core from the CAS image
+ * registry's trimmed record): one image representation for
+ * `findSandboxImageByName`, `listSandboxImages` and build results.
  */
 export type ImageBuildResult = SandboxTemplate;
 
 /**
- * One build or import as the Image Service reports it (the twelve-field
+ * One CAS image build or import as the service reports it (the twelve-field
  * `BuildInfo`; the service exposes no cleanup state, phase deadline,
  * content digest or upload capability on a build).
  */
@@ -444,7 +444,7 @@ function clientOptions(credentials: Credentials) {
 
 /**
  * New operations never reinterpret legacy references: fail before any
- * request so no Image Service or platform call is made.
+ * request so no call is made.
  */
 function rejectLegacyReference(buildId: string): void {
   if (typeof buildId !== "string" || buildId.trim().length === 0) {
@@ -453,14 +453,14 @@ function rejectLegacyReference(buildId: string): void {
   if (buildId.startsWith("sandbox_template_")) {
     throw new ImageBuildError({
       code: ImageBuildErrorCode.USAGE,
-      message: `'${buildId}' is a legacy sandbox template id; legacy images have no build operation to get, wait for or cancel`,
+      message: `'${buildId}' is a legacy image id; legacy images have no build operation to get, wait for or cancel`,
       buildId,
     });
   }
   if (buildId.startsWith("image_")) {
     throw new ImageBuildError({
       code: ImageBuildErrorCode.USAGE,
-      message: `'${buildId}' is an image id, not a build id; look the image up with findSandboxImageByName or use the build id admission returned`,
+      message: `'${buildId}' is a CAS image id, not a build id; look the CAS image up with findSandboxImageByName or use the build id admission returned`,
       buildId,
     });
   }
@@ -678,19 +678,27 @@ export async function startImageBuild(
     let text = dockerfileContent(source);
     if (!text.endsWith("\n")) text += "\n";
     dockerfileText = text;
-    name = options.registeredName ?? source.name;
+    name = __imageBuildInternals.registeredImageName(
+      options.registeredName ?? source.name,
+      undefined,
+      true,
+    );
   } else if (typeof source === "string") {
     const resolved = path.resolve(source);
     if (!existsSync(resolved)) throw new Error(`Dockerfile not found: ${source}`);
     dockerfilePath = resolved;
-    name = options.registeredName ?? __imageBuildInternals.defaultRegisteredName(resolved);
+    name = __imageBuildInternals.registeredImageName(
+      options.registeredName,
+      __imageBuildInternals.defaultRegisteredName(resolved),
+      true,
+    );
   } else {
     throw new TypeError(`source must be an Image or a Dockerfile path, got ${typeof source}`);
   }
   try {
     const credentials = credentialsFromEnv();
     const binding = __imageBuildInternals.loadNativeBinding();
-    emitter.emit({ type: "status", message: `Building image '${name}'...` });
+    emitter.emit({ type: "status", message: `Building CAS image '${name}'...` });
     const json = await __runWithInterrupt(options.signal, (interruptId) =>
       binding.startImageBuild(
         {
@@ -731,12 +739,16 @@ export async function startImageImport(
     throw new Error("image reference to import must not be empty");
   }
   const reference = imageReference.trim();
-  const name =
-    options.registeredName ?? __imageBuildInternals.defaultRegisteredNameFromImage(reference);
+  const name = __imageBuildInternals.registeredImageName(
+    options.registeredName,
+    __imageBuildInternals.defaultRegisteredNameFromImage(reference),
+    true,
+    __imageBuildInternals.defaultImportedImageName,
+  );
   const emitter = makeEmitter({ emit: deps.emit ?? options.emit, verbose: options.verbose });
   const credentials = credentialsFromEnv();
   const binding = __imageBuildInternals.loadNativeBinding();
-  emitter.emit({ type: "status", message: `Importing image '${reference}' as '${name}'...` });
+  emitter.emit({ type: "status", message: `Importing '${reference}' as CAS image '${name}'...` });
   const json = await __runWithInterrupt(options.signal, (interruptId) =>
     binding.startImageImport(
       {

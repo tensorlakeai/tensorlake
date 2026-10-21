@@ -193,19 +193,26 @@ impl CloudApiClient {
     }
 
     /// Delete a registered sandbox image by name or id through the merged
-    /// catalog (ADR 0107): an `image_` id or a name known to the Image
-    /// Service deletes a CAS image, a `sandbox_template_` id or a name known
-    /// only to the platform registry deletes a legacy one. Not found in
-    /// either raises the 404 as a `remote_api` error. Replayed only when the
-    /// request provably never reached a server: a lost response must not
-    /// retry into deleting a same-named image in the other catalog.
+    /// catalog (ADR 0107): an `image_` id or a name known to the CAS image
+    /// registry deletes a CAS image, a `sandbox_template_` id or a name known
+    /// only to the legacy image registry deletes a legacy one. A name whose CAS
+    /// image is deleted also loses its same-named legacy image, which can no
+    /// longer start sandboxes. Not found in either raises the 404 as a
+    /// `remote_api` error. Replayed only when the request provably never
+    /// reached a server: a lost response must not retry into deleting a
+    /// same-named image in the other catalog.
+    ///
+    /// Returns `None`, or `(legacy_image_name, legacy_image_id, error)` when
+    /// the name's CAS image was deleted but its same-named legacy image could
+    /// not be. The delete still succeeded; the Python layer turns this into
+    /// a warning.
     #[pyo3(signature = (image_name, organization_id=None, project_id=None))]
     fn delete_sandbox_image(
         &self,
         image_name: String,
         organization_id: Option<String>,
         project_id: Option<String>,
-    ) -> PyResult<()> {
+    ) -> PyResult<Option<(String, Option<String>, String)>> {
         let catalog = self.sandbox_image_catalog(organization_id, project_id)?;
         run_with_connect_replay_blocking(
             catalog,
@@ -213,7 +220,12 @@ impl CloudApiClient {
             into_py_error,
             move |catalog| {
                 let image_name = image_name.clone();
-                async move { catalog.delete(&image_name).await }
+                async move {
+                    let deletion = catalog.delete_reporting(&image_name).await?;
+                    Ok(deletion.failed_legacy_cleanup().map(|(name, id, error)| {
+                        (name.to_string(), id.map(str::to_string), error.to_string())
+                    }))
+                }
             },
         )
     }
@@ -4125,7 +4137,7 @@ fn load_docker_config_json() -> PyResult<String> {
     docker_compat=false,
     dockerfile_text=None,
     context_dir=None,
-    cas=false,
+    cas=true,
     build_args=None,
     emit=None,
     docker_config_json=None,
@@ -4258,7 +4270,7 @@ fn build_sandbox_image(
     use_scope_headers=false,
     user_agent=None,
     docker_compat=false,
-    cas=false,
+    cas=true,
     emit=None,
     docker_config_json=None,
 ))]
@@ -4705,7 +4717,7 @@ where
     }
 }
 
-/// Map a CAS operation failure to the Python exception. Typed Image Service
+/// Map a CAS operation failure to the Python exception. Typed CAS image build
 /// outcomes become `CloudSandboxClientError(("image_build", None, json))`
 /// where `json` carries `code`, `message`, the build id and the outcome
 /// fields; the Python layer turns them into typed exceptions. Other failures

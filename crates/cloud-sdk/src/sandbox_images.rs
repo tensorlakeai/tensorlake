@@ -176,9 +176,9 @@ pub enum SandboxImageBuildError {
     Json(#[from] serde_json::Error),
     #[error("{0}")]
     Sdk(#[from] SdkError),
-    /// A typed Image Service build-operation outcome (CAS paths only):
-    /// conflict, service-reported failure or cancellation, wait timeout, or
-    /// an explicit interruption. Legacy builds never produce it.
+    /// A typed CAS image build-operation outcome: conflict, service-reported
+    /// failure or cancellation, wait timeout, or an explicit interruption.
+    /// Legacy image builds never produce it.
     #[error(transparent)]
     Build(#[from] crate::image_builds::ImageBuildError),
     #[error("{0}")]
@@ -217,13 +217,13 @@ pub struct CommonBuildOptions {
     pub cpus: Option<f64>,
     pub memory_mb: Option<i64>,
     pub is_public: bool,
-    /// Non-default opt-in: build a CAS (content-addressed streaming) image
-    /// through the Image Service build plane instead of the platform-api
-    /// rootfs builder. The SDK resolves the Dockerfile plan's references
-    /// against the Image Service catalog and submits them with the build;
-    /// the service reconciler drives the builder sandbox. Routed through the
-    /// API host's `/images/v4` ingress path by default;
-    /// `TENSORLAKE_IMAGE_SERVICE_URL` overrides it for local development.
+    /// Build a CAS (content-addressed streaming) image when true, a legacy
+    /// image when false. The CLI and the language SDKs default to true. For
+    /// a CAS image the SDK resolves the Dockerfile plan's references against
+    /// the CAS image registry and submits them with the build; the service
+    /// drives the builder sandbox. Routed through the API host's
+    /// `/images/v4` ingress path by default; `TENSORLAKE_IMAGE_SERVICE_URL`
+    /// overrides it for local development.
     pub cas: bool,
     pub user_agent: Option<String>,
     pub docker_compat: bool,
@@ -474,12 +474,12 @@ where
 }
 
 /// [`build_sandbox_image`] with an explicit interruption signal. The signal
-/// applies to CAS builds only (`options.common.cas`): triggering it cancels
-/// the remote Image Service operation through the bounded handshake and the
+/// applies to CAS image builds only (`options.common.cas`): triggering it
+/// cancels the remote CAS image build through the bounded handshake and the
 /// call ends with [`SandboxImageBuildError::Build`] carrying the
-/// [`crate::image_builds::InterruptionReport`]. A legacy build ignores it:
-/// the legacy path keeps its own requests, output, errors and interruption
-/// behavior and never sends an Image Service cancellation.
+/// [`crate::image_builds::InterruptionReport`]. A legacy image build ignores
+/// it: the legacy path keeps its own requests, output, errors and
+/// interruption behavior and never sends a cancellation.
 pub async fn build_sandbox_image_with_interrupt<F>(
     options: SandboxImageBuildOptions,
     docker_config_json: Option<String>,
@@ -588,7 +588,7 @@ where
 /// Parse and validate the Dockerfile plan for a build, shared by the legacy
 /// and CAS entry points.
 fn load_build_plan(options: &SandboxImageBuildOptions) -> Result<DockerfileBuildPlan> {
-    let plan = if let Some(dockerfile_text) = &options.dockerfile_text {
+    let mut plan = if let Some(dockerfile_text) = &options.dockerfile_text {
         load_dockerfile_text_plan(
             &options.dockerfile_path,
             options.context_dir.as_deref(),
@@ -601,6 +601,11 @@ fn load_build_plan(options: &SandboxImageBuildOptions) -> Result<DockerfileBuild
             options.common.registered_name.as_deref(),
         )?
     };
+    plan.registered_name = registered_image_name(
+        &options.common,
+        plan.registered_name,
+        DEFAULT_SANDBOX_IMAGE_NAME,
+    );
     crate::sandbox_image_catalog::validate_registered_name(&plan.registered_name)
         .map_err(SandboxImageBuildError::usage)?;
     Ok(plan)
@@ -609,16 +614,36 @@ fn load_build_plan(options: &SandboxImageBuildOptions) -> Result<DockerfileBuild
 /// Plan and validate a registry import, shared by the legacy and CAS entry
 /// points.
 fn load_import_plan(options: &SandboxImageImportOptions) -> Result<DockerfileBuildPlan> {
-    let plan = plan_image_import(
+    let mut plan = plan_image_import(
         &options.image_reference,
         options.common.registered_name.as_deref(),
     )?;
+    plan.registered_name = registered_image_name(
+        &options.common,
+        plan.registered_name,
+        DEFAULT_IMPORTED_IMAGE_NAME,
+    );
     crate::sandbox_image_catalog::validate_registered_name(&plan.registered_name)
         .map_err(SandboxImageBuildError::usage)?;
     Ok(plan)
 }
 
-/// The Image Service operation behind [`crate::image_builds::start_build`]:
+/// The name a build or import registers, decided before anything is shown
+/// or sent. A CAS image takes the CAS image registry's spelling: an explicit
+/// name is lowercased as the registry would, and a generated default is
+/// turned into a valid CAS image name. Legacy image names are kept as they
+/// are.
+fn registered_image_name(options: &CommonBuildOptions, planned: String, fallback: &str) -> String {
+    if !options.cas {
+        return planned;
+    }
+    match options.registered_name.as_deref() {
+        Some(explicit) => crate::sandbox_image_catalog::canonical_cas_image_name(explicit),
+        None => crate::sandbox_image_catalog::cas_image_name_from(&planned, fallback),
+    }
+}
+
+/// The CAS image registry operation behind [`crate::image_builds::start_build`]:
 /// admit a CAS Dockerfile build and upload and seal its context, without
 /// waiting. Refuses legacy options before any request.
 pub(crate) async fn start_cas_build<F>(
@@ -650,7 +675,7 @@ where
     .await
 }
 
-/// The Image Service operation behind [`crate::image_builds::start_import`].
+/// The CAS image registry operation behind [`crate::image_builds::start_import`].
 pub(crate) async fn start_cas_import<F>(
     options: SandboxImageImportOptions,
     docker_config_json: Option<String>,
@@ -681,8 +706,8 @@ where
 }
 
 /// The new build operations exist for CAS images only. Options that
-/// positively select the legacy builder are refused locally, before any
-/// Image Service or platform request.
+/// positively select a legacy image are refused locally, before any
+/// request.
 fn require_cas(
     options: &CommonBuildOptions,
     operation: &str,
@@ -691,11 +716,13 @@ fn require_cas(
         return Ok(());
     }
     Err(ImageBuildError::usage(format!(
-        "{operation} is an Image Service operation for CAS images and is unsupported for legacy          images; set cas (--cas) to use it, or build the legacy image with the existing          build/import call"
+        "{operation} is only supported for CAS images, not for legacy images (--no-cas, \
+         cas=False); build a CAS image to use it, or build the legacy image with the \
+         build/import call that waits for it"
     )))
 }
 
-/// Resolve the authenticated Image Service ingress used for CAS catalog
+/// Resolve the authenticated CAS image registry ingress used for CAS catalog
 /// operations. Exposed for CLI catalog listing so builds and lists honor the
 /// same local-development override.
 pub fn cas_image_service_url(api_url: &str) -> String {
@@ -767,7 +794,7 @@ where
     let ctx = resolve_build_context(options.clone())?;
 
     emit(SandboxImageBuildEvent::Status(
-        "Preparing rootfs build...".to_string(),
+        "Preparing legacy image build...".to_string(),
     ));
     let platform_client = platform_client(&ctx)?;
     let (prepared, mut prepared_spec) =
@@ -950,7 +977,7 @@ where
             )?;
 
             emit(SandboxImageBuildEvent::Status(
-                "Completing image registration...".to_string(),
+                "Completing legacy image registration...".to_string(),
             ));
             let (_, registered) = complete_rootfs_build(
                 &ctx,
@@ -961,7 +988,7 @@ where
             .await?;
             let template_id = registered.get("id").and_then(Value::as_str).unwrap_or("-");
             emit(SandboxImageBuildEvent::Status(format!(
-                "Image '{}' registered ({})",
+                "Legacy image '{}' registered ({})",
                 plan.registered_name, template_id
             )));
             Ok(registered)
@@ -1248,9 +1275,9 @@ async fn prepare_rootfs_build(
         });
     if let Some(reference) = cas_source_reference {
         return Err(SandboxImageBuildError::usage(format!(
-            "'{reference}' resolves to a CAS (content-addressed streaming) image, which the \
-             platform rootfs builder cannot use as a build source; build with the CAS option \
-             enabled to run this build through the Image Service"
+            "'{reference}' is a CAS image, and legacy image builds can't use CAS images as a \
+             base; build this image as a CAS image instead by dropping --no-cas (cas=False in \
+             the SDKs)"
         )));
     }
     let platform_parent_payload = parent_source
@@ -1276,7 +1303,7 @@ async fn prepare_rootfs_build(
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
         return Err(SandboxImageBuildError::other(format!(
-            "failed to prepare sandbox image build (HTTP {}): {}",
+            "failed to prepare legacy image build (HTTP {}): {}",
             status, body
         )));
     }
@@ -1330,7 +1357,7 @@ async fn complete_rootfs_build(
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
         return Err(SandboxImageBuildError::other(format!(
-            "failed to complete sandbox image build (HTTP {}): {}",
+            "failed to complete legacy image build (HTTP {}): {}",
             status, body
         )));
     }
@@ -2187,7 +2214,7 @@ async fn stream_started_process(
 
 /// Follow an already-started process while preserving the shared reconnect
 /// and replay behavior. The caller deliberately owns interpretation of the
-/// terminal status; Image Service builds, for example, use service state as
+/// terminal status; CAS image builds, for example, use service state as
 /// their source of truth rather than the observed guest exit code.
 pub(crate) async fn follow_started_process_output(
     proxy: &SandboxProxyClient,
@@ -2793,7 +2820,7 @@ fn default_registered_name_from_image(image_ref: &str) -> String {
         _ => last_segment,
     };
     if name.is_empty() {
-        "imported-image".to_string()
+        DEFAULT_IMPORTED_IMAGE_NAME.to_string()
     } else {
         name.to_string()
     }
@@ -3005,15 +3032,19 @@ fn default_registered_name(dockerfile_path: &Path) -> String {
             .and_then(|value| value.to_str())
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .unwrap_or("sandbox-image")
+            .unwrap_or(DEFAULT_SANDBOX_IMAGE_NAME)
             .to_string();
     }
     if stem.is_empty() {
-        "sandbox-image".to_string()
+        DEFAULT_SANDBOX_IMAGE_NAME.to_string()
     } else {
         stem.to_string()
     }
 }
+
+/// Default names when neither the caller nor the source supplies one.
+const DEFAULT_SANDBOX_IMAGE_NAME: &str = "sandbox-image";
+const DEFAULT_IMPORTED_IMAGE_NAME: &str = "imported-image";
 
 fn logical_dockerfile_lines(dockerfile_text: &str) -> Vec<(usize, String)> {
     let mut logical_lines = Vec::new();
@@ -3602,6 +3633,43 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
         assert!(message.contains("rootfs builder exited with status 1"));
         assert!(message.contains("The builder sandbox ran out of memory"));
         assert!(message.contains("The builder sandbox ran out of disk space"));
+    }
+
+    #[test]
+    fn cas_builds_register_the_cas_image_registry_spelling() {
+        let mut options = common_build_options(false);
+        options.cas = true;
+        options.registered_name = Some("MyProject".to_string());
+        // An explicit name is lowercased, as the registry would store it.
+        assert_eq!(
+            super::registered_image_name(&options, "MyProject".to_string(), "sandbox-image"),
+            "myproject"
+        );
+        // A generated default becomes a valid CAS image name.
+        options.registered_name = None;
+        assert_eq!(
+            super::registered_image_name(&options, "My Project".to_string(), "sandbox-image"),
+            "my-project"
+        );
+        assert_eq!(
+            super::registered_image_name(
+                &options,
+                "\u{65e5}\u{672c}".to_string(),
+                "imported-image"
+            ),
+            "imported-image"
+        );
+        // Legacy image names are kept as given.
+        options.cas = false;
+        assert_eq!(
+            super::registered_image_name(&options, "My Project".to_string(), "sandbox-image"),
+            "My Project"
+        );
+        options.registered_name = Some("MyProject".to_string());
+        assert_eq!(
+            super::registered_image_name(&options, "MyProject".to_string(), "sandbox-image"),
+            "MyProject"
+        );
     }
 
     #[test]

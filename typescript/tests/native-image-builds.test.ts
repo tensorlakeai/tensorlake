@@ -10,7 +10,7 @@ import {
   startImageImport,
   waitImageBuild,
 } from "../src/image-builds.js";
-import { importSandboxImage } from "../src/sandbox-image.js";
+import { deleteSandboxImage, importSandboxImage } from "../src/sandbox-image.js";
 
 // Run against the built addon with `npm run test:native-cloud`. Ordinary unit
 // tests stub the binding and do not require native build artifacts.
@@ -191,13 +191,39 @@ describe.skipIf(process.env.TENSORLAKE_TEST_NATIVE_CLOUD !== "1")("native image 
 
   it("a legacy import keeps its error path and makes no Image Service request", async () => {
     on("POST", "/platform/v1/sandbox-template-builds", () => [500, { message: "baseline failure" }]);
-    const error = await importSandboxImage("ubuntu:24.04", { registeredName: "img", dockerConfigJson: "{}" }).catch(
-      (e: unknown) => e,
-    );
+    const error = await importSandboxImage("ubuntu:24.04", {
+      cas: false,
+      registeredName: "img",
+      dockerConfigJson: "{}",
+    }).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).toContain("failed to prepare sandbox image build");
+    expect((error as Error).message).toContain("failed to prepare legacy image build");
     expect(error).not.toBeInstanceOf(ImageBuildInProgressError);
     expect(requests.every((r) => !r.url.startsWith("/images/v4/"))).toBe(true);
     expect(requests.some((r) => r.url === "/images/v4/builds/cancel")).toBe(false);
+  });
+
+  it("a name delete warns in the CAS spelling when the legacy cleanup fails", async () => {
+    // `MyProject` deletes the CAS image `myproject`; the legacy image of that
+    // name cannot be deleted, so the call succeeds and the warning, built from
+    // the binding's real return value, names `myproject` for recovery.
+    on("DELETE", "/images/v4/images/name/myproject", () => [202, { deleting: true }]);
+    on("GET", "/platform/v1/sandbox-templates/by-name/myproject", () => [500, { message: "internal error" }]);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await expect(deleteSandboxImage("MyProject")).resolves.toBeUndefined();
+      expect(warn).toHaveBeenCalledTimes(1);
+      const message = String(warn.mock.calls[0]![0]);
+      expect(message).toContain("Deleted CAS image 'myproject'");
+      expect(message).toContain("internal error");
+      expect(message).toContain('deleteSandboxImage("myproject")');
+      expect(message).not.toContain("MyProject");
+      expect(requests.map((r) => `${r.method} ${r.url}`)).toEqual([
+        "DELETE /images/v4/images/name/myproject",
+        "GET /platform/v1/sandbox-templates/by-name/myproject",
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

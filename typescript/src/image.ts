@@ -135,10 +135,11 @@ export class Image {
   }
 
   /**
-   * Build this image as a sandbox template and register it.
+   * Build this image and register it as a CAS sandbox image (the default) or,
+   * with `cas: false`, a legacy sandbox image.
    *
    * Materializes the image in a build sandbox, snapshots the filesystem,
-   * and registers the snapshot as a named sandbox template.
+   * and registers the snapshot under the image's name.
    */
   async build(
     options: CreateSandboxImageOptions = {},
