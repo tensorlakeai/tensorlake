@@ -149,11 +149,10 @@ with client.create_and_connect() as sandbox:
 # Sandbox is automatically terminated when the context manager exits
 ```
 
-`create_and_connect()` (and `Sandbox.create()`) send the create with
-`wait=False`, so the server acknowledges the sandbox at once, and then poll it
-until it runs. **If the wait runs out, the sandbox is not deleted**: a
-`SandboxPending` is raised with its `sandbox_id`, and the sandbox keeps its
-place in the queue until capacity arrives. Collect it later with
+`create_and_connect()` (and `Sandbox.create()`) send a create that the server
+answers as soon as the sandbox runs. **If the wait runs out, the sandbox is not
+deleted**: a `SandboxPending` is raised with its `sandbox_id`, and the sandbox
+keeps its place in the queue until capacity arrives. Collect it later with
 `Sandbox.connect(sandbox_id)`, or request sandboxes ahead of capacity with
 `Sandbox.create(..., wait=False)`, which returns a `PendingSandbox` handle, and
 call `pending.ready()` on each one when you need it. Pass

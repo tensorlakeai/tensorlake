@@ -78,6 +78,9 @@ class _FakeRustClient:
     def close(self):
         return None
 
+    def create_sandbox_and_wait(self, *, request_json):
+        return self.create_sandbox(request_json)
+
     def create_sandbox_no_wait(self, *, request_json):
         trace_id, response_json = self.create_sandbox(request_json)
         return trace_id, _pending_from_create(response_json)
@@ -266,6 +269,9 @@ class _RecordingCreateRustClient:
             '{"sandbox_id":"sbx-1","status":"running",'
             '"sandbox_url":"https://sbx-1.sandbox.tensorlake.ai"}',
         )
+
+    def create_sandbox_and_wait(self, *, request_json):
+        return self.create_sandbox(request_json)
 
     def create_sandbox_no_wait(self, *, request_json):
         trace_id, response_json = self.create_sandbox(request_json)
@@ -635,11 +641,13 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         # ADR 0086: a wait that runs out raises SandboxPending with the id and
         # never deletes the sandbox, which keeps its place in the queue.
         class _TimeoutCreateRustClient(_RecordingCreateRustClient):
-            def create_sandbox(self, request_json):
+            def create_sandbox_and_wait(self, *, request_json):
                 self.create_calls += 1
+                self.request_json = request_json
+                # The server's own wait ran out: a 504 `timeout` record.
                 return (
                     "trace-create-sandbox",
-                    '{"sandbox_id":"sbx-timeout","status":"pending","pending_reason":"scheduling"}',
+                    '{"sandbox_id":"sbx-timeout","status":"timeout"}',
                 )
 
         with patch(
@@ -663,7 +671,9 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         self.assertIn("keeps its place in the queue", str(pending))
         request_client = _TimeoutCreateRustClient.instances[1]
         self.assertEqual(request_client.delete_calls, [])
-        # The create carried `wait: false` and the poll used the caller's budget.
+        # The server waited (no `wait: false`); the leftover poll used the
+        # caller's budget.
+        self.assertNotIn("wait", json.loads(request_client.request_json))
         self.assertEqual(request_client.wait_calls[0]["sandbox_id"], "sbx-timeout")
         self.assertLessEqual(request_client.wait_calls[0]["timeout_sec"], 10.0)
 

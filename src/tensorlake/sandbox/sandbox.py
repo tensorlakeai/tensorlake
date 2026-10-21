@@ -466,9 +466,8 @@ class Sandbox:
 
         Covers both fresh sandbox creation and restore-from-snapshot (set
         ``snapshot_id``). With ``wait=True`` (the default) it blocks until
-        the sandbox is ``Running``: the create is sent with ``wait=False``
-        and the sandbox is polled every two seconds, with ``request_timeout``
-        as the wait budget.
+        the sandbox is ``Running``: the server waits and answers as soon as
+        it runs, with ``request_timeout`` as the wait budget.
 
         With ``wait=False`` it returns a :class:`PendingSandbox` at once:
         ``pending.ready()`` waits for it, ``pending.status()`` looks at it,

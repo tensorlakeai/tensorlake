@@ -1193,10 +1193,9 @@ export class SandboxClient {
   /**
    * Create a sandbox, wait for it to reach `Running`, and return a connected handle.
    *
-   * This is `create({ wait: false })` followed by `PendingSandbox.ready()`
-   * polling every `pollInterval` seconds, with `requestTimeout` as the wait
-   * budget, in one call. The returned `Sandbox` auto-terminates when
-   * `terminate()` is called.
+   * The create waits on the server, which answers as soon as the sandbox
+   * runs, with `requestTimeout` as the wait budget. The returned `Sandbox`
+   * auto-terminates when `terminate()` is called.
    *
    * **When the wait runs out the sandbox is not deleted.** A `SandboxPending`
    * is thrown with the sandbox id, and the sandbox keeps its place in the
@@ -1225,13 +1224,10 @@ export class SandboxClient {
     // back to it locally when the server response omits a name.
     const requestedName =
       options?.poolId != null ? null : (options?.name ?? null);
-    let sandboxId: string;
-    let traceId: string;
     const createStart = nowMs();
+    let result: Traced<CreateSandboxResponse>;
     if (options?.poolId != null) {
-      // Pool claims have no `wait: false`: the server answers from its own
-      // wait, so a claim is often already running.
-      const result = await requestClient.claim(options.poolId, {
+      result = await requestClient.claim(options.poolId, {
         fileSystems: options.fileSystems,
       });
       logSdkTiming("sandbox.create", "claim_response", createStart, {
@@ -1239,99 +1235,67 @@ export class SandboxClient {
         status: result.status,
         server_trace_id: result.traceId,
       });
-      if (result.status === SandboxStatus.RUNNING) {
-        const explicitProxyUrl =
-          options?.proxyUrl ?? explicitProxyUrlOverride() ?? undefined;
-        const selectedProxyUrl = await this.native.selectSandboxProxyUrl(
-          result.sandboxId,
-          result.sandboxUrl ?? null,
-          result.ingressEndpoint ?? null,
-          explicitProxyUrl ?? null,
-        );
-        const sandbox = requestClient.connect(
-          result.sandboxId,
-          selectedProxyUrl,
-          result.routingHint,
-          requestTimeout,
-          explicitProxyUrl,
-        );
-        sandbox._setOwner(requestClient);
-        sandbox.traceId = result.traceId;
-        sandbox._setLifecycleIdentifier(result.sandboxId);
-        sandbox._setName(result.name ?? requestedName);
-        logSdkTiming("sandbox.create", "complete", opStart, {
-          sandbox_id: result.sandboxId,
-          status: SandboxStatus.RUNNING,
-          server_trace_id: result.traceId,
-        });
-        return sandbox;
-      }
-      if (
-        result.status === SandboxStatus.SUSPENDED ||
-        result.status === SandboxStatus.TERMINATED ||
-        result.status === SandboxStatus.FAILED
-      ) {
-        throw startupFailure(result.sandboxId, result.status, {
-          errorDetails: result.errorDetails,
-          terminationReason: result.terminationReason ?? result.reason,
-        });
-      }
-      sandboxId = result.sandboxId;
-      traceId = result.traceId;
     } else {
-      const pending = await requestClient.requestPending(options, {
-        ownsSandbox: true,
+      // The server waits on its own state changes and answers as soon as the
+      // sandbox runs, fails, or the request timeout (less a response grace)
+      // runs out. A timed-out sandbox stays queued.
+      const body = SandboxClient.buildCreateRequestBody({
+        ...options,
+        wait: undefined,
       });
+      result = await requestClient.tracedJson<CreateSandboxResponse>(
+        () => requestClient.native.createSandboxAndWait(JSON.stringify(body)),
+        "sandboxId",
+      );
       logSdkTiming("sandbox.create", "create_response", createStart, {
-        sandbox_id: pending.sandboxId,
-        status: pending.state,
-        server_trace_id: pending.traceId,
+        sandbox_id: result.sandboxId,
+        status: result.status,
+        server_trace_id: result.traceId,
       });
-      sandboxId = pending.sandboxId;
-      traceId = pending.traceId;
-      // Fast path: a server without `wait: false` may already answer running,
-      // with a short-lived routing hint worth using directly.
-      if (pending.state === SandboxStatus.RUNNING) {
-        const explicitProxyUrl =
-          options?.proxyUrl ?? explicitProxyUrlOverride() ?? undefined;
-        const selectedProxyUrl = await this.native.selectSandboxProxyUrl(
-          sandboxId,
-          pending.sandboxUrl ?? null,
-          pending.ingressEndpoint ?? null,
-          explicitProxyUrl ?? null,
-        );
-        const sandbox = requestClient.connect(
-          sandboxId,
-          selectedProxyUrl,
-          pending.routingHint,
-          requestTimeout,
-          explicitProxyUrl,
-        );
-        sandbox._setOwner(requestClient);
-        sandbox.traceId = traceId;
-        sandbox._setLifecycleIdentifier(sandboxId);
-        sandbox._setName(pending.name ?? requestedName);
-        logSdkTiming("sandbox.create", "complete", opStart, {
-          sandbox_id: sandboxId,
-          status: SandboxStatus.RUNNING,
-          server_trace_id: traceId,
-        });
-        return sandbox;
-      }
-      if (
-        pending.state === SandboxStatus.TERMINATED ||
-        pending.state === SandboxStatus.FAILED
-      ) {
-        throw startupFailure(sandboxId, pending.state, {
-          errorDetails: pending.errorDetails,
-          terminationReason: pending.terminationReason ?? pending.reason,
-        });
-      }
     }
+    if (result.status === SandboxStatus.RUNNING) {
+      const explicitProxyUrl =
+        options?.proxyUrl ?? explicitProxyUrlOverride() ?? undefined;
+      const selectedProxyUrl = await this.native.selectSandboxProxyUrl(
+        result.sandboxId,
+        result.sandboxUrl ?? null,
+        result.ingressEndpoint ?? null,
+        explicitProxyUrl ?? null,
+      );
+      const sandbox = requestClient.connect(
+        result.sandboxId,
+        selectedProxyUrl,
+        result.routingHint,
+        requestTimeout,
+        explicitProxyUrl,
+      );
+      sandbox._setOwner(requestClient);
+      sandbox.traceId = result.traceId;
+      sandbox._setLifecycleIdentifier(result.sandboxId);
+      sandbox._setName(result.name ?? requestedName);
+      logSdkTiming("sandbox.create", "complete", opStart, {
+        sandbox_id: result.sandboxId,
+        status: SandboxStatus.RUNNING,
+        server_trace_id: result.traceId,
+      });
+      return sandbox;
+    }
+    if (
+      result.status === SandboxStatus.SUSPENDED ||
+      result.status === SandboxStatus.TERMINATED ||
+      result.status === SandboxStatus.FAILED
+    ) {
+      throw startupFailure(result.sandboxId, result.status, {
+        errorDetails: result.errorDetails,
+        terminationReason: result.terminationReason ?? result.reason,
+      });
+    }
+    const sandboxId = result.sandboxId;
+    const traceId = result.traceId;
 
-    // A `timeout` claim or a pending create: the sandbox exists and keeps its
-    // place in the queue. Poll it with whatever budget is left (a zero budget
-    // observes its state once without sleeping).
+    // A `timeout` answer: the sandbox exists and keeps its place in the
+    // queue. Poll it with whatever budget is left (a zero budget observes its
+    // state once without sleeping).
     const remaining = Math.max(0, (deadline - Date.now()) / 1000);
     const observed = await requestClient.waitForSandbox(
       sandboxId,

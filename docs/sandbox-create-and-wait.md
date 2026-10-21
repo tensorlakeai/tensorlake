@@ -17,10 +17,10 @@ the queue.
 
 Now:
 
-- `Sandbox.create()` sends the create with **`wait: false`**. The server
-  acknowledges the sandbox as soon as it is durable (HTTP 202, `state:
-  pending`, `pending_reason`), and the SDK polls `GET /sandboxes/{id}` every
-  two seconds until it runs. When the wait budget runs out it raises
+- `Sandbox.create()` sends a blocking create. The server waits on its own
+  state changes and answers as soon as the sandbox runs, fails, or the wait
+  budget (less a short response grace) runs out; a timed-out sandbox stays
+  queued. When the wait budget runs out it raises
   **`SandboxPending`** (Python) / throws **`SandboxPending`** (TypeScript). The
   error carries `sandbox_id` and the last `pending_reason`, and the sandbox
   **keeps its place in the queue**.
@@ -156,9 +156,19 @@ and says how to keep waiting (`tl sbx wait <id>`) or cancel
 
 ## How the wait works
 
-`PendingSandbox.ready()`, `Sandbox.create()` and a `connect()` on a pending
-sandbox all poll `GET /sandboxes/{id}` every `poll_interval` seconds (default
-2) until the sandbox leaves `pending` or the budget runs out. Transient answers
+`Sandbox.create()` and `create_and_connect()` wait on the server: one blocking
+create (`SandboxesClient::create_and_wait`) answers `running`, `failed` (HTTP
+422) or `timeout` (HTTP 504), each with the sandbox id, so a sandbox is
+connected as soon as the server sees it run. The request sends
+`X-Tensorlake-Request-Timeout-Grace-Ms` (5 s, or a quarter of shorter
+budgets), so the server's `timeout` arrives before the client's own deadline.
+After a `timeout`, the rest of the budget is spent polling as below, then
+`SandboxPending` is raised (or the sandbox is deleted with
+`cancel_on_timeout`). A pool claim is answered the same way.
+
+`PendingSandbox.ready()` and a `connect()` on a pending sandbox poll
+`GET /sandboxes/{id}` every `poll_interval` seconds (default 2) until the
+sandbox leaves `pending` or the budget runs out. Transient answers
 (502/503/504, a cut connection, a timed-out poll — a pending sandbox is not
 routable yet, so the lifecycle gateway can answer a proxy error until it starts)
 are retried between observations; a missing sandbox surfaces as the poll's 404.
@@ -173,7 +183,4 @@ sleep is capped at the remaining budget, and once the budget is spent the last
 error (for example the 503 that started the retries) is raised instead of
 another request. The loop lives in the Rust core
 (`SandboxesClient::wait_until_settled`) and is
-shared by both bindings and the CLI's own poll. Against a server that predates
-`wait: false`, the create blocks as before and may answer `running` or the
-legacy `timeout` status; the SDK uses the former directly and polls after the
-latter, so the no-delete rule holds on every server.
+shared by both bindings and the CLI's own poll.

@@ -65,6 +65,9 @@ class _FakeAsyncRustClient:
     def close(self):
         return None
 
+    async def create_sandbox_and_wait_async(self, *, request_json):
+        return await self.create_sandbox_async(request_json=request_json)
+
     async def create_sandbox_no_wait_async(self, *, request_json):
         trace_id, response_json = await self.create_sandbox_async(
             request_json=request_json
@@ -262,6 +265,9 @@ class _RecordingCreateRustClient:
             '{"sandbox_id":"sbx-1","status":"running",'
             '"sandbox_url":"https://sbx-1.sandbox.tensorlake.ai"}',
         )
+
+    async def create_sandbox_and_wait_async(self, *, request_json):
+        return await self.create_sandbox_async(request_json=request_json)
 
     async def create_sandbox_no_wait_async(self, *, request_json):
         trace_id, response_json = await self.create_sandbox_async(
@@ -676,11 +682,13 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
         # ADR 0086: a wait that runs out raises SandboxPending with the id and
         # never deletes the sandbox, which keeps its place in the queue.
         class _TimeoutCreateRustClient(_RecordingCreateRustClient):
-            async def create_sandbox_async(self, *, request_json):
+            async def create_sandbox_and_wait_async(self, *, request_json):
                 self.create_calls += 1
+                self.request_json = request_json
+                # The server's own wait ran out: a 504 `timeout` record.
                 return (
                     "trace-create-sandbox",
-                    '{"sandbox_id":"sbx-timeout","status":"pending"}',
+                    '{"sandbox_id":"sbx-timeout","status":"timeout"}',
                 )
 
         with patch(
@@ -703,6 +711,10 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(caught.exception.pending_reason, "no_resources_available")
         self.assertEqual(len(_TimeoutCreateRustClient.instances), 2)
         self.assertEqual(_TimeoutCreateRustClient.instances[1].delete_calls, [])
+        # The server waited: the create never asks for `wait: false`.
+        self.assertNotIn(
+            "wait", json.loads(_TimeoutCreateRustClient.instances[1].request_json)
+        )
 
     async def test_create_and_connect_cancel_on_timeout_restores_delete_then_raise(
         self,
