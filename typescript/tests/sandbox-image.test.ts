@@ -787,6 +787,7 @@ describe("sandbox image catalog", () => {
     expect(warn).not.toHaveBeenCalled();
 
     binding.deleteSandboxImage.mockResolvedValueOnce({
+      legacyImageName: "app",
       legacyImageId: "sandbox_template_1",
       error: "Server error: 409 Conflict - retry the delete",
     });
@@ -798,14 +799,20 @@ describe("sandbox image catalog", () => {
     expect(message).toContain("409 Conflict - retry the delete");
     expect(message).toContain('deleteSandboxImage("sandbox_template_1")');
 
+    // `MyProject` deleted the CAS image `myproject`; the legacy image left
+    // behind is `myproject` too, and legacy names are case-sensitive, so
+    // recovery names it in that spelling, not the caller's.
     binding.deleteSandboxImage.mockResolvedValueOnce({
+      legacyImageName: "myproject",
       legacyImageId: null,
       error: "Server error: 500 - internal error",
     });
-    await deleteSandboxImage("app");
+    await deleteSandboxImage("MyProject");
     const unnamed = String(warn.mock.calls[1]![0]);
+    expect(unnamed).toContain("Deleted CAS image 'myproject'");
     expect(unnamed).toContain("legacy image of the same name, which");
-    expect(unnamed).toContain('deleteSandboxImage("app")');
+    expect(unnamed).toContain('deleteSandboxImage("myproject")');
+    expect(unnamed).not.toContain("MyProject");
   });
 
   it("requires an API key", async () => {
@@ -896,6 +903,7 @@ describe("CloudClient sandbox image methods", () => {
 
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     binding.deleteSandboxImage.mockResolvedValueOnce({
+      legacyImageName: "team/app",
       legacyImageId: "sandbox_template_1",
       error: "Server error: 409 Conflict",
     });

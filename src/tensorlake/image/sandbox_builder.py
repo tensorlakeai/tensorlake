@@ -158,9 +158,11 @@ def _rust_delete_sandbox_image(
     organization_id: str | None,
     project_id: str | None,
     namespace: str | None,
-) -> tuple[str | None, str] | None:
-    """Returns ``(legacy_image_id, error)`` when the name's CAS image was
-    deleted but its same-named legacy image could not be, else ``None``."""
+) -> tuple[str, str | None, str] | None:
+    """Returns ``(legacy_image_name, legacy_image_id, error)`` when the name's
+    CAS image was deleted but its same-named legacy image could not be, else
+    ``None``. The legacy image name is the deleted CAS image's name, in the CAS
+    image registry's lowercase spelling."""
     try:
         from tensorlake._cloud_sdk import CloudApiClient
     except ImportError:
@@ -475,13 +477,15 @@ def delete_sandbox_image(image_name: str) -> None:
         raise SandboxImageDeleteError(f"{type(e).__name__}: {e}") from e
 
     if legacy_cleanup_failure is not None:
-        legacy_image_id, error = legacy_cleanup_failure
+        # The legacy image is named exactly like the deleted CAS image, in
+        # lowercase; legacy names are case-sensitive, so recovery uses it.
+        legacy_image_name, legacy_image_id, error = legacy_cleanup_failure
         label = f" ({legacy_image_id})" if legacy_image_id else ""
         warnings.warn(
-            f"Deleted CAS image '{image_name}', but could not delete the legacy "
-            f"image of the same name{label}, which can no longer start sandboxes: "
-            f"{error}. Delete it with "
-            f"delete_sandbox_image('{legacy_image_id or image_name}').",
+            f"Deleted CAS image '{legacy_image_name}', but could not delete the "
+            f"legacy image of the same name{label}, which can no longer start "
+            f"sandboxes: {error}. Delete it with "
+            f"delete_sandbox_image('{legacy_image_id or legacy_image_name}').",
             stacklevel=2,
         )
 

@@ -957,7 +957,6 @@ export async function deleteSandboxImage(imageName: string): Promise<void> {
     throw new TypeError("imageName must be a non-empty string");
   }
   warnIncompleteLegacyCleanup(
-    imageName,
     await loadNativeBinding().deleteSandboxImage(catalogOptionsFromEnv(), imageName),
   );
 }
@@ -971,7 +970,6 @@ export async function deleteSandboxImageWithCredentials(
     throw new TypeError("imageName must be a non-empty string");
   }
   warnIncompleteLegacyCleanup(
-    imageName,
     await loadNativeBinding().deleteSandboxImage(
       catalogOptionsFromCredentials(credentials),
       imageName,
@@ -979,16 +977,22 @@ export async function deleteSandboxImageWithCredentials(
   );
 }
 
-/** The same-named legacy image a name's CAS delete could not remove. */
+/**
+ * The same-named legacy image a name's CAS delete could not remove. Its name
+ * is the deleted CAS image's name, in the CAS image registry's lowercase
+ * spelling.
+ */
 interface NativeLegacyCleanupFailure {
+  legacyImageName: string;
   legacyImageId?: string | null;
   error: string;
 }
 
 // The CAS image is gone, so the delete succeeded; report the legacy image it
 // left behind, which can no longer start sandboxes, and how to delete it.
+// Legacy names are case-sensitive, so recovery uses the returned name rather
+// than the caller's spelling.
 function warnIncompleteLegacyCleanup(
-  imageName: string,
   failure: NativeLegacyCleanupFailure | null | undefined,
 ): void {
   if (failure == null) {
@@ -997,9 +1001,10 @@ function warnIncompleteLegacyCleanup(
   const legacyImageId = failure.legacyImageId ?? undefined;
   const label = legacyImageId ? ` (${legacyImageId})` : "";
   console.warn(
-    `Deleted CAS image '${imageName}', but could not delete the legacy image of the ` +
-      `same name${label}, which can no longer start sandboxes: ${failure.error}. ` +
-      `Delete it with deleteSandboxImage("${legacyImageId ?? imageName}").`,
+    `Deleted CAS image '${failure.legacyImageName}', but could not delete the legacy ` +
+      `image of the same name${label}, which can no longer start sandboxes: ` +
+      `${failure.error}. Delete it with ` +
+      `deleteSandboxImage("${legacyImageId ?? failure.legacyImageName}").`,
   );
 }
 

@@ -470,7 +470,8 @@ class TestDeleteSandboxImage(unittest.TestCase):
     def test_delete_warns_when_the_same_named_legacy_image_remains(self):
         """The CAS image is gone, so the delete succeeds; the legacy image
         it could not delete is reported as a warning with the call that
-        finishes the job."""
+        finishes the job. The binding returns ``(legacy_image_name,
+        legacy_image_id, error)``."""
         ctx = _make_ctx()
 
         with (
@@ -479,6 +480,7 @@ class TestDeleteSandboxImage(unittest.TestCase):
                 sbm,
                 "_rust_delete_sandbox_image",
                 return_value=(
+                    "app",
                     "sandbox_template_1",
                     "Server error: 409 Conflict - retry the delete",
                 ),
@@ -494,7 +496,10 @@ class TestDeleteSandboxImage(unittest.TestCase):
         self.assertIn("delete_sandbox_image('sandbox_template_1')", message)
         self.assertEqual(caught.filename, __file__)
 
-    def test_delete_warning_names_the_image_when_the_legacy_id_is_unknown(self):
+    def test_delete_warning_uses_the_legacy_name_when_its_id_is_unknown(self):
+        """``MyProject`` deleted the CAS image ``myproject``; the legacy image
+        left behind is ``myproject`` too, and legacy names are case-sensitive,
+        so recovery must name it in that spelling, not the caller's."""
         ctx = _make_ctx()
 
         with (
@@ -502,15 +507,17 @@ class TestDeleteSandboxImage(unittest.TestCase):
             patch.object(
                 sbm,
                 "_rust_delete_sandbox_image",
-                return_value=(None, "Server error: 500 - internal error"),
+                return_value=("myproject", None, "Server error: 500 - internal error"),
             ),
         ):
             with self.assertWarns(UserWarning) as caught:
-                sbm.delete_sandbox_image("app")
+                sbm.delete_sandbox_image("MyProject")
 
         message = str(caught.warning)
+        self.assertIn("Deleted CAS image 'myproject'", message)
         self.assertIn("legacy image of the same name, which", message)
-        self.assertIn("delete_sandbox_image('app')", message)
+        self.assertIn("delete_sandbox_image('myproject')", message)
+        self.assertNotIn("MyProject", message)
 
     def test_delete_requires_credentials(self):
         ctx = _make_ctx(api_key=None, personal_access_token=None)
