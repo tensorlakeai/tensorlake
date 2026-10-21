@@ -10,6 +10,8 @@ mod tunnel;
 use std::future::Future;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tensorlake::sandboxes::resize::ResizeOptions;
 
@@ -39,8 +41,8 @@ use tensorlake::sandbox_image_catalog::SandboxImageCatalog;
 use tensorlake::sandbox_images::{SandboxImageBuildError, SandboxImageBuildEvent};
 use tensorlake::sandboxes::models::{
     ArchivedSandboxesPaginationDirection, ClaimSandboxRequest, CreateSandboxPoolRequest,
-    CreateSandboxRequest, GetSandboxLogsRequest, ListArchivedSandboxesParams, SnapshotType,
-    UpdateSandboxPoolRequest, UpdateSandboxRequest,
+    CreateSandboxRequest, GetSandboxLogsRequest, ListArchivedSandboxesParams, OutputEvent,
+    SnapshotType, UpdateSandboxPoolRequest, UpdateSandboxRequest,
 };
 use tensorlake::sandboxes::{
     DEFAULT_WAIT_POLL_INTERVAL, SandboxDesktopClient as RustSandboxDesktopClient,
@@ -2681,6 +2683,194 @@ impl CloudSandboxProxyClient {
     }
 }
 
+// ---- Live process output streams ------------------------------------------
+
+/// Which output of a sandbox process a follow stream reads.
+#[derive(Clone, Copy)]
+enum FollowKind {
+    Stdout,
+    Stderr,
+    Output,
+}
+
+/// One message from the follow task to the Python consumer.
+enum OutputStreamItem {
+    /// A serialized `OutputEvent`.
+    Event(String),
+    /// The sandbox closed the stream; carries the request trace id.
+    Done(String),
+    /// The stream failed and will not be resumed.
+    Failed(SdkError),
+}
+
+/// Events buffered between the follow task and the Python consumer. The task
+/// awaits capacity before it reads the next SSE event, so a slow consumer
+/// slows the read instead of growing memory.
+const OUTPUT_STREAM_BUFFER: usize = 256;
+
+/// Transient retries for a follow request that has not delivered an event yet.
+const OUTPUT_STREAM_RETRIES: usize = 10;
+
+/// A live `follow_*` output stream handed to Python.
+///
+/// A task on the shared runtime reads the SSE stream and forwards each event
+/// through a bounded channel. `next` (sync, GIL released) and `next_async`
+/// (asyncio) each take one event, so Python sees a line as soon as the
+/// sandbox emits it instead of after the process exits.
+///
+/// The request is replayed on a transient failure only while no event has
+/// been handed to Python: an event already delivered cannot be taken back,
+/// and a reconnect replays the output from the start.
+#[pyclass]
+pub struct OutputEventStream {
+    rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<OutputStreamItem>>>,
+    task: tokio::task::JoinHandle<()>,
+    trace_id: Arc<std::sync::Mutex<Option<String>>>,
+}
+
+impl OutputEventStream {
+    fn spawn(client: SandboxProxyClient, kind: FollowKind, process: String) -> Self {
+        let (tx, rx) = tokio::sync::mpsc::channel(OUTPUT_STREAM_BUFFER);
+        let task = shared_runtime().spawn(async move {
+            let outcome = follow_with_retry(client, kind, process, &tx).await;
+            // A closed channel means Python dropped the stream; nothing to report.
+            let _ = tx.send(outcome).await;
+        });
+        Self {
+            rx: Arc::new(tokio::sync::Mutex::new(rx)),
+            task,
+            trace_id: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    /// Turn a channel message into the `next` result: the event JSON, `None`
+    /// at the end of the stream, or the stream's error.
+    fn resolve(
+        trace_id: &std::sync::Mutex<Option<String>>,
+        item: Option<OutputStreamItem>,
+    ) -> PyResult<Option<String>> {
+        match item {
+            Some(OutputStreamItem::Event(json)) => Ok(Some(json)),
+            Some(OutputStreamItem::Done(id)) => {
+                *trace_id.lock().unwrap_or_else(|e| e.into_inner()) = Some(id);
+                Ok(None)
+            }
+            Some(OutputStreamItem::Failed(error)) => Err(into_sandbox_py_error(error)),
+            None => Ok(None),
+        }
+    }
+}
+
+impl Drop for OutputEventStream {
+    fn drop(&mut self) {
+        // Dropping the consumer ends the follow request: the task is
+        // cancelled and the SSE response goes with it.
+        self.task.abort();
+    }
+}
+
+#[pymethods]
+impl OutputEventStream {
+    /// Block, with the GIL released, until the next event arrives. Returns
+    /// the event JSON, or `None` once the stream has ended.
+    fn next(&self, py: Python<'_>) -> PyResult<Option<String>> {
+        let rx = self.rx.clone();
+        let item = py
+            .detach(move || shared_runtime().block_on(async move { rx.lock().await.recv().await }));
+        Self::resolve(&self.trace_id, item)
+    }
+
+    /// Awaitable form of `next` for asyncio consumers.
+    fn next_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let rx = self.rx.clone();
+        let trace_id = self.trace_id.clone();
+        future_into_py(py, async move {
+            let item = rx.lock().await.recv().await;
+            Self::resolve(&trace_id, item)
+        })
+    }
+
+    /// The W3C trace id of the follow request. Known once the stream ends.
+    fn trace_id(&self) -> Option<String> {
+        self.trace_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Stop following. Safe to call more than once.
+    fn close(&self) {
+        self.task.abort();
+    }
+}
+
+/// Follow `kind` of `process` and forward each event to `tx`. Reconnects on
+/// transient failures only until the first event has been delivered.
+async fn follow_with_retry(
+    client: SandboxProxyClient,
+    kind: FollowKind,
+    process: String,
+    tx: &tokio::sync::mpsc::Sender<OutputStreamItem>,
+) -> OutputStreamItem {
+    let delivered = AtomicBool::new(false);
+    let started = tokio::time::Instant::now();
+    let mut state = RetryState::new(RetryPolicy::idempotent(OUTPUT_STREAM_RETRIES));
+    loop {
+        let error = match follow_once(&client, kind, &process, tx, &delivered).await {
+            Ok(trace_id) => return OutputStreamItem::Done(trace_id),
+            Err(error) => error,
+        };
+        if delivered.load(Ordering::SeqCst) || tx.is_closed() {
+            return OutputStreamItem::Failed(error);
+        }
+        match state.decide(&error, started.elapsed()) {
+            RetryDecision::Stop => return OutputStreamItem::Failed(error),
+            RetryDecision::Retry(wait) => {
+                tokio::time::sleep(wait).await;
+                if started.elapsed() >= UNDELIVERED_REPLAY_BUDGET && error.never_reached_server() {
+                    return OutputStreamItem::Failed(error);
+                }
+            }
+        }
+    }
+}
+
+/// One follow request. Returns the trace id when the sandbox closes the
+/// stream, or the error that ended it.
+async fn follow_once(
+    client: &SandboxProxyClient,
+    kind: FollowKind,
+    process: &str,
+    tx: &tokio::sync::mpsc::Sender<OutputStreamItem>,
+    delivered: &AtomicBool,
+) -> Result<String, SdkError> {
+    let forward = |event: OutputEvent| async move {
+        let json = serde_json::to_string(&event)?;
+        tx.send(OutputStreamItem::Event(json))
+            .await
+            .map_err(|_| SdkError::ClientError("output stream consumer closed".to_string()))?;
+        delivered.store(true, Ordering::SeqCst);
+        Ok(())
+    };
+    match kind {
+        FollowKind::Stdout => {
+            client
+                .follow_stdout_streaming_async(process.to_string(), forward)
+                .await
+        }
+        FollowKind::Stderr => {
+            client
+                .follow_stderr_streaming_async(process.to_string(), forward)
+                .await
+        }
+        FollowKind::Output => {
+            client
+                .follow_output_streaming_async(process.to_string(), forward)
+                .await
+        }
+    }
+}
+
 #[pyclass]
 pub struct CloudSandboxProxyClient {
     client: SandboxProxyClient,
@@ -2872,52 +3062,19 @@ impl CloudSandboxProxyClient {
         })
     }
 
-    fn follow_stdout_json(&self, process: String) -> PyResult<(String, Vec<String>)> {
-        self.run_with_retry(10, move |client| {
-            let process = process.clone();
-            async move {
-                let traced = client.follow_stdout(process).await?;
-                let trace_id = traced.trace_id.clone();
-                let events = traced
-                    .into_inner()
-                    .into_iter()
-                    .map(|event| serde_json::to_string(&event).map_err(SdkError::from))
-                    .collect::<Result<Vec<String>, SdkError>>()?;
-                Ok((trace_id, events))
-            }
-        })
+    /// Follow a process's stdout as a live event stream.
+    fn follow_stdout_stream(&self, process: String) -> OutputEventStream {
+        OutputEventStream::spawn(self.client.clone(), FollowKind::Stdout, process)
     }
 
-    fn follow_stderr_json(&self, process: String) -> PyResult<(String, Vec<String>)> {
-        self.run_with_retry(10, move |client| {
-            let process = process.clone();
-            async move {
-                let traced = client.follow_stderr(process).await?;
-                let trace_id = traced.trace_id.clone();
-                let events = traced
-                    .into_inner()
-                    .into_iter()
-                    .map(|event| serde_json::to_string(&event).map_err(SdkError::from))
-                    .collect::<Result<Vec<String>, SdkError>>()?;
-                Ok((trace_id, events))
-            }
-        })
+    /// Follow a process's stderr as a live event stream.
+    fn follow_stderr_stream(&self, process: String) -> OutputEventStream {
+        OutputEventStream::spawn(self.client.clone(), FollowKind::Stderr, process)
     }
 
-    fn follow_output_json(&self, process: String) -> PyResult<(String, Vec<String>)> {
-        self.run_with_retry(10, move |client| {
-            let process = process.clone();
-            async move {
-                let traced = client.follow_output(process).await?;
-                let trace_id = traced.trace_id.clone();
-                let events = traced
-                    .into_inner()
-                    .into_iter()
-                    .map(|event| serde_json::to_string(&event).map_err(SdkError::from))
-                    .collect::<Result<Vec<String>, SdkError>>()?;
-                Ok((trace_id, events))
-            }
-        })
+    /// Follow a process's combined stdout and stderr as a live event stream.
+    fn follow_output_stream(&self, process: String) -> OutputEventStream {
+        OutputEventStream::spawn(self.client.clone(), FollowKind::Output, process)
     }
 
     fn read_file_bytes(
@@ -3234,75 +3391,6 @@ impl CloudSandboxProxyClient {
             let trace_id = traced.trace_id.clone();
             let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
             Ok((trace_id, json))
-        })
-    }
-
-    fn follow_stdout_json_async<'py>(
-        &self,
-        py: Python<'py>,
-        process: String,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let client = self.client.clone();
-        future_into_py(py, async move {
-            let traced = retry_async_op(client, 10, move |c| {
-                let process = process.clone();
-                async move { c.follow_stdout(process).await }
-            })
-            .await
-            .map_err(into_sandbox_py_error)?;
-            let trace_id = traced.trace_id.clone();
-            let events: Vec<String> = traced
-                .into_inner()
-                .into_iter()
-                .map(|event| serde_json::to_string(&event).map_err(sandbox_serde_err))
-                .collect::<Result<Vec<String>, _>>()?;
-            Ok((trace_id, events))
-        })
-    }
-
-    fn follow_stderr_json_async<'py>(
-        &self,
-        py: Python<'py>,
-        process: String,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let client = self.client.clone();
-        future_into_py(py, async move {
-            let traced = retry_async_op(client, 10, move |c| {
-                let process = process.clone();
-                async move { c.follow_stderr(process).await }
-            })
-            .await
-            .map_err(into_sandbox_py_error)?;
-            let trace_id = traced.trace_id.clone();
-            let events: Vec<String> = traced
-                .into_inner()
-                .into_iter()
-                .map(|event| serde_json::to_string(&event).map_err(sandbox_serde_err))
-                .collect::<Result<Vec<String>, _>>()?;
-            Ok((trace_id, events))
-        })
-    }
-
-    fn follow_output_json_async<'py>(
-        &self,
-        py: Python<'py>,
-        process: String,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let client = self.client.clone();
-        future_into_py(py, async move {
-            let traced = retry_async_op(client, 10, move |c| {
-                let process = process.clone();
-                async move { c.follow_output(process).await }
-            })
-            .await
-            .map_err(into_sandbox_py_error)?;
-            let trace_id = traced.trace_id.clone();
-            let events: Vec<String> = traced
-                .into_inner()
-                .into_iter()
-                .map(|event| serde_json::to_string(&event).map_err(sandbox_serde_err))
-                .collect::<Result<Vec<String>, _>>()?;
-            Ok((trace_id, events))
         })
     }
 
@@ -5177,6 +5265,7 @@ fn _cloud_sdk(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<CloudApiClient>()?;
     module.add_class::<CloudSandboxClient>()?;
     module.add_class::<CloudSandboxProxyClient>()?;
+    module.add_class::<OutputEventStream>()?;
     module.add_class::<CloudSandboxDesktopClient>()?;
     module.add_class::<tunnel::CloudTcpTunnel>()?;
     module.add_class::<function_agent::FunctionAgentCore>()?;

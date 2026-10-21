@@ -1,7 +1,7 @@
 """Tensorlake Sandbox SDK - Client for managing and interacting with sandboxes."""
 
 from .async_client import AsyncSandboxClient
-from .async_sandbox import AsyncSandbox
+from .async_sandbox import AsyncOutputStream, AsyncSandbox
 from .client import SandboxClient
 from .desktop import Desktop
 from .exceptions import (
@@ -90,7 +90,7 @@ from .models import (
     sandbox_url_from_ingress_endpoint,
 )
 from .pty import AsyncPty, Pty
-from .sandbox import Sandbox
+from .sandbox import OutputStream, Sandbox
 from .tunnel import AsyncTcpTunnel, TcpTunnel, TunnelAddress
 
 __all__ = [
@@ -100,6 +100,8 @@ __all__ = [
     # Sandbox interaction
     "Sandbox",
     "AsyncSandbox",
+    "OutputStream",
+    "AsyncOutputStream",
     "Pty",
     "AsyncPty",
     "Desktop",

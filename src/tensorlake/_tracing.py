@@ -71,10 +71,10 @@ class Traced(Generic[T]):
 class TracedIterator(Generic[T]):
     """An eagerly-collected sequence of results paired with a W3C trace ID.
 
-    The underlying transport collects all items before returning (the Rust/SSE
-    boundary buffers the full response), so iteration is over a pre-fetched
-    list.  Iterating yields the individual items directly, so existing
-    ``for item in sandbox.follow_stdout(pid):`` loops continue to work.
+    The underlying transport collects all items before returning, so
+    iteration is over a pre-fetched list.  Iterating yields the individual
+    items directly, so ``for process in sandbox.list_processes():`` works.
+    Live process output uses ``OutputStream`` instead.
     """
 
     def __init__(self, trace_id: str, items: list[T]) -> None:

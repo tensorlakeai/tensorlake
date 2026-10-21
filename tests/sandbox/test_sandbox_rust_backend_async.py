@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import AsyncMock
 
 from tensorlake._tracing import Traced, TracedIterator
-from tensorlake.sandbox import AsyncSandbox, SandboxConnectionError
+from tensorlake.sandbox import AsyncOutputStream, AsyncSandbox, SandboxConnectionError
 from tensorlake.sandbox.exceptions import SandboxError
 from tensorlake.sandbox.models import (
     CommandExitReason,
@@ -17,6 +17,38 @@ from tensorlake.sandbox.models import (
 )
 
 _TRACE_ID = "00-deadbeefdeadbeefdeadbeefdeadbeef-cafebabecafebabe-01"
+
+
+class _FakeOutputStream:
+    """Stand-in for the native ``OutputEventStream``: hands out one event per call."""
+
+    def __init__(self, events, error=None):
+        self._events = [json.dumps(event) for event in events]
+        self._error = error
+        self._done = False
+        self.closed = False
+
+    def next(self):
+        if self._events:
+            return self._events.pop(0)
+        if self._error is not None:
+            error, self._error = self._error, None
+            raise error
+        self._done = True
+        return None
+
+    async def next_async(self):
+        return self.next()
+
+    def trace_id(self):
+        return _TRACE_ID if self._done else None
+
+    def close(self):
+        self.closed = True
+
+    @property
+    def pending(self):
+        return len(self._events)
 
 
 def _process_info_dict(pid: int = 101) -> dict:
@@ -38,6 +70,9 @@ class _FakeAsyncRustProxyClient:
     """
 
     def __init__(self):
+        self.followed = None
+        self.follow_stream = None
+        self.follow_error = None
         self.start_payload_json: str | None = None
         self.run_payload_json: str | None = None
         self.write_stdin_calls: list[tuple[int, bytes]] = []
@@ -92,22 +127,33 @@ class _FakeAsyncRustProxyClient:
             {"pid": 101, "lines": ["a", "b", "err"], "line_count": 3}
         )
 
-    async def follow_stdout_json_async(self, process):
-        return _TRACE_ID, [
-            json.dumps({"line": "out", "timestamp": 1_700_000_000, "stream": "stdout"})
-        ]
+    def follow_stdout_stream(self, process):
+        assert process == "101"
+        self.followed = "stdout"
+        return self._follow_stream(
+            [{"line": "out", "timestamp": 1_700_000_000, "stream": "stdout"}]
+        )
 
-    async def follow_stderr_json_async(self, process):
-        return _TRACE_ID, [
-            json.dumps({"line": "err", "timestamp": 1_700_000_001, "stream": "stderr"})
-        ]
+    def follow_stderr_stream(self, process):
+        assert process == "101"
+        self.followed = "stderr"
+        return self._follow_stream(
+            [{"line": "err", "timestamp": 1_700_000_001, "stream": "stderr"}]
+        )
 
-    async def follow_output_json_async(self, process):
-        return _TRACE_ID, [
-            json.dumps(
-                {"line": "hello", "timestamp": 1_700_000_000, "stream": "stdout"}
-            )
-        ]
+    def follow_output_stream(self, process):
+        assert process == "101"
+        self.followed = "output"
+        return self._follow_stream(
+            [
+                {"line": "hello", "timestamp": 1_700_000_000, "stream": "stdout"},
+                {"line": "world", "timestamp": 1_700_000_001, "stream": "stdout"},
+            ]
+        )
+
+    def _follow_stream(self, events):
+        self.follow_stream = _FakeOutputStream(events, error=self.follow_error)
+        return self.follow_stream
 
     async def run_process_json_async(self, payload_json):
         self.run_payload_json = payload_json
@@ -432,33 +478,63 @@ class TestAsyncSandboxRustBackend(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(traced.line_count, 3)
 
-    async def test_follow_stdout_returns_traced_iterator(self):
-        sandbox, _ = _make_async_sandbox()
+    async def test_follow_stdout_streams_events_live(self):
+        sandbox, fake = _make_async_sandbox()
 
-        events = await sandbox.follow_stdout(101)
+        stream = sandbox.follow_stdout(101)
+
+        self.assertIsInstance(stream, AsyncOutputStream)
+        self.assertEqual(fake.followed, "stdout")
+        lines = []
+        async for event in stream:
+            self.assertIsNone(stream.trace_id)
+            lines.append(event.line)
+        self.assertEqual(lines, ["out"])
+        self.assertEqual(stream.trace_id, _TRACE_ID)
+
+    async def test_follow_stderr_await_collects_traced_iterator(self):
+        sandbox, fake = _make_async_sandbox()
+
+        events = await sandbox.follow_stderr(101)
 
         self.assertIsInstance(events, TracedIterator)
         self.assertEqual(events.trace_id, _TRACE_ID)
-        items = list(events)
-        self.assertEqual([e.line for e in items], ["out"])
+        self.assertEqual(fake.followed, "stderr")
+        self.assertEqual([e.line for e in events], ["err"])
 
-    async def test_follow_stderr_returns_traced_iterator(self):
-        sandbox, _ = _make_async_sandbox()
+    async def test_follow_output_pulls_one_event_at_a_time(self):
+        sandbox, fake = _make_async_sandbox()
 
-        events = await sandbox.follow_stderr(101)
-        items = list(events)
+        stream = sandbox.follow_output(101)
 
-        self.assertEqual([e.line for e in items], ["err"])
+        self.assertEqual(fake.follow_stream.pending, 2)
+        first = await stream.__anext__()
+        self.assertEqual(first.line, "hello")
+        self.assertEqual(fake.follow_stream.pending, 1)
+        self.assertEqual((await stream.__anext__()).line, "world")
+        with self.assertRaises(StopAsyncIteration):
+            await stream.__anext__()
 
-    async def test_follow_output_returns_traced_iterator(self):
-        sandbox, _ = _make_async_sandbox()
+    async def test_follow_output_context_manager_closes_stream(self):
+        sandbox, fake = _make_async_sandbox()
 
-        events = await sandbox.follow_output(101)
-        items = list(events)
+        async with sandbox.follow_output(101) as stream:
+            self.assertEqual((await stream.__anext__()).line, "hello")
 
-        self.assertEqual(len(items), 1)
-        self.assertEqual(items[0].line, "hello")
-        self.assertEqual(items[0].stream, "stdout")
+        self.assertTrue(fake.follow_stream.closed)
+
+    async def test_follow_output_error_maps_to_sandbox_error(self):
+        fake = _FakeAsyncRustProxyClient()
+        fake.follow_error = RuntimeError("stream dropped")
+        sandbox, _ = _make_async_sandbox(fake)
+
+        lines = []
+        with self.assertRaises(SandboxError) as ctx:
+            async for event in sandbox.follow_output(101):
+                lines.append(event.line)
+
+        self.assertEqual(lines, ["hello", "world"])
+        self.assertIn("stream dropped", str(ctx.exception))
 
     async def test_read_file_returns_bytes(self):
         sandbox, fake = _make_async_sandbox()

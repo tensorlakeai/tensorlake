@@ -76,6 +76,62 @@ if TYPE_CHECKING:
     from .async_client import AsyncSandboxClient
 
 
+class AsyncOutputStream:
+    """Live output of a sandbox process for asyncio code.
+
+    Use ``async for event in sandbox.follow_output(pid)`` to receive each
+    ``OutputEvent`` as the sandbox emits it. The loop ends when the process
+    exits and the sandbox closes the stream.
+
+    Awaiting the stream instead collects every event and returns a
+    ``TracedIterator`` once the process exits. This keeps
+    ``events = await sandbox.follow_output(pid)`` working.
+
+    Use the stream as an async context manager, or call ``close()``, to stop
+    early. ``trace_id`` is the W3C trace ID of the follow request. It is
+    ``None`` until the stream ends.
+    """
+
+    def __init__(self, native: Any) -> None:
+        self._native = native
+
+    @property
+    def trace_id(self) -> str | None:
+        return self._native.trace_id()
+
+    def __aiter__(self) -> AsyncOutputStream:
+        return self
+
+    async def __anext__(self) -> OutputEvent:
+        try:
+            raw = await self._native.next_async()
+        except Exception as e:
+            _raise_as_sandbox_error(e)
+        if raw is None:
+            raise StopAsyncIteration
+        return OutputEvent.model_validate_json(raw)
+
+    def __await__(self):
+        return self._collect().__await__()
+
+    async def _collect(self) -> TracedIterator[OutputEvent]:
+        items = [event async for event in self]
+        return TracedIterator(self.trace_id, items)
+
+    def close(self) -> None:
+        """Stop following. The sandbox process keeps running."""
+        self._native.close()
+
+    async def __aenter__(self) -> AsyncOutputStream:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        self.close()
+
+    def __repr__(self) -> str:
+        return f"AsyncOutputStream(trace_id={self.trace_id!r})"
+
+
 class AsyncSandbox:
     """Async client for interacting with a running sandbox.
 
@@ -1318,57 +1374,66 @@ class AsyncSandbox:
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    async def follow_stdout(
+    def follow_stdout(
         self,
         process: int | str = _PROCESS_ARG_UNSET,
         *,
         pid: int | str = _PROCESS_ARG_UNSET,
-    ) -> TracedIterator[OutputEvent]:
-        """Follow stdout output events by PID or process name given on creation."""
+    ) -> AsyncOutputStream:
+        """Follow a process's stdout as a live stream.
+
+        Use ``async for`` to receive each ``OutputEvent`` as the sandbox
+        emits it, or ``await`` the result to collect all events after the
+        process exits.
+
+        Args:
+            process: PID or process name given on creation.
+        """
         seg = _resolve_process_arg(process, pid)
         try:
-            trace_id, events_json = await self._rust_client.follow_stdout_json_async(
-                seg
-            )
-            return TracedIterator(
-                trace_id, [OutputEvent.model_validate_json(ej) for ej in events_json]
-            )
+            return AsyncOutputStream(self._rust_client.follow_stdout_stream(seg))
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    async def follow_stderr(
+    def follow_stderr(
         self,
         process: int | str = _PROCESS_ARG_UNSET,
         *,
         pid: int | str = _PROCESS_ARG_UNSET,
-    ) -> TracedIterator[OutputEvent]:
-        """Follow stderr output events by PID or process name given on creation."""
+    ) -> AsyncOutputStream:
+        """Follow a process's stderr as a live stream.
+
+        Use ``async for`` to receive each ``OutputEvent`` as the sandbox
+        emits it, or ``await`` the result to collect all events after the
+        process exits.
+
+        Args:
+            process: PID or process name given on creation.
+        """
         seg = _resolve_process_arg(process, pid)
         try:
-            trace_id, events_json = await self._rust_client.follow_stderr_json_async(
-                seg
-            )
-            return TracedIterator(
-                trace_id, [OutputEvent.model_validate_json(ej) for ej in events_json]
-            )
+            return AsyncOutputStream(self._rust_client.follow_stderr_stream(seg))
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    async def follow_output(
+    def follow_output(
         self,
         process: int | str = _PROCESS_ARG_UNSET,
         *,
         pid: int | str = _PROCESS_ARG_UNSET,
-    ) -> TracedIterator[OutputEvent]:
-        """Follow combined output events by PID or process name given on creation."""
+    ) -> AsyncOutputStream:
+        """Follow a process's combined stdout and stderr as a live stream.
+
+        Use ``async for`` to receive each ``OutputEvent`` as the sandbox
+        emits it, or ``await`` the result to collect all events after the
+        process exits.
+
+        Args:
+            process: PID or process name given on creation.
+        """
         seg = _resolve_process_arg(process, pid)
         try:
-            trace_id, events_json = await self._rust_client.follow_output_json_async(
-                seg
-            )
-            return TracedIterator(
-                trace_id, [OutputEvent.model_validate_json(ej) for ej in events_json]
-            )
+            return AsyncOutputStream(self._rust_client.follow_output_stream(seg))
         except Exception as e:
             _raise_as_sandbox_error(e)
 
