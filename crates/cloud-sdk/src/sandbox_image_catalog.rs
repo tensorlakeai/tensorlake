@@ -439,6 +439,10 @@ fn tidy_error(error: SdkError) -> SdkError {
 /// The CAS image registry half of the catalog, reached through the authenticated
 /// `/images/v4` ingress path of the API host (or `TENSORLAKE_IMAGE_SERVICE_URL`
 /// for local development, which then includes the service's `/v1` prefix).
+/// Paths are prefix-relative and use the 2026-10-21 URL shapes: the image
+/// collection is the root (`/`), ids live under `/id/`, names under `/names/`,
+/// and adoption is `/from-snapshot`. The service keeps the older spellings
+/// mounted for older SDKs.
 #[derive(Clone)]
 pub struct ImageServiceCatalog {
     client: Client,
@@ -465,7 +469,7 @@ impl ImageServiceCatalog {
             }
             let request = self
                 .client
-                .build_get_json_request("/images", Some(&query))?;
+                .build_get_json_request("/", Some(&query))?;
             let page = self
                 .client
                 .execute_json::<ImageServiceListPage>(request)
@@ -487,13 +491,13 @@ impl ImageServiceCatalog {
     /// The image registered under `name` in the caller's project, or a global
     /// image of that name. `Ok(None)` only on a clean 404.
     pub async fn get_by_name(&self, name: &str) -> Result<Option<SandboxTemplate>, SdkError> {
-        self.get_optional(&format!("/images/name/{name}")).await
+        self.get_optional(&format!("/names/{name}")).await
     }
 
     /// The image with the `image_` id `image_id`, when it is the caller's or
     /// global. `Ok(None)` only on a clean 404.
     pub async fn get_by_id(&self, image_id: &str) -> Result<Option<SandboxTemplate>, SdkError> {
-        self.get_optional(&format!("/images/{image_id}")).await
+        self.get_optional(&format!("/id/{image_id}")).await
     }
 
     async fn get_optional(&self, path: &str) -> Result<Option<SandboxTemplate>, SdkError> {
@@ -515,13 +519,13 @@ impl ImageServiceCatalog {
     /// Deleting removes the published image only; a name whose only state is
     /// an unfinished first build has no image and answers 404.
     pub async fn delete_by_name(&self, name: &str) -> Result<bool, SdkError> {
-        self.delete_optional(&format!("/images/name/{name}")).await
+        self.delete_optional(&format!("/names/{name}")).await
     }
 
     /// Delete the project's image with the `image_` id `image_id`; the same
     /// answers as [`Self::delete_by_name`].
     pub async fn delete_by_id(&self, image_id: &str) -> Result<bool, SdkError> {
-        self.delete_optional(&format!("/images/{image_id}")).await
+        self.delete_optional(&format!("/id/{image_id}")).await
     }
 
     /// `Ok(true)` on any success (204 done, 202 deletion in progress),
@@ -685,7 +689,7 @@ impl ImageServiceCatalog {
         })?;
         crate::image_service_builds::admit_direct(
             &self.client,
-            "/images/from-snapshot",
+            "/from-snapshot",
             &body,
             request_id,
             wait,

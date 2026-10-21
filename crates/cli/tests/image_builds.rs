@@ -310,7 +310,7 @@ async fn build_wait_ctrl_c_during_the_initial_lookup_cancels_by_build_id() {
         hang("GET", "/images/v4/builds/build-7", Duration::from_secs(20)),
         reply(
             "POST",
-            "/images/v4/builds/cancel",
+            "/images/v4/builds/build-7/cancel",
             200,
             json!({"outcome": "cancelled", "build": build_json("build-7", "cancelled", None)}),
         ),
@@ -342,9 +342,10 @@ async fn build_wait_ctrl_c_during_the_initial_lookup_cancels_by_build_id() {
     assert!(stderr.contains("Build build-7 cancelled"), "{stderr}");
     let cancel = requests
         .iter()
-        .find(|request| request.path() == "/images/v4/builds/cancel")
+        .find(|request| request.path() == "/images/v4/builds/build-7/cancel")
         .expect("cancel handshake by build id");
-    assert_eq!(cancel.json(), json!({"build_id": "build-7"}));
+    // The build id rides in the path; the by-id cancel carries no body.
+    assert_eq!(cancel.json(), Value::Null);
 }
 
 #[tokio::test]
@@ -356,7 +357,7 @@ async fn build_cancel_by_build_id_is_sufficient_and_distinguishes_outcomes() {
             introspection(),
             reply(
                 "POST",
-                "/images/v4/builds/cancel",
+                "/images/v4/builds/build-1/cancel",
                 200,
                 json!({"outcome": "cancelled", "build": build_json("build-1", "cancelled", None)}),
             ),
@@ -367,7 +368,9 @@ async fn build_cancel_by_build_id_is_sufficient_and_distinguishes_outcomes() {
     assert!(cancelled.output.status.success(), "{}", cancelled.stderr());
     assert_eq!(cancelled.stdout().trim(), "Build build-1 cancelled.");
     assert_eq!(cancelled.requests.len(), 1);
-    assert_eq!(cancelled.requests[0].json(), json!({"build_id": "build-1"}));
+    assert_eq!(cancelled.requests[0].path(), "/images/v4/builds/build-1/cancel");
+    // The build id rides in the path; the by-id cancel carries no body.
+    assert_eq!(cancelled.requests[0].json(), Value::Null);
     assert!(cancelled.requests[0].header("idempotency-key").is_none());
 
     let completed = run(
@@ -376,7 +379,7 @@ async fn build_cancel_by_build_id_is_sufficient_and_distinguishes_outcomes() {
             introspection(),
             reply(
                 "POST",
-                "/images/v4/builds/cancel",
+                "/images/v4/builds/build-1/cancel",
                 200,
                 json!({
                     "outcome": "already_completed",
@@ -407,7 +410,7 @@ async fn build_cancel_by_build_id_is_sufficient_and_distinguishes_outcomes() {
             introspection(),
             reply(
                 "POST",
-                "/images/v4/builds/cancel",
+                "/images/v4/builds/build-1/cancel",
                 200,
                 json!({"outcome": "already_cancelled", "build": build_json("build-1", "cancelled", None)}),
             ),
@@ -426,7 +429,7 @@ async fn build_cancel_by_build_id_is_sufficient_and_distinguishes_outcomes() {
             introspection(),
             reply(
                 "POST",
-                "/images/v4/builds/cancel",
+                "/images/v4/builds/build-x/cancel",
                 404,
                 json!({"error": "build 'build-x' not found"}),
             ),
@@ -831,7 +834,7 @@ async fn cas_ctrl_c_cancels_by_build_id_and_exits_with_the_interrupt_status() {
         ),
         reply(
             "POST",
-            "/images/v4/builds/cancel",
+            "/images/v4/builds/build-5/cancel",
             200,
             json!({"outcome": "cancelled", "build": build_json("build-5", "cancelled", None)}),
         ),
@@ -864,9 +867,10 @@ async fn cas_ctrl_c_cancels_by_build_id_and_exits_with_the_interrupt_status() {
     assert!(stderr.contains("Build build-5 cancelled"), "{stderr}");
     let cancel = requests
         .iter()
-        .find(|request| request.path() == "/images/v4/builds/cancel")
+        .find(|request| request.path() == "/images/v4/builds/build-5/cancel")
         .expect("cancel handshake");
-    assert_eq!(cancel.json(), json!({"build_id": "build-5"}));
+    // The build id rides in the path; the by-id cancel carries no body.
+    assert_eq!(cancel.json(), Value::Null);
     assert_eq!(
         requests
             .iter()
@@ -975,14 +979,14 @@ async fn cas_register_retries_a_pending_registration_and_keeps_its_final_output(
             ),
             reply(
                 "POST",
-                "/images/v4/images/from-snapshot",
+                "/images/v4/from-snapshot",
                 503,
                 pending.clone(),
             ),
-            reply("POST", "/images/v4/images/from-snapshot", 503, pending),
+            reply("POST", "/images/v4/from-snapshot", 503, pending),
             reply(
                 "POST",
-                "/images/v4/images/from-snapshot",
+                "/images/v4/from-snapshot",
                 201,
                 image_record("image_reg", "img"),
             ),
@@ -1013,7 +1017,7 @@ async fn cas_register_retries_a_pending_registration_and_keeps_its_final_output(
     let adoptions: Vec<_> = registered
         .requests
         .iter()
-        .filter(|request| request.path() == "/images/v4/images/from-snapshot")
+        .filter(|request| request.path() == "/images/v4/from-snapshot")
         .collect();
     assert_eq!(adoptions.len(), 3, "{:?}", registered.lines());
     let keys: std::collections::HashSet<_> = adoptions
@@ -1052,7 +1056,7 @@ async fn cas_register_retries_a_pending_registration_and_keeps_its_final_output(
             ),
             reply(
                 "POST",
-                "/images/v4/images/from-snapshot",
+                "/images/v4/from-snapshot",
                 201,
                 image_record("image_reg", "img"),
             ),

@@ -111,7 +111,7 @@ async fn names_resolve_in_the_image_service_first_and_fall_through_on_404() {
     assert_eq!(image.snapshot_id.as_deref(), Some("snap123"));
     assert_eq!(
         server.await.unwrap(),
-        vec!["GET /images/v4/images/name/team/app HTTP/1.1"]
+        vec!["GET /images/v4/names/team/app HTTP/1.1"]
     );
 
     let (catalog, server) = scripted_server(vec![
@@ -124,7 +124,7 @@ async fn names_resolve_in_the_image_service_first_and_fall_through_on_404() {
     assert_eq!(
         server.await.unwrap(),
         vec![
-            "GET /images/v4/images/name/team/app HTTP/1.1",
+            "GET /images/v4/names/team/app HTTP/1.1",
             "GET /platform/v1/organizations/org-1/projects/proj-1/sandbox-templates/by-name/team%2Fapp HTTP/1.1",
         ]
     );
@@ -136,7 +136,7 @@ async fn ids_go_straight_to_their_catalog() {
     assert!(catalog.find("image_abc123").await.unwrap().is_some());
     assert_eq!(
         server.await.unwrap(),
-        vec!["GET /images/v4/images/image_abc123 HTTP/1.1"]
+        vec!["GET /images/v4/id/image_abc123 HTTP/1.1"]
     );
 
     let (catalog, server) = scripted_server(vec![(200, LEGACY_RECORD.to_string())]).await;
@@ -163,7 +163,7 @@ async fn mixed_case_names_use_the_cas_spelling_then_the_exact_legacy_spelling() 
     assert_eq!(
         server.await.unwrap(),
         vec![
-            "GET /images/v4/images/name/myimage HTTP/1.1",
+            "GET /images/v4/names/myimage HTTP/1.1",
             "GET /platform/v1/organizations/org-1/projects/proj-1/sandbox-templates/by-name/MyImage HTTP/1.1",
         ]
     );
@@ -221,7 +221,7 @@ async fn not_found_only_when_both_catalogs_miss() {
     assert_eq!(
         server.await.unwrap(),
         vec![
-            "DELETE /images/v4/images/name/team/app HTTP/1.1",
+            "DELETE /images/v4/names/team/app HTTP/1.1",
             "DELETE /platform/v1/organizations/org-1/projects/proj-1/sandbox-templates/by-name/team%2Fapp HTTP/1.1",
         ]
     );
@@ -233,7 +233,7 @@ async fn deletes_dispatch_like_lookups_and_report_refusals() {
     catalog.delete("image_abc123").await.unwrap();
     assert_eq!(
         server.await.unwrap(),
-        vec!["DELETE /images/v4/images/image_abc123 HTTP/1.1"]
+        vec!["DELETE /images/v4/id/image_abc123 HTTP/1.1"]
     );
 
     let (catalog, server) = scripted_server(vec![(204, String::new())]).await;
@@ -340,12 +340,12 @@ async fn listing_merges_both_catalogs_newest_first_and_fails_whole() {
     assert!(
         requests
             .iter()
-            .any(|line| line.starts_with("GET /images/v4/images?page_size=100 "))
+            .any(|line| line.starts_with("GET /images/v4/?page_size=100 "))
     );
     assert!(
         requests
             .iter()
-            .any(|line| line.starts_with("GET /images/v4/images?page_size=100&cursor=c2 "))
+            .any(|line| line.starts_with("GET /images/v4/?page_size=100&cursor=c2 "))
     );
 
     // Either catalog failing fails the whole listing.
