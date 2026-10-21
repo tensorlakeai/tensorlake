@@ -87,6 +87,10 @@ function makeClient(proxy: FakeFns): FakeFns {
   // transient retries, budgets) is tested in Rust.
   const client: FakeFns = {
     createSandbox: vi.fn(tracedJson()),
+    // The blocking create's record, as `createSandbox` scripts it.
+    createSandboxAndWait: vi.fn((requestJson: string) =>
+      client.createSandbox(requestJson),
+    ),
     createSandboxNoWait: vi.fn(async (requestJson: string) => {
       const { traceId, json } = await client.createSandbox(requestJson);
       const { status, ...rest } = JSON.parse(json) as Record<string, unknown>;

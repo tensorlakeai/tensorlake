@@ -651,8 +651,8 @@ export class Sandbox {
    *
    * Covers both fresh sandbox creation and restore-from-snapshot (set
    * `snapshotId`). With `wait` unset or `true` it blocks until the sandbox
-   * is `Running`: the create is sent with `wait: false` and the sandbox is
-   * polled every two seconds, with `requestTimeout` as the wait budget.
+   * is `Running`: the server waits and answers as soon as it runs, with
+   * `requestTimeout` as the wait budget.
    *
    * With `wait: false` it returns a {@link PendingSandbox} at once:
    * `pending.ready()` waits for it, `pending.status()` looks at it, and

@@ -866,7 +866,10 @@ export interface CreateAndConnectOptions extends CreateSandboxOptions {
    * false: throw `SandboxPending` and leave the sandbox queued.
    */
   cancelOnTimeout?: boolean;
-  /** Seconds between readiness polls. Default: 2. */
+  /**
+   * Seconds between readiness polls once the server's own wait has run out.
+   * Default: 2.
+   */
   pollInterval?: number;
 }
 

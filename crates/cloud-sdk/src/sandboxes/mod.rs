@@ -6,7 +6,7 @@ pub mod tunnel;
 use futures::{StreamExt, TryStreamExt};
 use reqwest::Method;
 use reqwest::StatusCode;
-use reqwest::header::{ACCEPT, CONTENT_LENGTH};
+use reqwest::header::{ACCEPT, CONTENT_LENGTH, HeaderValue};
 use serde_json::Value;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -15,7 +15,7 @@ use tokio_util::io::ReaderStream;
 
 use crate::{
     client::{
-        Client, Traced, build_bytes_post_request_from_builder,
+        Client, REQUEST_TIMEOUT_GRACE_HEADER, Traced, build_bytes_post_request_from_builder,
         build_empty_post_request_from_builder,
     },
     error::{SdkError, TransportFailure},
@@ -41,6 +41,11 @@ pub const TERMINATION_REASON_CANCELLED: &str = "cancelled";
 /// rollout keeps going. A pending sandbox is not routable yet, so the
 /// lifecycle gateway can answer a transient proxy error until it starts.
 const WAIT_TRANSIENT_RETRIES: usize = 10;
+
+/// Most of the request timeout [`SandboxesClient::create_and_wait`] leaves
+/// for the server's answer, so its `timeout` reaches the client before the
+/// client's own deadline. A quarter of shorter timeouts is used instead.
+const CREATE_RESPONSE_GRACE: Duration = Duration::from_secs(5);
 /// Most pages a listing follows. Each page after the first asks for
 /// `LIST_PAGE_LIMIT` items, so this bounds a listing at about 100,000.
 const MAX_LIST_PAGES: usize = 1000;
@@ -439,9 +444,8 @@ impl SandboxesClient {
 
     /// Blocking create: the server waits for readiness for at most the
     /// client's request timeout and answers `status: timeout` (HTTP 504)
-    /// when it runs out, leaving the sandbox pending. Prefer
-    /// [`Self::create_no_wait`] followed by [`Self::wait_until_settled`]; this
-    /// shape is kept for callers that depend on the server-side wait.
+    /// when it runs out, leaving the sandbox pending. A startup failure is an
+    /// HTTP 422 error; [`Self::create_and_wait`] returns it as a record.
     pub async fn create(
         &self,
         request: &CreateSandboxRequest,
@@ -454,6 +458,40 @@ impl SandboxesClient {
             .build_post_json_request(Method::POST, &uri, request)?;
         self.client
             .execute_json_allow_status(req, &[StatusCode::GATEWAY_TIMEOUT])
+            .await
+    }
+
+    /// Blocking create for create-and-connect. The server waits on its own
+    /// state changes and answers as soon as the sandbox runs (`running`),
+    /// fails before running (`failed`, HTTP 422) or the wait runs out
+    /// (`timeout`, HTTP 504, the sandbox stays queued). Every answer is a
+    /// record carrying the sandbox id. The grace header makes the server
+    /// answer before this client's own request timeout.
+    pub async fn create_and_wait(
+        &self,
+        request: &CreateSandboxRequest,
+    ) -> Result<Traced<CreateSandboxResponse>, SdkError> {
+        validate_mount_snapshot_pins(&request.file_systems)?;
+        validate_mount_owners(&request.file_systems)?;
+        let uri = self.endpoint("sandboxes");
+        let mut req = self
+            .client
+            .build_post_json_request(Method::POST, &uri, request)?;
+        if let Some(timeout) = self.client.request_timeout() {
+            let grace = CREATE_RESPONSE_GRACE.min(timeout / 4);
+            req.headers_mut().insert(
+                REQUEST_TIMEOUT_GRACE_HEADER,
+                HeaderValue::from(grace.as_millis() as u64),
+            );
+        }
+        self.client
+            .execute_json_allow_status(
+                req,
+                &[
+                    StatusCode::GATEWAY_TIMEOUT,
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                ],
+            )
             .await
     }
 

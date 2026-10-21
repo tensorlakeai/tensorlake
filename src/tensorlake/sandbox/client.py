@@ -6,7 +6,7 @@ import json
 import os
 import time
 import warnings
-from typing import Literal, NoReturn, overload
+from typing import Any, Literal, NoReturn, overload
 from urllib.parse import urlparse
 
 from tensorlake._tracing import USER_AGENT, Traced, TracedIterator
@@ -715,6 +715,24 @@ class SandboxClient:
             )
         except Exception as e:
             _raise_as_sandbox_error(e)
+
+    def _create_and_wait(self, **create_args: Any) -> Traced[CreateSandboxResponse]:
+        """Blocking create for :meth:`create_and_connect`: the server answers
+        ``running``, ``failed`` or ``timeout`` (the sandbox stays queued), each
+        with the sandbox id. Its wait leaves part of this client's request
+        timeout for the answer."""
+        request_model = _build_create_request(**create_args)
+        try:
+            trace_id, response_json = self._rust_client.create_sandbox_and_wait(
+                request_json=request_model.model_dump_json(
+                    by_alias=True, exclude_none=True
+                )
+            )
+        except Exception as e:
+            _raise_as_sandbox_error(e)
+        return Traced(
+            trace_id, CreateSandboxResponse.model_validate_json(response_json)
+        )
 
     def _request_pending(
         self,
@@ -2090,10 +2108,9 @@ class SandboxClient:
     ) -> "Sandbox":
         """Create a sandbox, wait for it to start, and return a connected Sandbox.
 
-        This is ``create(..., wait=False)`` followed by
-        :meth:`PendingSandbox.ready` polling every ``poll_interval`` seconds,
-        with ``request_timeout`` as the wait budget, in one call. The
-        returned Sandbox auto-terminates when used as a context manager.
+        The create waits on the server, which answers as soon as the sandbox
+        runs, with ``request_timeout`` as the wait budget. The returned
+        Sandbox auto-terminates when used as a context manager.
 
         **When the wait runs out the sandbox is not deleted.** A
         ``SandboxPending`` is raised with the sandbox id, and the sandbox
@@ -2157,7 +2174,8 @@ class SandboxClient:
                 runs out while it is still pending, then raise
                 ``SandboxError``. Default False: raise ``SandboxPending`` and
                 leave the sandbox queued.
-            poll_interval: Seconds between readiness polls (default 2).
+            poll_interval: Seconds between readiness polls once the
+                server's own wait has run out (default 2).
 
         Returns:
             Connected Sandbox instance (auto-terminates in context manager)
@@ -2185,44 +2203,12 @@ class SandboxClient:
         # may fall back to the requested name when caching info locally.
         requested_name = None if pool_id is not None else name
         if pool_id is not None:
-            # Pool claims have no `wait: false`: the server answers from its
-            # own wait, so a claim is often already running.
             result = request_client.claim(pool_id, file_systems=file_systems)
-            if result.status == SandboxStatus.RUNNING:
-                sandbox = request_client.connect(
-                    result.sandbox_id,
-                    proxy_url=proxy_url,
-                    routing_hint=result.routing_hint,
-                    request_timeout=wait_timeout,
-                    _routing_info=result,
-                )
-                sandbox._sandbox_id = result.sandbox_id
-                sandbox._owns_sandbox = True
-                sandbox._lifecycle_client = request_client
-                sandbox._trace_id = result.trace_id
-                sandbox._cached_info = SandboxInfo.model_construct(
-                    sandbox_id=result.sandbox_id,
-                    status=result.status,
-                    ingress_endpoint=result.ingress_endpoint,
-                    sandbox_url=result.sandbox_url,
-                    name=result.name or requested_name,
-                )
-                return sandbox
-            if result.status in (
-                SandboxStatus.SUSPENDED,
-                SandboxStatus.TERMINATED,
-                SandboxStatus.FAILED,
-            ):
-                raise _startup_failure(
-                    result.sandbox_id,
-                    result.status,
-                    error_details=result.error_details,
-                    termination_reason=result.termination_reason or result.reason,
-                )
-            sandbox_id = result.sandbox_id
-            trace_id = result.trace_id
         else:
-            pending = request_client._request_pending(
+            # The server waits on its own state changes and answers as soon
+            # as the sandbox runs, fails, or the request timeout (less a
+            # response grace) runs out. A timed-out sandbox stays queued.
+            result = request_client._create_and_wait(
                 image=image,
                 cpus=cpus,
                 memory_mb=memory_mb,
@@ -2240,41 +2226,43 @@ class SandboxClient:
                 gpu=gpu,
                 max_pending_secs=max_pending_secs,
             )
-            sandbox_id = pending.sandbox_id
-            trace_id = pending.trace_id
-            # Fast path: a server without `wait: false` may already answer
-            # running, with a short-lived routing hint worth using directly.
-            if pending.state == SandboxStatus.RUNNING:
-                sandbox = request_client.connect(
-                    sandbox_id,
-                    proxy_url=proxy_url,
-                    routing_hint=pending.routing_hint,
-                    request_timeout=wait_timeout,
-                    _routing_info=pending,
-                )
-                sandbox._sandbox_id = sandbox_id
-                sandbox._owns_sandbox = True
-                sandbox._lifecycle_client = request_client
-                sandbox._trace_id = trace_id
-                sandbox._cached_info = SandboxInfo.model_construct(
-                    sandbox_id=sandbox_id,
-                    status=SandboxStatus.RUNNING,
-                    ingress_endpoint=pending.ingress_endpoint,
-                    sandbox_url=pending.sandbox_url,
-                    name=pending.name or requested_name,
-                )
-                return sandbox
-            if pending.state in (SandboxStatus.TERMINATED, SandboxStatus.FAILED):
-                raise _startup_failure(
-                    sandbox_id,
-                    pending.state,
-                    error_details=pending.error_details,
-                    termination_reason=pending.termination_reason or pending.reason,
-                )
+        if result.status == SandboxStatus.RUNNING:
+            sandbox = request_client.connect(
+                result.sandbox_id,
+                proxy_url=proxy_url,
+                routing_hint=result.routing_hint,
+                request_timeout=wait_timeout,
+                _routing_info=result,
+            )
+            sandbox._sandbox_id = result.sandbox_id
+            sandbox._owns_sandbox = True
+            sandbox._lifecycle_client = request_client
+            sandbox._trace_id = result.trace_id
+            sandbox._cached_info = SandboxInfo.model_construct(
+                sandbox_id=result.sandbox_id,
+                status=result.status,
+                ingress_endpoint=result.ingress_endpoint,
+                sandbox_url=result.sandbox_url,
+                name=result.name or requested_name,
+            )
+            return sandbox
+        if result.status in (
+            SandboxStatus.SUSPENDED,
+            SandboxStatus.TERMINATED,
+            SandboxStatus.FAILED,
+        ):
+            raise _startup_failure(
+                result.sandbox_id,
+                result.status,
+                error_details=result.error_details,
+                termination_reason=result.termination_reason or result.reason,
+            )
+        sandbox_id = result.sandbox_id
+        trace_id = result.trace_id
 
-        # A `timeout` claim or a pending create: the sandbox exists and keeps
-        # its place in the queue. Poll it with whatever budget is left (a
-        # zero budget observes its state once without sleeping).
+        # A `timeout` answer: the sandbox exists and keeps its place in the
+        # queue. Poll it with whatever budget is left (a zero budget observes
+        # its state once without sleeping).
         observed = request_client._wait_for_sandbox(
             sandbox_id, _remaining_budget(deadline), poll_interval
         )
