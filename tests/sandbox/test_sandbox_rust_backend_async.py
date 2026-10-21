@@ -1,3 +1,4 @@
+import asyncio
 import json
 import unittest
 from unittest.mock import AsyncMock
@@ -49,6 +50,10 @@ class _FakeOutputStream:
     @property
     def pending(self):
         return len(self._events)
+
+
+async def _never_finishes():
+    await asyncio.Event().wait()
 
 
 def _process_info_dict(pid: int = 101) -> dict:
@@ -501,6 +506,60 @@ class TestAsyncSandboxRustBackend(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events.trace_id, _TRACE_ID)
         self.assertEqual(fake.followed, "stderr")
         self.assertEqual([e.line for e in events], ["err"])
+
+    async def test_follow_output_is_schedulable_with_create_task(self):
+        sandbox, fake = _make_async_sandbox()
+
+        task = asyncio.create_task(sandbox.follow_output(101))
+        events = await task
+
+        self.assertIsInstance(events, TracedIterator)
+        self.assertEqual(events.trace_id, _TRACE_ID)
+        self.assertEqual([e.line for e in events], ["hello", "world"])
+        self.assertEqual(fake.followed, "output")
+
+    @unittest.skipUnless(hasattr(asyncio, "TaskGroup"), "TaskGroup needs 3.11+")
+    async def test_follow_stdout_is_schedulable_with_task_group(self):
+        sandbox, _ = _make_async_sandbox()
+
+        async with asyncio.TaskGroup() as tg:
+            task = tg.create_task(sandbox.follow_stdout(101))
+
+        self.assertEqual([e.line for e in task.result()], ["out"])
+
+    async def test_follow_output_task_cancel_propagates(self):
+        sandbox, _ = _make_async_sandbox()
+        stream = sandbox.follow_output(101)
+        stream._native.next_async = _never_finishes
+
+        task = asyncio.create_task(stream)
+        await asyncio.sleep(0)
+        task.cancel()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+    async def test_follow_output_close_ends_pending_task(self):
+        sandbox, fake = _make_async_sandbox()
+        stream = sandbox.follow_output(101)
+        gate = asyncio.Event()
+        real_next = fake.follow_stream.next_async
+
+        async def gated_next():
+            await gate.wait()
+            return await real_next()
+
+        fake.follow_stream.next_async = gated_next
+        task = asyncio.create_task(stream)
+        await asyncio.sleep(0)
+        self.assertFalse(task.done())
+
+        stream.close()
+        self.assertTrue(fake.follow_stream.closed)
+        gate.set()
+        events = await task
+
+        self.assertEqual([e.line for e in events], ["hello", "world"])
 
     async def test_follow_output_pulls_one_event_at_a_time(self):
         sandbox, fake = _make_async_sandbox()

@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import Coroutine, Mapping
 from typing import TYPE_CHECKING, Any, Literal, overload
 from urllib.parse import urlparse
 
@@ -76,7 +76,7 @@ if TYPE_CHECKING:
     from .async_client import AsyncSandboxClient
 
 
-class AsyncOutputStream:
+class AsyncOutputStream(Coroutine[Any, Any, TracedIterator[OutputEvent]]):
     """Live output of a sandbox process for asyncio code.
 
     Use ``async for event in sandbox.follow_output(pid)`` to receive each
@@ -85,7 +85,9 @@ class AsyncOutputStream:
 
     Awaiting the stream instead collects every event and returns a
     ``TracedIterator`` once the process exits. This keeps
-    ``events = await sandbox.follow_output(pid)`` working.
+    ``events = await sandbox.follow_output(pid)`` working. The stream is
+    also a coroutine, so ``asyncio.create_task(sandbox.follow_output(pid))``
+    and ``TaskGroup.create_task(...)`` schedule that collection as before.
 
     Use the stream as an async context manager, or call ``close()``, to stop
     early. ``trace_id`` is the W3C trace ID of the follow request. It is
@@ -94,6 +96,7 @@ class AsyncOutputStream:
 
     def __init__(self, native: Any) -> None:
         self._native = native
+        self._collector: Coroutine[Any, Any, TracedIterator[OutputEvent]] | None = None
 
     @property
     def trace_id(self) -> str | None:
@@ -111,15 +114,36 @@ class AsyncOutputStream:
             raise StopAsyncIteration
         return OutputEvent.model_validate_json(raw)
 
+    # Coroutine protocol. ``asyncio.create_task`` and ``TaskGroup.create_task``
+    # drive the stream through ``send``/``throw`` as they would a coroutine
+    # returned by an ``async def`` follow method.
+
+    def _coroutine(self) -> Coroutine[Any, Any, TracedIterator[OutputEvent]]:
+        if self._collector is None:
+            self._collector = self._collect()
+        return self._collector
+
     def __await__(self):
-        return self._collect().__await__()
+        return self._coroutine().__await__()
+
+    def send(self, value: Any) -> Any:
+        return self._coroutine().send(value)
+
+    def throw(self, typ: Any, val: Any = None, tb: Any = None) -> Any:
+        if val is None and tb is None:
+            return self._coroutine().throw(typ)
+        return self._coroutine().throw(typ, val, tb)
 
     async def _collect(self) -> TracedIterator[OutputEvent]:
         items = [event async for event in self]
         return TracedIterator(self.trace_id, items)
 
     def close(self) -> None:
-        """Stop following. The sandbox process keeps running."""
+        """Stop following. The sandbox process keeps running.
+
+        A pending ``await`` or task on this stream ends normally with the
+        events received so far once the sandbox side closes.
+        """
         self._native.close()
 
     async def __aenter__(self) -> AsyncOutputStream:
