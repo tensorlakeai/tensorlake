@@ -776,6 +776,45 @@ pub struct SandboxInfo {
     /// guest mount path. Empty when no file systems are mounted.
     #[serde(default)]
     pub file_systems: Vec<FileSystemMount>,
+    /// Generation of the most recent file-system update the server accepted
+    /// (attach, detach, or create). Absent on servers that predate
+    /// file-system update tracking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_system_generation: Option<u64>,
+    /// Generation of the most recent file-system update the dataplane
+    /// reported as applied inside the guest. The update identified by
+    /// `file_system_generation` is live once this is at least that value.
+    /// Absent on servers that predate applied-generation tracking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_file_system_generation: Option<u64>,
+    /// Why the most recent file-system update was rejected by the dataplane,
+    /// when it was. The previously mounted file systems stay attached; the
+    /// sandbox keeps running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_system_update_error: Option<FileSystemUpdateError>,
+}
+
+/// A file-system update (attach or detach) the dataplane refused to apply.
+/// Reported on the sandbox until a later update supersedes it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FileSystemUpdateError {
+    /// Classification token, the same one a boot-time failure reports as
+    /// `termination_reason`: `FileSystemNotFound`, `FileSystemSnapshotNotFound`,
+    /// or `ConfigurationError`.
+    pub reason: String,
+    /// The dataplane's diagnostic text, carrying the mount path and the guest
+    /// daemon's reason.
+    pub error_message: String,
+    /// The mounts the rejected update asked for that are not applied.
+    #[serde(default)]
+    pub rejected_file_systems: Vec<FileSystemMount>,
+    /// Unix epoch milliseconds.
+    #[serde(default)]
+    pub rejected_at: u64,
+    /// The `file_system_generation` the rejected update was accepted as.
+    /// Absent on servers that predate applied-generation tracking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -904,6 +943,12 @@ pub struct SnapshotInfo {
     pub rootfs_disk_bytes: Option<u64>,
     #[serde(default)]
     pub snapshot_type: Option<SnapshotType>,
+    /// What the snapshot captures: `sandbox` (a user sandbox snapshot),
+    /// `rootfs_image`, `volume`, or `suspend_checkpoint` (the server-owned
+    /// checkpoint a suspended sandbox resumes from; listed only on request).
+    /// Absent on servers that predate snapshot kinds.
+    #[serde(default)]
+    pub kind: Option<String>,
     #[serde(default)]
     pub created_at: Option<serde_json::Value>,
 }
@@ -911,6 +956,16 @@ pub struct SnapshotInfo {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ListSnapshotsResponse {
     pub snapshots: Vec<SnapshotInfo>,
+}
+
+/// Query options for listing snapshots.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListSnapshotsParams {
+    /// Also list the `suspend_checkpoint` snapshots the server hides by
+    /// default. They belong to the suspend/resume lifecycle of their sandbox
+    /// and cannot seed a new sandbox.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub include_suspend_checkpoints: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1262,6 +1317,71 @@ mod tests {
             serde_json::to_value(&policy).unwrap()
         );
         assert!(out.get("network").is_none());
+    }
+
+    #[test]
+    fn sandbox_info_reads_file_system_update_tracking() {
+        let wire = serde_json::json!({
+            "sandbox_id": "sbx-1",
+            "namespace": "ns",
+            "status": "running",
+            "resources": {"cpus": 1.0, "memory_mb": 1024, "disk_mb": 10240},
+            "file_systems": [{"file_system_id": "skills", "mount_path": "/mnt/skills"}],
+            "file_system_generation": 4,
+            "applied_file_system_generation": 3,
+            "file_system_update_error": {
+                "reason": "ConfigurationError",
+                "error_message": "mount at /mnt/data overlaps the registered mount",
+                "rejected_file_systems": [{"file_system_id": "data", "mount_path": "/mnt/data"}],
+                "rejected_at": 1760400000000_u64,
+                "generation": 4
+            }
+        });
+        let info: SandboxInfo = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(info.file_system_generation, Some(4));
+        assert_eq!(info.applied_file_system_generation, Some(3));
+        let error = info.file_system_update_error.as_ref().unwrap();
+        assert_eq!(error.reason, "ConfigurationError");
+        assert_eq!(error.generation, Some(4));
+        assert_eq!(error.rejected_file_systems[0].mount_path, "/mnt/data");
+        let out = serde_json::to_value(&info).unwrap();
+        assert_eq!(
+            out["file_system_update_error"],
+            wire["file_system_update_error"]
+        );
+
+        // Servers that predate the tracking omit every field.
+        let mut legacy = wire;
+        let legacy = legacy.as_object_mut().unwrap();
+        legacy.remove("file_system_generation");
+        legacy.remove("applied_file_system_generation");
+        legacy.remove("file_system_update_error");
+        let info: SandboxInfo =
+            serde_json::from_value(serde_json::Value::Object(legacy.clone())).unwrap();
+        assert_eq!(info.file_system_generation, None);
+        assert_eq!(info.applied_file_system_generation, None);
+        assert_eq!(info.file_system_update_error, None);
+        let out = serde_json::to_value(&info).unwrap();
+        assert!(out.get("file_system_generation").is_none());
+        assert!(out.get("file_system_update_error").is_none());
+    }
+
+    #[test]
+    fn snapshot_info_reads_optional_kind() {
+        let wire = serde_json::json!({
+            "id": "snap-1",
+            "namespace": "ns",
+            "sandbox_id": "sbx-1",
+            "status": "completed",
+            "kind": "suspend_checkpoint"
+        });
+        let info: SnapshotInfo = serde_json::from_value(wire).unwrap();
+        assert_eq!(info.kind.as_deref(), Some("suspend_checkpoint"));
+        let info: SnapshotInfo = serde_json::from_value(serde_json::json!({
+            "id": "snap-1", "namespace": "ns", "sandbox_id": "sbx-1", "status": "completed"
+        }))
+        .unwrap();
+        assert_eq!(info.kind, None);
     }
 
     #[test]

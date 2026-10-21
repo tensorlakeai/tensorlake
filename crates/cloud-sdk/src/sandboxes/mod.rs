@@ -59,11 +59,11 @@ use models::{
     CreateSandboxResponse, CreateSnapshotRequest, CreateSnapshotResponse, DaemonInfo,
     DetachFileSystemRequest, FileSystemMount, GetSandboxLogsRequest, HealthResponse,
     ListArchivedSandboxesParams, ListArchivedSandboxesResponse, ListDirectoryResponse,
-    ListProcessesResponse, ListSandboxPoolsResponse, ListSandboxesResponse, ListSnapshotsResponse,
-    NetworkPolicyUpdate, OutputEvent, OutputResponse, ProcessInfo, RunProcessEvent,
-    SandboxAccepted, SandboxInfo, SandboxLogsResponse, SandboxPoolInfo, SandboxPoolRequest,
-    SandboxProcessLogFiltersResponse, SendSignalResponse, SignBlobRequest, SnapshotInfo,
-    SnapshotType, UpdateSandboxPoolRequest, UpdateSandboxRequest,
+    ListProcessesResponse, ListSandboxPoolsResponse, ListSandboxesResponse, ListSnapshotsParams,
+    ListSnapshotsResponse, NetworkPolicyUpdate, OutputEvent, OutputResponse, ProcessInfo,
+    RunProcessEvent, SandboxAccepted, SandboxInfo, SandboxLogsResponse, SandboxPoolInfo,
+    SandboxPoolRequest, SandboxProcessLogFiltersResponse, SendSignalResponse, SignBlobRequest,
+    SnapshotInfo, SnapshotType, UpdateSandboxPoolRequest, UpdateSandboxRequest,
 };
 
 pub const DEFAULT_SANDBOX_PROXY_URL: &str = "https://sandbox.tensorlake.ai";
@@ -851,7 +851,20 @@ impl SandboxesClient {
     }
 
     pub async fn list_snapshots(&self) -> Result<Traced<Vec<SnapshotInfo>>, SdkError> {
-        let uri = self.endpoint("snapshots");
+        self.list_snapshots_with(ListSnapshotsParams::default())
+            .await
+    }
+
+    /// Lists snapshots with query options, such as including the suspend
+    /// checkpoints the server hides by default.
+    pub async fn list_snapshots_with(
+        &self,
+        params: ListSnapshotsParams,
+    ) -> Result<Traced<Vec<SnapshotInfo>>, SdkError> {
+        let mut uri = self.endpoint("snapshots");
+        if params.include_suspend_checkpoints {
+            uri.push_str("?include_suspend_checkpoints=true");
+        }
         let req = self.client.request(Method::GET, &uri).build()?;
         Ok(self
             .client
