@@ -3,22 +3,21 @@
 Takes an :class:`Image` or a Dockerfile path and delegates the build to the
 Rust core (``tensorlake._cloud_sdk.build_sandbox_image``), which materializes
 the image inside a builder sandbox, snapshots the filesystem, and registers
-the snapshot as a named sandbox image: a legacy template by default
-(``POST /platform/v1/.../sandbox-templates``), or a CAS (content-addressed
-streaming) image through the Image Service with ``cas=True``. Lookups,
-listings and deletes go through the Rust core's merged catalog, so both
-families answer the same template-shaped record.
+the snapshot as a named sandbox image: a CAS (content-addressed streaming)
+image by default, or a legacy image with ``cas=False``. Lookups, listings
+and deletes go through the Rust core's merged catalog of the CAS and legacy
+image registries, so both families answer the same template-shaped record.
 
-CAS builds (``cas=True``) run as Image Service build operations: the build
-id is reported as a ``build_accepted`` event right after admission,
+CAS image builds (the default) run as build operations: the build id is
+reported as a ``build_accepted`` event right after admission,
 ``KeyboardInterrupt`` cancels the remote build through a bounded handshake
 (the outcome arrives as an ``interrupted`` event before the interrupt
 re-raises), and failures are the typed exceptions of
 :mod:`tensorlake.image.builds`, which also exposes start/get/wait/cancel for
-leaving a build running. Legacy builds (the default) keep their behavior:
-their callbacks' errors are swallowed, an interrupt is delivered only once
-the native call returns and sends no cancellation, and no Image Service
-request is made.
+leaving a build running. Legacy image builds (``cas=False``) keep their
+behavior: their callbacks' errors are swallowed, an interrupt is delivered
+only once the native call returns and sends no cancellation, and no CAS
+image request is made.
 
 This is the programmatic backend for :meth:`Image.build` and the
 ``tl sbx image create`` CLI command. The Rust core owns parsing and the
@@ -255,7 +254,10 @@ def _run_rust_image_create(
     ctx, token = _resolve_build_credentials(allow_pat=allow_pat)
     use_explicit_scope = allow_pat and ctx.api_key is None
 
-    emit({"type": "status", "message": f"Building image '{registered_name}'..."})
+    family = "CAS" if cas else "legacy"
+    emit(
+        {"type": "status", "message": f"Building {family} image '{registered_name}'..."}
+    )
 
     try:
         result_json = _rust_build_sandbox_image(
@@ -313,7 +315,8 @@ def _run_rust_image_import(
         {
             "type": "status",
             "message": (
-                f"Importing image '{image_reference}' as '{registered_name}'..."
+                f"Importing '{image_reference}' as "
+                f"{'CAS' if cas else 'legacy'} image '{registered_name}'..."
             ),
         }
     )
@@ -402,33 +405,42 @@ def _finish_image_registration(
 
 
 def delete_sandbox_image(image_name: str) -> None:
-    """Delete a registered sandbox image by name or id.
+    """Delete a registered CAS or legacy sandbox image by name or id.
 
     Both families are covered: an ``image_`` id or a name registered in the
-    Image Service deletes a CAS image, a ``sandbox_template_`` id or a name
-    registered only in the platform registry deletes a legacy image. Uses the
+    CAS image registry deletes a CAS image, a ``sandbox_template_`` id or a
+    name registered only in the legacy image registry deletes a legacy image. Uses the
     same environment-based Tensorlake auth and namespace context as
     :func:`build_sandbox_image`.
 
-    Deleting removes a *published* image. An unfinished CAS build is
+    A name is deleted from both the CAS and the legacy image registries:
+    once its CAS image is deleted, a legacy image of the same name can no
+    longer start sandboxes, so it is deleted too. Failing to delete that
+    legacy image does not raise, since the CAS image is already gone;
+    deleting the name again removes it. An ``image_`` or
+    ``sandbox_template_`` id deletes only the image it names.
+
+    Deleting removes a *published* image. An unfinished CAS image build is
     cancelled with :func:`tensorlake.image.builds.cancel_build` (or
     ``tl sbx image build cancel BUILD_ID``), never by deleting its name: a
-    name whose only state is an unfinished first build has no image, so the
-    Image Service answers 404 and the lookup falls through to the platform
-    registry as usual. A 202 (deletion still in progress) counts as success;
-    a 409 ``image_build_in_progress``, a 5xx or a transport failure is
-    raised as is and never falls through to the platform registry.
+    name whose only state is an unfinished first build has no CAS image, so
+    the CAS image registry answers 404 and the lookup falls through to the
+    legacy image registry as usual. A 202 (deletion still in progress)
+    counts as success; a 409 ``image_build_in_progress``, a 5xx or a
+    transport failure is raised as is and never falls through to the legacy
+    image registry.
 
     Accepted merged-catalog differences from the released SDKs, for legacy
-    images: this deletes the platform-api template itself (the released
-    SDKs only removed the engine registration and left the template
-    listed), and an unknown name raises :class:`SandboxImageDeleteError`
-    instead of succeeding silently.
+    images: this removes the legacy image from the legacy image registry
+    (the released SDKs only made it unusable and left it listed), and an
+    unknown name raises :class:`SandboxImageDeleteError` instead of
+    succeeding silently.
 
     Raises:
         TypeError: ``image_name`` is not a non-empty string.
         SandboxImageDeleteError: Credentials are missing, the image is not
-            found in either catalog, or the delete request failed.
+            found in the CAS or legacy image registry, or the delete
+            request failed.
     """
     if not isinstance(image_name, str) or not image_name:
         raise TypeError("image_name must be a non-empty string")
@@ -484,27 +496,27 @@ def _snake_case_keys(value: Any) -> Any:
 
 
 def find_sandbox_image_by_name(image_name: str) -> dict | None:
-    """Look up a registered sandbox image by its registered name or id.
+    """Look up a registered CAS or legacy sandbox image by its registered name or id.
 
     Returns the image as a dict in the sandbox-template shape (CAS images
     carry ``snapshot_format_version == "content_addressed_streaming_v1"``;
-    the shape is derived from the Image Service's trimmed record, so no
+    the shape is derived from the CAS image registry's trimmed record, so no
     content digest or build provenance rides on it), or ``None`` if neither
-    the Image Service nor the platform registry knows the reference. Uses the same
+    the CAS nor the legacy image registry knows the reference. Uses the same
     environment-based Tensorlake auth as :func:`build_sandbox_image`. Ingress
     derives project scope from the API key.
 
-    An ``image_`` id names the *current* image under its name; a rebuild
-    replaces it. A build's own immutable result is read with
+    An ``image_`` id names the *current* CAS image under its name; a
+    rebuild replaces it. A build's own immutable result is read with
     :func:`tensorlake.image.builds.get_build`.
 
     Accepted merged-catalog difference from the released SDKs, for legacy
-    images: a name that fits the Image Service grammar is looked up there
-    first and only a clean 404 falls through to the platform registry, so
-    Image Service unavailability (or a deploy 5xx) raises
-    :class:`SandboxImageLookupError` for a legacy name where the released
-    SDKs touched only platform-api. A ``sandbox_template_`` id never
-    consults the Image Service.
+    images: a name that fits the CAS image registry's grammar is looked up
+    there first and only a clean 404 falls through to the legacy image
+    registry, so CAS image registry unavailability (or a deploy 5xx) raises
+    :class:`SandboxImageLookupError` for a legacy image name where the
+    released SDKs touched only the legacy image registry. A
+    ``sandbox_template_`` id never consults the CAS image registry.
 
     Raises:
         TypeError: ``image_name`` is not a non-empty string.
@@ -549,7 +561,7 @@ def find_sandbox_image_by_name(image_name: str) -> dict | None:
 
 
 def list_sandbox_images() -> list[dict]:
-    """List all registered sandbox images for the current project.
+    """List all registered CAS and legacy sandbox images for the current project.
 
     Returns every CAS and legacy image as a list of dicts in the
     sandbox-template shape (each with ``id``, ``name``, ``snapshot_id``,
@@ -657,19 +669,21 @@ def build_sandbox_image(
     is_public: bool = False,
     docker_compat: bool = False,
     context_dir: str | None = None,
-    cas: bool = False,
+    cas: bool = True,
     build_args: dict[str, str] | None = None,
     verbose: bool = False,
     emit: EmitFn | None = None,
     _allow_pat: bool = False,
     docker_config_json: str | None = None,
 ) -> dict:
-    """Build a sandbox image from an :class:`Image` or a Dockerfile path.
+    """Build a CAS or legacy sandbox image from an :class:`Image` or a Dockerfile path.
 
     Renders the source to a Dockerfile (for :class:`Image` inputs) and hands
     the Dockerfile path/text plus build context off to the Rust core, which
-    parses, validates, materializes, and registers the image. Use the same
-    rootfs-builder path and registration semantics as ``tl sbx image create``.
+    parses, validates, materializes, and registers the image. Builds a CAS
+    image by default and a legacy image with ``cas=False``, with the same
+    build and registration semantics as ``tl sbx image create`` and
+    ``tl sbx image create --no-cas``.
 
     Args:
         source: An :class:`Image` instance or a path to a Dockerfile.
@@ -678,10 +692,13 @@ def build_sandbox_image(
         cpus: CPUs for the build sandbox.
         memory_mb: Memory for the build sandbox in MiB.
         disk_mb: Root disk size for the generated sandbox image in MiB.
-        builder_disk_mb: Root disk size for the temporary builder sandbox in MiB.
+        builder_disk_mb: Root disk size for the temporary builder sandbox in
+            MiB. Legacy images only; a CAS image build sizes its builder from
+            ``disk_mb``.
         is_public: Make the registered image publicly accessible.
         docker_compat: Use Docker/BuildKit max compatibility mode (build is
             slower and uses more memory and disk space on builder sandbox).
+            Legacy images only; a CAS image build always runs BuildKit.
         context_dir: Build context directory for an :class:`Image` source,
             used exactly like ``docker build <context_dir>``: it is uploaded
             as-is and COPY/ADD sources resolve relative to it. Required when
@@ -690,11 +707,11 @@ def build_sandbox_image(
             and an empty context (just the generated Dockerfile) is uploaded so
             cwd is not archived. Ignored when ``source`` is a Dockerfile path
             (the Dockerfile's parent directory is used instead).
-        cas: Build a CAS (content-addressed streaming) image through the
-            Image Service instead of a legacy template. Off by default.
+        cas: Build a CAS (content-addressed streaming) image, the default.
+            Pass ``False`` to build a legacy image instead.
         build_args: Dockerfile build args (``--build-arg KEY=VALUE``),
             forwarded to BuildKit and expanded in ``FROM`` references. CAS
-            builds only; a non-CAS build with build args is rejected. For an
+            images only; a legacy image build with build args is rejected. For an
             :class:`Image` source, the generated Dockerfile declares these
             arguments for ``FROM`` and subsequent build operations.
         docker_config_json: Docker config JSON contents for this call. Omit to
@@ -802,21 +819,22 @@ def import_sandbox_image(
     builder_disk_mb: int | None = None,
     is_public: bool = False,
     docker_compat: bool = False,
-    cas: bool = False,
+    cas: bool = True,
     verbose: bool = False,
     emit: EmitFn | None = None,
     _allow_pat: bool = False,
     docker_config_json: str | None = None,
 ) -> dict:
-    """Import a registry image directly into a sandbox image — no Docker.
+    """Import a registry image directly into a CAS or legacy sandbox image — no Docker.
 
     Unlike :func:`build_sandbox_image`, there is no Dockerfile and no build
     context: the builder pulls the referenced image's layers and applies them
     straight into the rootfs (via ``oci-image-to-ext4``), bypassing the Docker
     daemon entirely. This is the programmatic backend for the
-    ``tl sbx image import`` CLI command. The import is always a fresh base from
-    the registry — the reference is never resolved against the template
-    registry.
+    ``tl sbx image import`` CLI command. Imports a CAS image by default and a
+    legacy image with ``cas=False``. The import is always a fresh base from
+    the registry — the reference is never resolved against the CAS or legacy
+    image registries.
 
     Args:
         image_reference: The registry image reference to import, e.g.
@@ -828,12 +846,15 @@ def import_sandbox_image(
         cpus: CPUs for the build sandbox.
         memory_mb: Memory for the build sandbox in MiB.
         disk_mb: Root disk size for the generated sandbox image in MiB.
-        builder_disk_mb: Root disk size for the temporary builder sandbox in MiB.
+        builder_disk_mb: Root disk size for the temporary builder sandbox in
+            MiB. Legacy images only; a CAS image import sizes its builder from
+            ``disk_mb``.
         is_public: Make the registered image publicly accessible.
         docker_compat: Use Docker/BuildKit max compatibility mode (import is
             slower and uses more memory and disk space on builder sandbox).
-        cas: Import as a CAS (content-addressed streaming) image through the
-            Image Service instead of a legacy template. Off by default.
+            Legacy images only.
+        cas: Import as a CAS (content-addressed streaming) image, the
+            default. Pass ``False`` to import a legacy image instead.
         docker_config_json: Docker config JSON contents for this call. Omit to
             discover local config at entry; pass "{}" to disable discovery.
         verbose: Print progress to stderr. Ignored if ``emit`` is provided.
@@ -903,11 +924,12 @@ def build_sandbox_application_image(
     _allow_pat: bool = False,
     docker_config_json: str | None = None,
 ) -> dict:
-    """Build an Applications runtime image as a registered sandbox template.
+    """Build an Applications runtime image as a legacy sandbox image.
 
     Unlike :func:`build_sandbox_image`, this uses the Applications Dockerfile
     wrapper so deployed functions get the SDK runtime, default workdir, and
-    deploy-time build environment variables.
+    deploy-time build environment variables. Applications runtime images stay
+    legacy images while CAS is the default for sandbox images.
     """
     if emit is None:
         emit = _stderr_emit if verbose else _noop_emit

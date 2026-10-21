@@ -49,22 +49,22 @@ export interface CreateSandboxImageOptions {
    */
   dockerCompat?: boolean;
   /**
-   * Build a CAS (content-addressed streaming) image through the Image
-   * Service instead of a legacy template. Off by default.
+   * Build a CAS (content-addressed streaming) image, the default. Pass
+   * `false` to build a legacy image instead.
    */
   cas?: boolean;
   /**
    * Dockerfile build args (`--build-arg KEY=VALUE`), forwarded to BuildKit
-   * and expanded in `FROM` references. CAS builds only; a legacy build with
-   * build args is rejected.
+   * and expanded in `FROM` references. CAS images only; a legacy image build
+   * with build args is rejected.
    */
   buildArgs?: Record<string, string>;
   /**
-   * CAS builds only (`cas: true`): aborting requests *remote cancellation*
-   * of the Image Service build through a bounded handshake, and the call
-   * rejects with `ImageBuildInterruptedError` carrying the outcome. It is
-   * rejected for legacy builds, which have no build operation to cancel.
-   * Abandoning the promise alone never cancels anything.
+   * CAS images only: aborting requests *remote cancellation* of the CAS
+   * image build through a bounded handshake, and the call rejects with
+   * `ImageBuildInterruptedError` carrying the outcome. It is rejected for a
+   * legacy image build (`cas: false`), which has no build operation to
+   * cancel. Abandoning the promise alone never cancels anything.
    */
   signal?: AbortSignal;
   /**
@@ -100,13 +100,13 @@ export interface ImportSandboxImageOptions {
    */
   dockerCompat?: boolean;
   /**
-   * Import as a CAS (content-addressed streaming) image through the Image
-   * Service instead of a legacy template. Off by default.
+   * Import as a CAS (content-addressed streaming) image, the default. Pass
+   * `false` to import a legacy image instead.
    */
   cas?: boolean;
   /**
-   * CAS imports only (`cas: true`): aborting requests remote cancellation of
-   * the Image Service import; see `CreateSandboxImageOptions.signal`.
+   * CAS images only: aborting requests remote cancellation of the CAS image
+   * import; see `CreateSandboxImageOptions.signal`.
    */
   signal?: AbortSignal;
   /**
@@ -206,7 +206,7 @@ interface NativeBinding {
     emit?: ((event: NativeBindingEvent) => void) | null | undefined,
     interruptId?: number | undefined | null,
   ): Promise<string>;
-  // --- Image Service build operations (CAS only) ---
+  // --- CAS image build operations ---
   createImageBuildInterrupt(): number;
   triggerImageBuildInterrupt(id: number): void;
   releaseImageBuildInterrupt(id: number): void;
@@ -243,7 +243,10 @@ interface NativeBinding {
     options: NativeBindingCatalogOptions,
     reference: string,
   ): Promise<string | null>;
-  /** Delete one image by name or id; unknown in both catalogs rejects. */
+  /**
+   * Delete one image by name or id; a name is deleted from both catalogs.
+   * Unknown in both catalogs rejects.
+   */
   deleteSandboxImage(
     options: NativeBindingCatalogOptions,
     reference: string,
@@ -371,9 +374,9 @@ function eventToEmitDict(event: NativeBindingEvent): Record<string, unknown> {
 }
 
 /**
- * @internal Shared with `image-builds.ts`, which implements the Image
- * Service build operations on top of the same native binding and
- * environment context.
+ * @internal Shared with `image-builds.ts`, which implements the CAS image
+ * build operations on top of the same native binding and environment
+ * context.
  */
 export const __imageBuildInternals = {
   loadNativeBinding: () => loadNativeBinding(),
@@ -540,14 +543,18 @@ export async function createSandboxImage(
       );
     }
 
-    if (options.signal !== undefined && !options.cas) {
+    const cas = options.cas ?? true;
+    if (options.signal !== undefined && !cas) {
       throw new Error(
-        "signal is only supported for CAS image builds (cas: true); a legacy build has no " +
-          "Image Service build operation to cancel",
+        "signal is not supported for legacy image builds (cas: false): a legacy image build " +
+          "has no build operation to cancel",
       );
     }
 
-    emit({ type: "status", message: `Building image '${effectiveName}'...` });
+    emit({
+      type: "status",
+      message: `Building ${cas ? "CAS" : "legacy"} image '${effectiveName}'...`,
+    });
 
     const binding = loadNativeBinding();
     let emitError: unknown;
@@ -570,7 +577,7 @@ export async function createSandboxImage(
       dockerConfigJson: options.dockerConfigJson,
       dockerfileText,
       contextDir: nativeContextDir,
-      cas: options.cas ?? false,
+      cas,
       buildArgs: options.buildArgs,
     };
     const forward = (event: NativeBindingEvent) => {
@@ -580,10 +587,11 @@ export async function createSandboxImage(
         emitError ??= error;
       }
     };
-    // CAS builds run through the interrupt-aware bridge so an AbortSignal
-    // reaches the Rust cancellation handshake and typed build errors are
-    // decoded. Legacy builds keep the plain call and its error path.
-    const resultJson = options.cas
+    // CAS image builds run through the interrupt-aware bridge so an
+    // AbortSignal reaches the Rust cancellation handshake and typed build
+    // errors are decoded. Legacy image builds keep the plain call and its
+    // error path.
+    const resultJson = cas
       ? await __runWithInterrupt(options.signal, (interruptId) =>
           binding.buildSandboxImage(nativeOptions, forward, interruptId),
         )
@@ -664,16 +672,17 @@ export async function importSandboxImage(
     );
   }
 
-  if (options.signal !== undefined && !options.cas) {
+  const cas = options.cas ?? true;
+  if (options.signal !== undefined && !cas) {
     throw new Error(
-      "signal is only supported for CAS image imports (cas: true); a legacy import has no " +
-        "Image Service build operation to cancel",
+      "signal is not supported for legacy image imports (cas: false): a legacy image import " +
+        "has no build operation to cancel",
     );
   }
 
   emit({
     type: "status",
-    message: `Importing image '${reference}' as '${effectiveName}'...`,
+    message: `Importing '${reference}' as ${cas ? "CAS" : "legacy"} image '${effectiveName}'...`,
   });
 
   const binding = loadNativeBinding();
@@ -695,7 +704,7 @@ export async function importSandboxImage(
     userAgent: undefined,
     dockerCompat: options.dockerCompat ?? false,
     dockerConfigJson: options.dockerConfigJson,
-    cas: options.cas ?? false,
+    cas,
   };
   const forward = (event: NativeBindingEvent) => {
     try {
@@ -704,7 +713,7 @@ export async function importSandboxImage(
       emitError ??= error;
     }
   };
-  const resultJson = options.cas
+  const resultJson = cas
     ? await __runWithInterrupt(options.signal, (interruptId) =>
         binding.importSandboxImage(nativeOptions, forward, interruptId),
       )
@@ -783,24 +792,32 @@ function parseTemplate(json: string): SandboxTemplate {
 }
 
 /**
- * Delete a registered sandbox image by name or id. Both families are
- * covered: an `image_` id or a name registered in the Image Service deletes
- * a CAS image, a `sandbox_template_` id or a name registered only in the
- * platform registry deletes a legacy image. Rejects when neither catalog
- * knows the reference.
+ * Delete a registered CAS or legacy sandbox image by name or id. Both
+ * families are covered: an `image_` id or a name registered in the CAS image
+ * registry deletes a CAS image, a `sandbox_template_` id or a name registered
+ * only in the legacy image registry deletes a legacy image. Rejects when
+ * neither the CAS nor the legacy image registry knows the reference.
  *
- * Deleting removes a *published* image. An unfinished CAS build is cancelled
- * with `cancelImageBuild({ buildId })` (or `tl sbx image build cancel
- * BUILD_ID`), never by deleting its name: a name whose only state is an
- * unfinished first build has no image, so the Image Service answers 404 and
- * the lookup falls through to the platform registry as usual. A 202
- * (deletion in progress) counts as success; a 409 `image_build_in_progress`,
- * a 5xx or a transport failure rejects as is and never falls through.
+ * A name is deleted from both the CAS and the legacy image registries: once
+ * its CAS image is deleted, a legacy image of the same name can no longer
+ * start sandboxes, so it is deleted too. Failing to delete that legacy image
+ * does not reject, since the CAS image is already gone; deleting the name
+ * again removes it. An `image_` or `sandbox_template_` id deletes only the
+ * image it names.
+ *
+ * Deleting removes a *published* image. An unfinished CAS image build is
+ * cancelled with `cancelImageBuild({ buildId })` (or `tl sbx image build
+ * cancel BUILD_ID`), never by deleting its name: a name whose only state is
+ * an unfinished first build has no CAS image, so the CAS image registry
+ * answers 404 and the lookup falls through to the legacy image registry as
+ * usual. A 202 (deletion in progress) counts as success; a 409
+ * `image_build_in_progress`, a 5xx or a transport failure rejects as is and
+ * never falls through.
  *
  * Accepted merged-catalog differences from the released SDKs, for legacy
- * images: this deletes the platform-api template itself (the released SDKs
- * only removed the engine registration and left the template listed), and
- * an unknown name rejects instead of succeeding silently.
+ * images: this removes the legacy image from the legacy image registry (the
+ * released SDKs only made it unusable and left it listed), and an unknown
+ * name rejects instead of succeeding silently.
  */
 export async function deleteSandboxImage(imageName: string): Promise<void> {
   if (typeof imageName !== "string" || imageName.length === 0) {
@@ -824,24 +841,27 @@ export async function deleteSandboxImageWithCredentials(
 }
 
 /**
- * Look up a registered sandbox image by its registered name or id.
+ * Look up a registered CAS or legacy sandbox image by its registered name or
+ * id.
  *
  * Returns the image in the sandbox-template shape (CAS images carry
  * `snapshotFormatVersion === "content_addressed_streaming_v1"`; the shape is
- * derived from the Image Service's trimmed record, so no content digest or
- * build provenance rides on it), or `null` if neither the Image Service nor
- * the platform registry knows the reference. Uses the same environment-based Tensorlake
- * auth as `createSandboxImage`. Ingress derives project scope from the API key.
+ * derived from the CAS image registry's trimmed record, so no content digest
+ * or build provenance rides on it), or `null` if neither the CAS nor the
+ * legacy image registry knows the reference. Uses the same environment-based
+ * Tensorlake auth as `createSandboxImage`. Ingress derives project scope from
+ * the API key.
  *
- * An `image_` id names the *current* image under its name; a rebuild
+ * An `image_` id names the *current* CAS image under its name; a rebuild
  * replaces it. A build's own immutable result is read with `getImageBuild`.
  *
  * Accepted merged-catalog difference from the released SDKs, for legacy
- * images: a name that fits the Image Service grammar is looked up there first
- * and only a clean 404 falls through to the platform registry, so Image
- * Service unavailability (or a deploy 5xx) rejects the lookup of a legacy name
- * where the released SDKs touched only platform-api. A `sandbox_template_` id
- * never consults the Image Service.
+ * images: a name that fits the CAS image registry's grammar is looked up
+ * there first and only a clean 404 falls through to the legacy image
+ * registry, so CAS image registry unavailability (or a deploy 5xx) rejects
+ * the lookup of a legacy image name where the released SDKs touched only the
+ * legacy image registry. A `sandbox_template_` id never consults the CAS
+ * image registry.
  */
 export async function findSandboxImageByName(
   imageName: string,
@@ -904,13 +924,14 @@ export async function runCreateSandboxImageCli(argv = process.argv.slice(2)) {
       builder_disk_mb: { type: "string" },
       docker_compat: { type: "boolean", default: false },
       public: { type: "boolean", default: false },
+      "no-cas": { type: "boolean", default: false },
     },
   });
 
   const dockerfilePath = parsed.positionals[0];
   if (!dockerfilePath) {
     throw new Error(
-      "Usage: tensorlake-create-sandbox-image <dockerfile_path> [--name NAME] [--cpus N] [--memory MiB] [--disk_mb MiB] [--builder_disk_mb MiB] [--docker_compat] [--public]",
+      "Usage: tensorlake-create-sandbox-image <dockerfile_path> [--name NAME] [--cpus N] [--memory MiB] [--disk_mb MiB] [--builder_disk_mb MiB] [--docker_compat] [--public] [--no-cas]",
     );
   }
 
@@ -951,6 +972,7 @@ export async function runCreateSandboxImageCli(argv = process.argv.slice(2)) {
       builderDiskMb,
       dockerCompat: parsed.values.docker_compat,
       isPublic: parsed.values.public,
+      cas: !parsed.values["no-cas"],
     },
     { emit: ndjsonStdoutEmit, _allowPat: true },
   );
@@ -968,13 +990,14 @@ export async function runImportSandboxImageCli(argv = process.argv.slice(2)) {
       builder_disk_mb: { type: "string" },
       docker_compat: { type: "boolean", default: false },
       public: { type: "boolean", default: false },
+      "no-cas": { type: "boolean", default: false },
     },
   });
 
   const imageReference = parsed.positionals[0];
   if (!imageReference) {
     throw new Error(
-      "Usage: tensorlake-import-sandbox-image <image_reference> [--name NAME] [--cpus N] [--memory MiB] [--disk_mb MiB] [--builder_disk_mb MiB] [--docker_compat] [--public]",
+      "Usage: tensorlake-import-sandbox-image <image_reference> [--name NAME] [--cpus N] [--memory MiB] [--disk_mb MiB] [--builder_disk_mb MiB] [--docker_compat] [--public] [--no-cas]",
     );
   }
 
@@ -1015,6 +1038,7 @@ export async function runImportSandboxImageCli(argv = process.argv.slice(2)) {
       builderDiskMb,
       dockerCompat: parsed.values.docker_compat,
       isPublic: parsed.values.public,
+      cas: !parsed.values["no-cas"],
     },
     { emit: ndjsonStdoutEmit, _allowPat: true },
   );

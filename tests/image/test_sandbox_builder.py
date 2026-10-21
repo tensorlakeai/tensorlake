@@ -129,7 +129,7 @@ class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
             False,
             None,
             None,
-            cas=False,
+            cas=True,
             build_args=None,
             emit=ANY,
             docker_config_json=None,
@@ -200,7 +200,7 @@ class TestBuildSandboxImageFromDockerfileOptions(unittest.TestCase):
             False,
             None,
             None,
-            cas=False,
+            cas=True,
             build_args=None,
             emit=ANY,
             docker_config_json=None,
@@ -253,7 +253,7 @@ class TestBuildSandboxImageFromDockerfileOptions(unittest.TestCase):
             )
 
         self.assertIn(
-            {"type": "status", "message": "Building image 'img'..."},
+            {"type": "status", "message": "Building legacy image 'img'..."},
             emitted,
         )
         self.assertIn({"type": "status", "message": "builder running"}, emitted)
@@ -321,18 +321,27 @@ class TestCasBuildOptions(unittest.TestCase):
 
         self.assertIs(rust_importer_mock.call_args.kwargs["cas"], True)
 
-    def test_image_build_defaults_to_non_cas(self):
-        """``Image.build`` defaults to a non-CAS image."""
+    def test_image_build_defaults_to_cas(self):
+        """``Image.build`` defaults to a CAS image."""
         ctx = _make_ctx()
-        image = Image(name="legacy", base_image="python:3.12-slim")
+        image = Image(name="app", base_image="python:3.12-slim")
 
         build_ctx, rust_builder = _make_build_patches(ctx)
         with build_ctx, rust_builder as rust_builder_mock:
             image.build()
 
         kwargs = rust_builder_mock.call_args.kwargs
-        self.assertIs(kwargs["cas"], False)
+        self.assertIs(kwargs["cas"], True)
         self.assertIsNone(kwargs["build_args"])
+
+    def test_import_defaults_to_cas(self):
+        """``import_sandbox_image`` defaults to a CAS image."""
+        ctx = _make_ctx()
+        build_ctx, rust_importer = _make_import_patches(ctx)
+        with build_ctx, rust_importer as rust_importer_mock:
+            sbm.import_sandbox_image("ubuntu:24.04")
+
+        self.assertIs(rust_importer_mock.call_args.kwargs["cas"], True)
 
     def test_registration_event_reads_the_template_shaped_record(self):
         emitted = []
@@ -628,7 +637,7 @@ class TestImportSandboxImage(unittest.TestCase):
             False,
             sbm.USER_AGENT,
             False,
-            cas=False,
+            cas=True,
             emit=ANY,
             docker_config_json=None,
         )

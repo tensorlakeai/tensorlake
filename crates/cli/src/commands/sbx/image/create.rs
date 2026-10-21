@@ -33,8 +33,8 @@ pub async fn run(
 ) -> Result<()> {
     if no_wait && !cas {
         return Err(CliError::usage(
-            "--no-wait is only supported with --cas: a legacy image build has no Image Service \
-             build operation to leave running",
+            "--no-wait is not supported with --no-cas: a legacy image build has no build \
+             operation to leave running",
         ));
     }
     let build_args = build_args

@@ -168,6 +168,7 @@ pub async fn run(
         let rootfs_disk_bytes = registered.rootfs_disk_bytes.unwrap_or(0);
         let snapshot_uri = registered.snapshot_uri.clone().unwrap_or_default();
         print_registered(
+            "CAS",
             image_name,
             snapshot_id,
             rootfs_disk_bytes,
@@ -215,6 +216,7 @@ pub async fn run(
         .clone()
         .unwrap_or_else(|| snapshot.snapshot_uri.clone());
     print_registered(
+        "legacy",
         image_name,
         snapshot_id,
         rootfs_disk_bytes,
@@ -225,6 +227,7 @@ pub async fn run(
 }
 
 fn print_registered(
+    family: &str,
     image_name: &str,
     snapshot_id: &str,
     rootfs_disk_bytes: u64,
@@ -234,8 +237,8 @@ fn print_registered(
     let rootfs_disk_gib = rootfs_disk_bytes / (1024 * 1024 * 1024);
     let template_id = registered.id.as_deref().unwrap_or("-");
     println!(
-        "Registered image '{}' -> snapshot {} (rootfs {} GiB)\nTemplate: {}\n{}",
-        image_name, snapshot_id, rootfs_disk_gib, template_id, snapshot_uri
+        "Registered {} image '{}' -> snapshot {} (rootfs {} GiB)\nTemplate: {}\n{}",
+        family, image_name, snapshot_id, rootfs_disk_gib, template_id, snapshot_uri
     );
 }
 

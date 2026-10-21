@@ -1,18 +1,18 @@
 //! The merged sandbox-image catalog: one client-side view over the platform
-//! sandbox-template registry (legacy `.tlsnap` images) and the Image Service
+//! sandbox-template registry (legacy `.tlsnap` images) and the CAS image registry
 //! catalog (CAS images), so `describe`, `ls`, `rm` and the SDK lookups behave
 //! identically for both families.
 //!
 //! Dispatch is by reference shape: a `sandbox_template_` id is a platform
-//! template, an `image_` id is an Image Service image, anything else is a
-//! name. A name is looked up in the Image Service first (when it fits that
+//! template, an `image_` id is a CAS image, anything else is a
+//! name. A name is looked up in the CAS image registry first (when it fits that
 //! catalog's grammar) and only a clean 404 falls through to the platform
 //! registry; any other failure is reported, never mistaken for a miss. Single
 //! image operations never list and match. Listings concatenate both catalogs
 //! and sort newest first, then by name, with CAS images ahead of legacy ones
 //! on a tie.
 //!
-//! The Image Service answers the platform template shape (snake_case, RFC 3339
+//! The CAS image registry answers the platform template shape (snake_case, RFC 3339
 //! timestamps); this module maps it onto [`SandboxTemplate`] so callers see
 //! one record kind for both families.
 
@@ -32,7 +32,7 @@ use crate::{
     sandbox_templates::{SandboxTemplatesClient, models::SandboxTemplate},
 };
 
-/// Prefix of an Image Service logical image id.
+/// Prefix of a CAS image id.
 pub const IMAGE_SERVICE_ID_PREFIX: &str = "image_";
 /// Prefix of a platform sandbox-template id.
 pub const SANDBOX_TEMPLATE_ID_PREFIX: &str = "sandbox_template_";
@@ -43,12 +43,54 @@ pub const CAS_SNAPSHOT_FORMAT_VERSION: &str = "content_addressed_streaming_v1";
 const CAS_V1_REFERENCE_PREFIX: &str = "cas-v1:";
 const IMAGE_SERVICE_LIST_PAGE_SIZE: &str = "100";
 
+/// What [`SandboxImageCatalog::delete_reporting`] deleted.
+#[derive(Debug)]
+pub struct ImageDeletion {
+    /// The family of the image the reference named.
+    pub family: DeletedImageFamily,
+    /// Set when a name's CAS image was deleted and a legacy image of the
+    /// same name existed.
+    pub same_named_legacy: Option<LegacyImageDeletion>,
+}
+
+impl ImageDeletion {
+    fn only(family: DeletedImageFamily) -> Self {
+        Self {
+            family,
+            same_named_legacy: None,
+        }
+    }
+}
+
+/// The catalog an image was deleted from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeletedImageFamily {
+    /// A CAS image, deleted through the CAS image registry.
+    Cas,
+    /// A legacy image, deleted from the platform template registry.
+    Legacy,
+}
+
+/// The legacy image a name's CAS delete left behind, which can no longer
+/// start sandboxes. `id` is its `sandbox_template_` id when known.
+#[derive(Debug)]
+pub enum LegacyImageDeletion {
+    Deleted {
+        id: Option<String>,
+    },
+    /// Not deleted; deleting the name or id again finishes the job.
+    Failed {
+        id: Option<String>,
+        error: SdkError,
+    },
+}
+
 /// How a user-supplied image reference is dispatched.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImageReference {
     /// A platform sandbox-template id.
     TemplateId(String),
-    /// An Image Service logical image id.
+    /// A CAS image id.
     ImageServiceId(String),
     /// A registered name, resolvable in either catalog.
     Name(String),
@@ -86,7 +128,7 @@ pub(crate) fn is_lower_sha256_hex(value: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-/// Whether `reference` is an Image Service id (`image_<lowercase alnum>`).
+/// Whether `reference` is a CAS image id (`image_<lowercase alnum>`).
 pub fn is_image_service_id(reference: &str) -> bool {
     reference
         .strip_prefix(IMAGE_SERVICE_ID_PREFIX)
@@ -119,9 +161,9 @@ pub fn validate_registered_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The Image Service name grammar, mirrored client-side so a name that
+/// The CAS image registry name grammar, mirrored client-side so a name that
 /// catalog could never hold (uppercase, reserved prefixes, odd separators) is
-/// routed straight to the platform registry instead of producing a 400 that a
+/// routed straight to the legacy image registry instead of producing a 400 that a
 /// caller could mistake for a miss. Lowercase repository components joined by
 /// `/`, each made of alphanumeric runs joined by single `.`, `_` or `-`
 /// separators, with an optional `:tag`.
@@ -216,7 +258,7 @@ pub fn sort_merged_images(images: &mut [SandboxTemplate]) {
 // Image Service wire types
 // ---------------------------------------------------------------------------
 
-/// One logical image as the Image Service answers it (ADR 0107 as amended
+/// One logical image as the CAS image registry answers it (ADR 0107 as amended
 /// by the API trim): the identity clients key on, its visibility, its sizes
 /// and its timestamps. The platform template shape callers of both image
 /// families receive is derived locally by [`Self::into_template`]; the
@@ -294,7 +336,7 @@ struct AdoptSnapshotRequest<'a> {
     public: bool,
 }
 
-/// The Image Service error body (`{"error": "..."}`), reduced to its message
+/// The CAS image registry error body (`{"error": "..."}`), reduced to its message
 /// so callers print the service's words rather than raw JSON.
 #[derive(Debug, Deserialize)]
 struct ImageServiceErrorBody {
@@ -323,7 +365,7 @@ fn tidy_error(error: SdkError) -> SdkError {
     }
 }
 
-/// The Image Service half of the catalog, reached through the authenticated
+/// The CAS image registry half of the catalog, reached through the authenticated
 /// `/images/v4` ingress path of the API host (or `TENSORLAKE_IMAGE_SERVICE_URL`
 /// for local development, which then includes the service's `/v1` prefix).
 #[derive(Clone)]
@@ -332,8 +374,8 @@ pub struct ImageServiceCatalog {
 }
 
 impl ImageServiceCatalog {
-    /// Share `client`'s credentials and scope headers, rebased onto the Image
-    /// Service URL derived from `api_url`.
+    /// Share `client`'s credentials and scope headers, rebased onto the CAS
+    /// image registry URL derived from `api_url`.
     pub fn new(client: &Client, api_url: &str) -> Self {
         Self {
             client: client.with_base_url(&cas_image_service_url(api_url)),
@@ -725,11 +767,12 @@ impl SandboxImageCatalog {
     /// through to the by-name order.
     ///
     /// Accepted merged-catalog behavior for legacy images: a name that fits
-    /// the Image Service grammar is looked up there first, and only a clean
-    /// 404 falls through to the platform registry. Any other Image Service
-    /// answer (unavailability, a deploy 5xx) fails the lookup of a legacy
-    /// name, where the released SDKs touched only platform-api. A
-    /// `sandbox_template_` id never consults the Image Service.
+    /// the CAS image registry's grammar is looked up there first, and only a
+    /// clean 404 falls through to the legacy image registry. Any other CAS
+    /// image registry answer (unavailability, a deploy 5xx) fails the lookup
+    /// of a legacy image name, where the released SDKs touched only the
+    /// legacy image registry. A `sandbox_template_` id never consults the CAS
+    /// image registry.
     pub async fn find(&self, reference: &str) -> Result<Option<SandboxTemplate>, SdkError> {
         match classify_image_reference(reference)? {
             ImageReference::TemplateId(id) => {
@@ -767,41 +810,87 @@ impl SandboxImageCatalog {
     /// image in the other catalog.
     ///
     /// Accepted merged-catalog behavior for legacy images: deleting a legacy
-    /// image removes the platform-api template (the released SDKs only
-    /// removed the engine registration and left the template listed), and an
-    /// unknown name is an error rather than a silent success. An untyped
-    /// name probes the Image Service first and falls through to platform-api
+    /// image removes it from the legacy image registry (the released SDKs
+    /// only made it unusable and left it listed), and an unknown name is an
+    /// error rather than a silent success. An untyped name probes the CAS
+    /// image registry first and falls through to the legacy image registry
     /// only on a clean 404; a 202 (deletion in progress) is success, and a
     /// 409 `image_build_in_progress`, a 5xx or a transport failure is
     /// reported as is. Deleting removes published images only; an unfinished
     /// build is cancelled with its build id, never by deleting its name.
+    ///
+    /// A name is deleted from both registries: once its CAS image is
+    /// deleted, a legacy image of the same name can no longer start
+    /// sandboxes, so it is deleted too. Failing to delete that legacy image
+    /// does not fail the call, since the CAS image is already gone;
+    /// [`Self::delete_reporting`] reports it. An `image_` or
+    /// `sandbox_template_` id deletes only the image it names.
     pub async fn delete(&self, reference: &str) -> Result<(), SdkError> {
+        self.delete_reporting(reference).await.map(|_| ())
+    }
+
+    /// [`Self::delete`], also reporting the deleted image's family and what
+    /// happened to a same-named legacy image.
+    pub async fn delete_reporting(&self, reference: &str) -> Result<ImageDeletion, SdkError> {
         let deleted = match classify_image_reference(reference)? {
             ImageReference::TemplateId(id) => {
-                self.templates.delete_by_id(&id).await? || self.delete_by_name(&id).await?
+                if self.templates.delete_by_id(&id).await? {
+                    Some(ImageDeletion::only(DeletedImageFamily::Legacy))
+                } else {
+                    self.delete_by_name(&id).await?
+                }
             }
             ImageReference::ImageServiceId(id) => {
-                self.image_service.delete_by_id(&id).await? || self.delete_by_name(&id).await?
+                if self.image_service.delete_by_id(&id).await? {
+                    Some(ImageDeletion::only(DeletedImageFamily::Cas))
+                } else {
+                    self.delete_by_name(&id).await?
+                }
             }
             ImageReference::Name(name) => self.delete_by_name(&name).await?,
         };
-        if deleted {
-            Ok(())
-        } else {
-            Err(SdkError::ServerError {
-                status: StatusCode::NOT_FOUND,
-                message: format!("image '{}' not found", reference.trim()),
-            })
-        }
+        deleted.ok_or_else(|| SdkError::ServerError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("image '{}' not found", reference.trim()),
+        })
     }
 
-    async fn delete_by_name(&self, name: &str) -> Result<bool, SdkError> {
+    async fn delete_by_name(&self, name: &str) -> Result<Option<ImageDeletion>, SdkError> {
         if validate_image_service_name(name).is_ok()
             && self.image_service.delete_by_name(name).await?
         {
-            return Ok(true);
+            return Ok(Some(ImageDeletion {
+                family: DeletedImageFamily::Cas,
+                same_named_legacy: self.delete_same_named_legacy_image(name).await,
+            }));
         }
-        self.templates.delete_by_name(name).await
+        Ok(self
+            .templates
+            .delete_by_name(name)
+            .await?
+            .then(|| ImageDeletion::only(DeletedImageFamily::Legacy)))
+    }
+
+    /// Delete the legacy image named `name` after its CAS namesake was
+    /// deleted. `None` when there is none. A failure is reported rather
+    /// than raised, because the CAS delete already succeeded.
+    async fn delete_same_named_legacy_image(&self, name: &str) -> Option<LegacyImageDeletion> {
+        let template = match self.templates.find_by_name(name).await {
+            Ok(template) => template?.into_inner(),
+            Err(error) => return Some(LegacyImageDeletion::Failed { id: None, error }),
+        };
+        let deleted = match template.id.as_deref() {
+            Some(id) => self.templates.delete_by_id(id).await,
+            None => self.templates.delete_by_name(name).await,
+        };
+        match deleted {
+            Ok(true) => Some(LegacyImageDeletion::Deleted { id: template.id }),
+            Ok(false) => None,
+            Err(error) => Some(LegacyImageDeletion::Failed {
+                id: template.id,
+                error,
+            }),
+        }
     }
 
     /// Every image of both families, merged and sorted (see

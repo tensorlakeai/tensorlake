@@ -1,7 +1,7 @@
-"""Image Service build operations for CAS sandbox images.
+"""Build operations for CAS sandbox images.
 
-A CAS (content-addressed streaming) image is built or imported by an Image
-Service *build operation*. This module exposes that operation directly:
+A CAS (content-addressed streaming) image is built or imported by a *build
+operation*. This module exposes that operation directly:
 
 - :func:`start_build` / :func:`start_import` admit a build (and upload and
   seal its context) and return an :class:`ImageBuildHandle` without waiting,
@@ -11,8 +11,8 @@ Service *build operation*. This module exposes that operation directly:
   :meth:`ImageBuildHandle.cancel` read, wait for and cancel it. Module-level
   :func:`wait_build` and :func:`cancel_build` do the same from a build id.
 
-**CAS only.** Every function here addresses the Image Service. Legacy
-images (``build_sandbox_image(..., cas=False)``, ``sandbox_template_`` ids,
+**CAS images only.** Every function here addresses a CAS image build.
+Legacy images (``build_sandbox_image(..., cas=False)``, ``sandbox_template_`` ids,
 ``.tlsnap`` snapshots) have no build operation: :func:`start_build` and
 :func:`start_import` are CAS by construction, and a ``sandbox_template_`` or
 ``image_`` reference passed as a build id is refused locally, before any
@@ -48,7 +48,7 @@ never cancels the remote build. A wait ``timeout`` only stops waiting: it
 raises :class:`ImageBuildTimeoutError` with the build id and leaves the
 build running. Waits otherwise run until the service-reported operation
 deadline plus a deployment-recovery allowance, reconnecting across transient
-Image Service failures.
+service failures.
 
 A raising ``emit`` callback stops the operation locally and propagates; it
 is not a cancel request. (The legacy builder's callbacks keep being
@@ -169,7 +169,7 @@ class ImageBuildErrorCode(ResponseEnum):
 
 
 class ImageBuildError(SandboxImageBuildError):
-    """An Image Service build operation failed.
+    """A CAS image build operation failed.
 
     Attributes:
         code: Stable machine-readable code (``usage``, ``auth``,
@@ -347,7 +347,7 @@ def _raise_typed(exc: BaseException) -> None:
 
 @dataclass(frozen=True)
 class ImageBuildInfo:
-    """One build or import as the Image Service reports it.
+    """One CAS image build or import as the service reports it.
 
     Unknown fields are kept in :attr:`raw`. ``status`` is ``pending``,
     ``running``, ``succeeded``, ``failed`` or ``cancelled``; ``phase`` is
@@ -559,22 +559,22 @@ def _credentials() -> tuple[str, str, str]:
 
 def _reject_legacy_reference(build_id: str) -> None:
     """New operations never reinterpret legacy references; fail before any
-    request so no Image Service or platform call is made."""
+    request so no call is made."""
     if not isinstance(build_id, str) or not build_id.strip():
         raise ImageBuildError(
             "build_id must be a non-empty string", code=ImageBuildErrorCode.USAGE
         )
     if build_id.startswith("sandbox_template_"):
         raise ImageBuildError(
-            f"'{build_id}' is a legacy sandbox template id; legacy images have no "
+            f"'{build_id}' is a legacy image id; legacy images have no "
             "build operation to get, wait for or cancel",
             code=ImageBuildErrorCode.USAGE,
             build_id=build_id,
         )
     if build_id.startswith("image_"):
         raise ImageBuildError(
-            f"'{build_id}' is an image id, not a build id; look the image up with "
-            "find_sandbox_image_by_name or use the build id admission returned",
+            f"'{build_id}' is a CAS image id, not a build id; look the CAS image up "
+            "with find_sandbox_image_by_name or use the build id admission returned",
             code=ImageBuildErrorCode.USAGE,
             build_id=build_id,
         )
@@ -824,7 +824,7 @@ def start_build(
                 stacklevel=2,
             )
         api_url, token, namespace = _credentials()
-        emit({"type": "status", "message": f"Building image '{name}'..."})
+        emit({"type": "status", "message": f"Building CAS image '{name}'..."})
         try:
             raw = _rust_start_image_build(
                 api_url,
@@ -888,7 +888,12 @@ def start_import(
             stacklevel=2,
         )
     api_url, token, namespace = _credentials()
-    emit({"type": "status", "message": f"Importing image '{reference}' as '{name}'..."})
+    emit(
+        {
+            "type": "status",
+            "message": f"Importing '{reference}' as CAS image '{name}'...",
+        }
+    )
     try:
         raw = _rust_start_image_import(
             api_url,

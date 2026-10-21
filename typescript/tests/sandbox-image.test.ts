@@ -292,7 +292,7 @@ describe("createSandboxImage", () => {
     expect(captured.options.dockerCompat).toBe(true);
   });
 
-  it("forwards cas and buildArgs to the native build binding and defaults them off", async () => {
+  it("forwards cas and buildArgs to the native build binding, defaulting to a CAS image", async () => {
     const tempDir = await mkdir(
       path.join(os.tmpdir(), `tensorlake-images-${Date.now()}-cas`),
       { recursive: true },
@@ -313,8 +313,11 @@ describe("createSandboxImage", () => {
     expect(captured.options.buildArgs).toEqual({ PY_TAG: "3.13" });
 
     await createSandboxImage(dockerfilePath);
-    expect(captured.options.cas).toBe(false);
+    expect(captured.options.cas).toBe(true);
     expect(captured.options.buildArgs).toBeUndefined();
+
+    await createSandboxImage(dockerfilePath, { cas: false });
+    expect(captured.options.cas).toBe(false);
   });
 
   it("forwards native events back through the user emit callback", async () => {
@@ -341,7 +344,7 @@ describe("createSandboxImage", () => {
     await createSandboxImage(dockerfilePath, {}, { emit: (e) => events.push(e) });
 
     expect(events).toEqual([
-      { type: "status", message: "Building image 'my-img'..." },
+      { type: "status", message: "Building CAS image 'my-img'..." },
       { type: "status", message: "Preparing rootfs build..." },
       { type: "build_log", stream: "stdout", message: "build line" },
       { type: "warning", message: "Skipping LABEL" },
@@ -383,7 +386,7 @@ describe("createSandboxImage", () => {
     ).rejects.toBe(emitError);
 
     expect(events).toEqual([
-      { type: "status", message: "Building image 'my-img'..." },
+      { type: "status", message: "Building CAS image 'my-img'..." },
       { type: "status", message: "Preparing rootfs build..." },
       { type: "build_log", stream: "stdout", message: "build line" },
     ]);
@@ -601,11 +604,13 @@ describe("importSandboxImage", () => {
     expect(result).toEqual({ id: "tpl-1", snapshot_id: "snap-1" });
   });
 
-  it("forwards cas to the native import binding and defaults it off", async () => {
+  it("forwards cas to the native import binding, defaulting to a CAS image", async () => {
     const { captured } = makeFakeBinding();
     await importSandboxImage("ubuntu:24.04", { cas: true });
     expect(captured.options.cas).toBe(true);
     await importSandboxImage("ubuntu:24.04");
+    expect(captured.options.cas).toBe(true);
+    await importSandboxImage("ubuntu:24.04", { cas: false });
     expect(captured.options.cas).toBe(false);
   });
 
@@ -649,7 +654,7 @@ describe("importSandboxImage", () => {
     expect(events).toEqual([
       {
         type: "status",
-        message: "Importing image 'pytorch/pytorch:2.4.1' as 'pytorch'...",
+        message: "Importing 'pytorch/pytorch:2.4.1' as CAS image 'pytorch'...",
       },
       { type: "status", message: "Pulling layers..." },
       { type: "build_log", stream: "stdout", message: "applied layer" },
@@ -691,6 +696,27 @@ describe("importSandboxImage", () => {
       projectId: "proj_1",
       useScopeHeaders: true,
     });
+  });
+
+  it("builds and imports CAS images from the standalone CLIs unless --no-cas is passed", async () => {
+    vi.stubEnv("TENSORLAKE_API_KEY", "tl_apiKey_test");
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const tempDir = await mkdir(
+      path.join(os.tmpdir(), `tensorlake-images-${Date.now()}-cli-cas`),
+      { recursive: true },
+    );
+    const dockerfilePath = path.join(tempDir, "Dockerfile");
+    await writeFile(dockerfilePath, "FROM python:3.12-slim\n", "utf8");
+
+    const { captured } = makeFakeBinding();
+    await runCreateSandboxImageCli([dockerfilePath]);
+    expect(captured.options.cas).toBe(true);
+    await runCreateSandboxImageCli([dockerfilePath, "--no-cas"]);
+    expect(captured.options.cas).toBe(false);
+    await runImportSandboxImageCli(["ubuntu:24.04"]);
+    expect(captured.options.cas).toBe(true);
+    await runImportSandboxImageCli(["ubuntu:24.04", "--no-cas"]);
+    expect(captured.options.cas).toBe(false);
   });
 });
 

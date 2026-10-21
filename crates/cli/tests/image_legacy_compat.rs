@@ -8,7 +8,7 @@
 //! requests (method, path, body, relevant headers), stdout/stderr and exit
 //! status that revision produces; the Image Service build operations added
 //! afterwards must leave them byte-for-byte unchanged. In particular a
-//! positively legacy flow — `--cas` off, a `sandbox_template_` id, a legacy
+//! positively legacy flow — `--no-cas`, a `sandbox_template_` id, a legacy
 //! `.tlsnap` snapshot, `tl sbx create --image` — makes zero Image Service
 //! requests, and the two existing discovery probes (merged `ls`, an untyped
 //! name) are recorded explicitly rather than treated as legacy.
@@ -24,7 +24,7 @@ use serde_json::json;
 
 const LEGACY_BUILDS_PATH: &str = "/platform/v1/sandbox-template-builds";
 
-/// `image create` without `--cas`: the legacy builder's first request is the
+/// `image create --no-cas`: the legacy builder's first request is the
 /// platform template lookup of the Dockerfile base, then the rootfs build
 /// preparation. A failure there is reported as it always was; no build ID
 /// is printed, no `Idempotency-Key` is sent, and no Image Service request
@@ -34,7 +34,7 @@ async fn legacy_create_keeps_its_requests_output_and_error() {
     let dir = tempfile::tempdir().unwrap();
     write_dockerfile(dir.path(), "FROM ubuntu:24.04\nRUN echo hi\n");
     let run = run(
-        &["image", "create", "-n", "img", "Dockerfile"],
+        &["image", "create", "--no-cas", "-n", "img", "Dockerfile"],
         vec![
             introspection(),
             reply(
@@ -78,19 +78,19 @@ async fn legacy_create_keeps_its_requests_output_and_error() {
     let stderr = run.stderr();
     assert_eq!(
         stderr,
-        "⚙️  Loading Dockerfile...\n⚙️  Selected image name: img\n⚙️  Preparing rootfs build...\nError: failed to prepare sandbox image build (HTTP 500 Internal Server Error): {\"message\":\"baseline failure\"}\n"
+        "⚙️  Loading Dockerfile...\n⚙️  Selected image name: img\n⚙️  Preparing legacy image build...\nError: failed to prepare legacy image build (HTTP 500 Internal Server Error): {\"message\":\"baseline failure\"}\n"
     );
     assert!(!stderr.contains("Build ID"), "{stderr}");
     assert!(run.stdout().is_empty(), "{}", run.stdout());
 }
 
-/// `image import` without `--cas`: the legacy import prepares straight away
+/// `image import --no-cas`: the legacy import prepares straight away
 /// (no template lookup) and reports the same error.
 #[tokio::test]
 async fn legacy_import_keeps_its_requests_output_and_error() {
     let dir = tempfile::tempdir().unwrap();
     let run = run(
-        &["image", "import", "-n", "img", "ubuntu:24.04"],
+        &["image", "import", "--no-cas", "-n", "img", "ubuntu:24.04"],
         vec![
             introspection(),
             reply(
@@ -120,7 +120,7 @@ async fn legacy_import_keeps_its_requests_output_and_error() {
         "{stderr}"
     );
     assert!(
-        stderr.ends_with("Error: failed to prepare sandbox image build (HTTP 500 Internal Server Error): {\"message\":\"baseline failure\"}\n"),
+        stderr.ends_with("Error: failed to prepare legacy image build (HTTP 500 Internal Server Error): {\"message\":\"baseline failure\"}\n"),
         "{stderr}"
     );
     assert!(!stderr.contains("Build ID"), "{stderr}");
@@ -144,7 +144,7 @@ async fn legacy_create_ctrl_c_keeps_the_default_interrupt_and_sends_nothing() {
     .await;
     let child = image_support::command(
         &server.url,
-        &["image", "create", "-n", "img", "Dockerfile"],
+        &["image", "create", "--no-cas", "-n", "img", "Dockerfile"],
         dir.path(),
     )
     .stdout(std::process::Stdio::piped())
@@ -470,11 +470,21 @@ async fn legacy_rm_by_name_never_falls_through_on_other_answers() {
     )
     .await;
     assert!(accepted.output.status.success(), "{}", accepted.stderr());
+    // A deleted CAS image is followed by one lookup of a same-named legacy
+    // image to delete as well (none here).
     assert_eq!(
         accepted.lines(),
-        vec!["DELETE /images/v4/images/name/legacy-img HTTP/1.1"]
+        vec![
+            "DELETE /images/v4/images/name/legacy-img HTTP/1.1",
+            "GET /platform/v1/sandbox-templates/by-name/legacy-img HTTP/1.1",
+        ]
     );
     assert_eq!(accepted.stdout().trim(), "Deleted image 'legacy-img'.");
+    assert!(
+        !accepted.stderr().contains("Legacy image"),
+        "{}",
+        accepted.stderr()
+    );
 
     let conflict = run_rm_with_image_service(
         dir.path(),
@@ -591,7 +601,7 @@ async fn legacy_register_uses_the_platform_registry_only() {
     assert_eq!(body["snapshotFormatVersion"], "durable_archive_v1");
     assert_eq!(
         run.stdout(),
-        "Registered image 'legacy-img' -> snapshot snap-legacy (rootfs 10 GiB)\nTemplate: sandbox_template_9\ns3://snapshots/snap-legacy.tar.zst\n"
+        "Registered legacy image 'legacy-img' -> snapshot snap-legacy (rootfs 10 GiB)\nTemplate: sandbox_template_9\ns3://snapshots/snap-legacy.tar.zst\n"
     );
     assert!(run.stderr().is_empty(), "{}", run.stderr());
 }

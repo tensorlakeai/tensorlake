@@ -1,11 +1,11 @@
-//! Image Service build operations: start, get, wait and cancel a CAS image
+//! CAS image build operations: start, get, wait and cancel a CAS image
 //! build or import as a first-class operation (ADR 0107).
 //!
 //! # Scope: CAS only
 //!
-//! Everything in this module addresses the Image Service, the build plane of
-//! CAS (content-addressed streaming) images. Legacy images — `tl sbx image
-//! create`/`import` without `--cas`, `sandbox_template_` ids, `.tlsnap`
+//! Everything in this module addresses the build operations of CAS
+//! (content-addressed streaming) images. Legacy images — `tl sbx image
+//! create`/`import` with `--no-cas`, `sandbox_template_` ids, `.tlsnap`
 //! snapshots — have no build operation here: [`start_build`] and
 //! [`start_import`] refuse options whose `cas` flag is off, and a
 //! `sandbox_template_` reference is never looked up as a build id. The legacy
@@ -99,7 +99,7 @@ use crate::{
 
 /// The immutable publication result of one build: the image exactly as the
 /// build published it, presented in the platform template shape the merged
-/// catalog answers (derived locally from the Image Service's trimmed
+/// catalog answers (derived locally from the CAS image registry's trimmed
 /// record, see [`ImageServiceImage::into_template`]). One image
 /// representation for the SDK and the CLI.
 pub type ImageBuildResult = SandboxTemplate;
@@ -111,8 +111,8 @@ pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
 /// cancellation before reporting the acknowledgement as unknown.
 pub const CANCEL_HANDSHAKE_BUDGET: Duration = Duration::from_secs(30);
 
-/// Added to the service-reported operation deadline: the time a normal Image
-/// Service deployment needs to adopt the operation and finish it.
+/// Added to the service-reported operation deadline: the time a normal
+/// service deployment needs to adopt the operation and finish it.
 pub const DEPLOYMENT_RECOVERY_ALLOWANCE: Duration = Duration::from_secs(10 * 60);
 
 /// Wait bound used when the service reports no operation deadline and the
@@ -125,7 +125,7 @@ pub fn new_client_request_id() -> String {
     hex::encode(rand::random::<[u8; 16]>())
 }
 
-/// Whether `id` is a request id the Image Service accepts: 1 to 128 printable
+/// Whether `id` is a request id the CAS image API accepts: 1 to 128 printable
 /// ASCII characters. Ids from other generators are opaque, not parsed.
 pub fn validate_client_request_id(id: &str) -> Result<(), String> {
     if id.is_empty() || id.len() > 128 {
@@ -258,7 +258,7 @@ pub struct ContextUploadCapability {
     pub max_bytes: Option<u64>,
 }
 
-/// One build or import, as the Image Service reports it (the twelve-field
+/// One CAS image build or import, as the CAS image API reports it (the twelve-field
 /// `BuildInfo`). Unknown fields are ignored so newer services remain
 /// readable.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -582,7 +582,7 @@ pub enum ImageBuildError {
     Timeout { build_id: String, waited: Duration },
     #[error("{0}")]
     Interrupted(InterruptionReport),
-    #[error("Image Service request failed (HTTP {status}): {message}")]
+    #[error("CAS image API request failed (HTTP {status}): {message}")]
     Service { status: u16, message: String },
     #[error("{0}")]
     Sdk(#[from] SdkError),
@@ -927,7 +927,7 @@ where
     crate::sandbox_images::start_cas_import(options, docker_config_json, interrupt, emit).await
 }
 
-/// New operations address the Image Service only. A reference that is
+/// New operations address the CAS image registry only. A reference that is
 /// positively a legacy template id, or an image id rather than a build id,
 /// is refused before any request.
 pub(crate) fn reject_legacy_reference(build_id: &str) -> Result<(), ImageBuildError> {
@@ -937,14 +937,14 @@ pub(crate) fn reject_legacy_reference(build_id: &str) -> Result<(), ImageBuildEr
     }
     if build_id.starts_with(crate::sandbox_image_catalog::SANDBOX_TEMPLATE_ID_PREFIX) {
         return Err(ImageBuildError::usage(format!(
-            "'{build_id}' is a legacy sandbox template id; legacy images have no build \
-             operation to get, wait for or cancel"
+            "'{build_id}' is a legacy image id; legacy images have no build operation to \
+             get, wait for or cancel"
         )));
     }
     if build_id.starts_with(crate::sandbox_image_catalog::IMAGE_SERVICE_ID_PREFIX) {
         return Err(ImageBuildError::usage(format!(
-            "'{build_id}' is an image id, not a build id; look the image up with describe, or \
-             use the build id admission returned"
+            "'{build_id}' is a CAS image id, not a build id; look the CAS image up with \
+             describe, or use the build id admission returned"
         )));
     }
     Ok(())

@@ -518,7 +518,9 @@ class TestStartBuild(unittest.TestCase):
         self.assertEqual(handle.client_request_id, "rid-generated")
         self.assertEqual(handle.info.status, "pending")
         self.assertEqual(handle.info.raw["future_field"], {"ignored": True})
-        self.assertIn({"type": "status", "message": "Building image 'img'..."}, events)
+        self.assertIn(
+            {"type": "status", "message": "Building CAS image 'img'..."}, events
+        )
 
     def test_start_build_renders_an_image_with_an_empty_context(self):
         image = Image(name="cas-img", base_image="python:3.12-slim")
@@ -954,7 +956,9 @@ class TestLegacyBoundary(unittest.TestCase):
                 patch.object(builds, "_rust_start_image_build") as start_native,
             ):
                 with self.assertRaises(sbm.SandboxImageBuildError) as raised:
-                    sbm.build_sandbox_image(str(dockerfile), registered_name="img")
+                    sbm.build_sandbox_image(
+                        str(dockerfile), registered_name="img", cas=False
+                    )
         self.assertIs(type(raised.exception), sbm.SandboxImageBuildError)
         self.assertEqual(
             str(raised.exception),
@@ -973,7 +977,7 @@ class TestLegacyBoundary(unittest.TestCase):
             ) as native,
         ):
             with self.assertRaises(sbm.SandboxImageBuildError) as raised:
-                sbm.import_sandbox_image("ubuntu:24.04")
+                sbm.import_sandbox_image("ubuntu:24.04", cas=False)
         self.assertIs(type(raised.exception), sbm.SandboxImageBuildError)
         self.assertIs(native.call_args.kwargs["cas"], False)
 

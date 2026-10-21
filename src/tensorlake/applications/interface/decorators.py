@@ -77,7 +77,7 @@ class _ApplicationDecorator(_Decorator):
             retries=self._retries,
             region=self._region,
             # Use a unique random version. We don't provide user controlled versioning at the moment.
-            # Keep the identifier lowercase so it is also a valid Image Service
+            # Keep the identifier lowercase so it is also a valid CAS image
             # repository-name component.
             version=nanoid(alphabet="0123456789abcdefghijklmnopqrstuvwxyz"),
             allow=list(self._allow),

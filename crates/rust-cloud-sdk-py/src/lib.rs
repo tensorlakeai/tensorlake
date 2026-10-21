@@ -193,12 +193,14 @@ impl CloudApiClient {
     }
 
     /// Delete a registered sandbox image by name or id through the merged
-    /// catalog (ADR 0107): an `image_` id or a name known to the Image
-    /// Service deletes a CAS image, a `sandbox_template_` id or a name known
-    /// only to the platform registry deletes a legacy one. Not found in
-    /// either raises the 404 as a `remote_api` error. Replayed only when the
-    /// request provably never reached a server: a lost response must not
-    /// retry into deleting a same-named image in the other catalog.
+    /// catalog (ADR 0107): an `image_` id or a name known to the CAS image
+    /// registry deletes a CAS image, a `sandbox_template_` id or a name known
+    /// only to the legacy image registry deletes a legacy one. A name whose CAS
+    /// image is deleted also loses its same-named legacy image, which can no
+    /// longer start sandboxes. Not found in either raises the 404 as a
+    /// `remote_api` error. Replayed only when the request provably never
+    /// reached a server: a lost response must not retry into deleting a
+    /// same-named image in the other catalog.
     #[pyo3(signature = (image_name, organization_id=None, project_id=None))]
     fn delete_sandbox_image(
         &self,
@@ -4125,7 +4127,7 @@ fn load_docker_config_json() -> PyResult<String> {
     docker_compat=false,
     dockerfile_text=None,
     context_dir=None,
-    cas=false,
+    cas=true,
     build_args=None,
     emit=None,
     docker_config_json=None,
@@ -4258,7 +4260,7 @@ fn build_sandbox_image(
     use_scope_headers=false,
     user_agent=None,
     docker_compat=false,
-    cas=false,
+    cas=true,
     emit=None,
     docker_config_json=None,
 ))]
@@ -4705,7 +4707,7 @@ where
     }
 }
 
-/// Map a CAS operation failure to the Python exception. Typed Image Service
+/// Map a CAS operation failure to the Python exception. Typed CAS image build
 /// outcomes become `CloudSandboxClientError(("image_build", None, json))`
 /// where `json` carries `code`, `message`, the build id and the outcome
 /// fields; the Python layer turns them into typed exceptions. Other failures

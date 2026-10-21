@@ -106,26 +106,29 @@ class Image:
         is_public: bool = False,
         docker_compat: bool = False,
         context_dir: str | None = None,
-        cas: bool = False,
+        cas: bool = True,
         build_args: dict[str, str] | None = None,
         verbose: bool = False,
         docker_config_json: str | None = None,
     ) -> dict:
         """Build and register this sandbox image.
 
-        Builds a non-CAS image by default. Pass ``cas=True`` to build a CAS
-        image through the Image Service.
+        Builds a CAS image by default. Pass ``cas=False`` to build a legacy
+        image instead.
 
         Args:
             registered_name: Name to register the image under. Defaults to ``self.name``.
             cpus: CPUs for the build sandbox (default 2.0).
             memory_mb: Memory for the build sandbox in MiB (default 4096).
             disk_mb: Root disk size for the generated sandbox image in MiB.
-            builder_disk_mb: Root disk size for the temporary builder sandbox in MiB.
+            builder_disk_mb: Root disk size for the temporary builder sandbox
+                in MiB. Legacy images only; a CAS image build sizes its builder
+                from ``disk_mb``.
             is_public: Make the registered image publicly accessible.
             docker_compat: Use Docker/BuildKit max compatibility mode (build
                 is slower and uses more memory and disk space on builder
-                sandbox).
+                sandbox). Legacy images only; a CAS image build always runs
+                BuildKit.
             context_dir: Build context directory, used exactly like
                 ``docker build <context_dir>``: it is uploaded as-is and
                 ``copy()``/``add()`` sources resolve relative to it. Required
@@ -133,16 +136,19 @@ class Image:
                 files — building without it then raises. When the image has no
                 such ops it may be omitted, and an empty context (just the
                 generated Dockerfile) is uploaded so the cwd is not archived.
-            cas: Build a CAS image through the Image Service. Defaults to False.
-            build_args: Build-time variables for CAS builds. The generated
-                Dockerfile declares these arguments for use in ``base_image``
-                and build operations. Non-CAS builds reject build arguments.
+            cas: Build a CAS image (the default). Pass ``False`` to build a
+                legacy image.
+            build_args: Build-time variables for CAS image builds. The
+                generated Dockerfile declares these arguments for use in
+                ``base_image`` and build operations. Legacy image builds
+                reject build arguments.
             docker_config_json: Docker config JSON contents. Omit to discover local
                 config at entry; pass "{}" to disable discovery.
             verbose: If True, print build progress to stderr.
 
         Returns:
-            The registered sandbox template response as a dict.
+            The registered CAS or legacy image as a dict in the
+            sandbox-template shape.
         """
         from .sandbox_builder import build_sandbox_image
 

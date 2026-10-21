@@ -191,7 +191,7 @@ describe("image build operations", () => {
       buildArgs: { A: "1" },
     });
     expect(interruptId).toBeUndefined();
-    expect(events).toContainEqual({ type: "status", message: "Building image 'img'..." });
+    expect(events).toContainEqual({ type: "status", message: "Building CAS image 'img'..." });
     expect(events).toContainEqual({
       type: "build_accepted",
       message: "Build build-1 accepted",
@@ -623,7 +623,7 @@ describe("CAS convenience paths and the legacy boundary", () => {
 
   it("legacy createSandboxImage never receives an interrupt and keeps its error path", async () => {
     const binding = makeFakeBinding();
-    await createSandboxImage(path.join(tempDir, "Dockerfile"));
+    await createSandboxImage(path.join(tempDir, "Dockerfile"), { cas: false });
     expect(binding.createImageBuildInterrupt).not.toHaveBeenCalled();
     expect(binding.buildSandboxImage.mock.calls[0]!.length).toBe(2);
     expect(binding.buildSandboxImage.mock.calls[0]![0]).toMatchObject({ cas: false });
@@ -631,7 +631,9 @@ describe("CAS convenience paths and the legacy boundary", () => {
     // A legacy failure is the plain native error, not a typed build error.
     const plain = new Error("rootfs build preparation failed (HTTP 500)");
     binding.buildSandboxImage.mockRejectedValueOnce(plain);
-    const error = await createSandboxImage(path.join(tempDir, "Dockerfile")).catch((e: unknown) => e);
+    const error = await createSandboxImage(path.join(tempDir, "Dockerfile"), { cas: false }).catch(
+      (e: unknown) => e,
+    );
     expect(error).toBe(plain);
     expect(binding.cancelImageBuild).not.toHaveBeenCalled();
     expect(binding.triggerImageBuildInterrupt).not.toHaveBeenCalled();
@@ -641,11 +643,11 @@ describe("CAS convenience paths and the legacy boundary", () => {
     const binding = makeFakeBinding();
     const controller = new AbortController();
     await expect(
-      createSandboxImage(path.join(tempDir, "Dockerfile"), { signal: controller.signal }),
-    ).rejects.toThrow(/only supported for CAS image builds/);
+      createSandboxImage(path.join(tempDir, "Dockerfile"), { cas: false, signal: controller.signal }),
+    ).rejects.toThrow(/not supported for legacy image builds/);
     await expect(
-      importSandboxImage("ubuntu:24.04", { signal: controller.signal }),
-    ).rejects.toThrow(/only supported for CAS image imports/);
+      importSandboxImage("ubuntu:24.04", { cas: false, signal: controller.signal }),
+    ).rejects.toThrow(/not supported for legacy image imports/);
     expect(binding.buildSandboxImage).not.toHaveBeenCalled();
     expect(binding.importSandboxImage).not.toHaveBeenCalled();
     expect(binding.createImageBuildInterrupt).not.toHaveBeenCalled();
@@ -654,9 +656,9 @@ describe("CAS convenience paths and the legacy boundary", () => {
   it("importSandboxImage with cas wires the signal and legacy imports do not", async () => {
     const binding = makeFakeBinding();
     const controller = new AbortController();
-    await importSandboxImage("ubuntu:24.04", { cas: true, signal: controller.signal });
+    await importSandboxImage("ubuntu:24.04", { signal: controller.signal });
     expect(binding.importSandboxImage.mock.calls[0]![2]).toBe(7);
-    await importSandboxImage("ubuntu:24.04");
+    await importSandboxImage("ubuntu:24.04", { cas: false });
     expect(binding.importSandboxImage.mock.calls[1]!.length).toBe(2);
     expect(binding.createImageBuildInterrupt).toHaveBeenCalledTimes(1);
   });

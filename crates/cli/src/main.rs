@@ -1751,7 +1751,8 @@ enum SbxFsCommands {
 
 #[derive(Subcommand)]
 enum ImageCommands {
-    /// Register a custom snapshot-backed sandbox image name
+    /// Register a completed snapshot as a sandbox image: a CAS snapshot
+    /// becomes a CAS image, a legacy snapshot a legacy image
     Register {
         /// Image name to register
         image_name: String,
@@ -1759,9 +1760,9 @@ enum ImageCommands {
         /// Completed snapshot ID backing this image
         snapshot_id: String,
 
-        /// Dockerfile to store with a legacy (non-CAS) image for reference.
-        /// Optional; CAS snapshots are registered through the Image Service,
-        /// which stores no Dockerfile.
+        /// Dockerfile to store with a legacy image for reference. Optional;
+        /// a CAS snapshot is registered as a CAS image, which stores no
+        /// Dockerfile.
         #[arg(long = "dockerfile", value_name = "PATH")]
         dockerfile_path: Option<String>,
 
@@ -1770,7 +1771,8 @@ enum ImageCommands {
         public: bool,
     },
 
-    /// Register a sandbox image from a Dockerfile
+    /// Build a CAS sandbox image from a Dockerfile. Pass --no-cas to build a
+    /// legacy image instead.
     Create {
         /// Path to the Dockerfile
         dockerfile_path: String,
@@ -1784,7 +1786,9 @@ enum ImageCommands {
         #[arg(long = "disk_mb")]
         disk_mb: Option<u64>,
 
-        /// Root disk size in MiB for the temporary builder sandbox
+        /// Root disk size in MiB for the temporary builder sandbox. Legacy
+        /// images only (--no-cas): a CAS image build sizes its builder from
+        /// --disk_mb and ignores this option.
         #[arg(long = "builder_disk_mb")]
         builder_disk_mb: Option<u64>,
 
@@ -1804,26 +1808,33 @@ enum ImageCommands {
         #[arg(short, long)]
         public: bool,
 
-        /// Use Docker/BuildKit max compatibility mode (build is slower and uses more memory and disk space on builder sandbox)
+        /// Use Docker/BuildKit max compatibility mode (build is slower and uses more memory and disk
+        /// space on builder sandbox). Legacy images only (--no-cas): a CAS image build always runs
+        /// BuildKit and ignores this option.
         #[arg(long = "docker_compat")]
         docker_compat: bool,
 
-        /// Build a CAS (content-addressed streaming) image through the Image
-        /// Service build plane (non-default). CAS images cold-boot by
-        /// faulting content on demand instead of localizing a monolithic
-        /// snapshot. Routed through the API host's /images/v4 path.
-        #[arg(long)]
+        /// Build a CAS (content-addressed streaming) image. This is the
+        /// default; the flag is accepted for compatibility.
+        #[arg(long, hide = true, overrides_with = "no_cas")]
         cas: bool,
 
-        /// Dockerfile build arg, KEY=VALUE. Repeatable. CAS builds only.
-        #[arg(long = "build-arg")]
+        /// Build a legacy image instead of a CAS image. CAS images cold-boot
+        /// by faulting content on demand instead of localizing a monolithic
+        /// snapshot; legacy images have no build operation, so --no-wait and
+        /// --build-arg are not supported with this flag.
+        #[arg(long = "no-cas", overrides_with = "cas")]
+        no_cas: bool,
+
+        /// Dockerfile build arg, KEY=VALUE. Repeatable. CAS images only.
+        #[arg(long = "build-arg", conflicts_with = "no_cas")]
         build_arg: Vec<String>,
 
         /// Return as soon as the build is admitted and its context is
         /// uploaded, printing the build ID instead of waiting for
         /// publication. Follow it with `tl sbx image build wait BUILD_ID`.
-        /// CAS builds only (--cas).
-        #[arg(long = "no-wait", requires = "cas")]
+        /// CAS images only.
+        #[arg(long = "no-wait", conflicts_with = "no_cas")]
         no_wait: bool,
 
         /// Print the sandbox image result JSON to stdout
@@ -1831,9 +1842,9 @@ enum ImageCommands {
         json: bool,
     },
 
-    /// Import a registry image directly into a sandbox image (no Dockerfile,
-    /// no Docker daemon — the image's layers are written straight into the
-    /// rootfs)
+    /// Import a registry image directly into a CAS sandbox image (no
+    /// Dockerfile, no Docker daemon — the image's layers are written straight
+    /// into the rootfs). Pass --no-cas to import a legacy image instead.
     Import {
         /// Registry image reference to import (e.g. ubuntu:24.04,
         /// pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime, ghcr.io/org/app:v1)
@@ -1847,7 +1858,9 @@ enum ImageCommands {
         #[arg(long = "disk_mb")]
         disk_mb: Option<u64>,
 
-        /// Root disk size in MiB for the temporary builder sandbox
+        /// Root disk size in MiB for the temporary builder sandbox. Legacy
+        /// images only (--no-cas): a CAS image import sizes its builder from
+        /// --disk_mb and ignores this option.
         #[arg(long = "builder_disk_mb")]
         builder_disk_mb: Option<u64>,
 
@@ -1863,21 +1876,28 @@ enum ImageCommands {
         #[arg(short, long)]
         public: bool,
 
-        /// Use Docker/BuildKit max compatibility mode (import is slower and uses more memory and disk space on builder sandbox)
+        /// Use Docker/BuildKit max compatibility mode (import is slower and uses more memory and
+        /// disk space on builder sandbox). Legacy images only (--no-cas): a CAS image import
+        /// ignores this option.
         #[arg(long = "docker_compat")]
         docker_compat: bool,
 
-        /// Import as a CAS (content-addressed streaming) image through the
-        /// Image Service build plane (non-default). CAS images cold-boot by
-        /// faulting content on demand instead of localizing a monolithic
-        /// snapshot. Routed through the API host's /images/v4 path.
-        #[arg(long)]
+        /// Import as a CAS (content-addressed streaming) image. This is the
+        /// default; the flag is accepted for compatibility.
+        #[arg(long, hide = true, overrides_with = "no_cas")]
         cas: bool,
+
+        /// Import as a legacy image instead of a CAS image. CAS images
+        /// cold-boot by faulting content on demand instead of localizing a
+        /// monolithic snapshot; legacy images have no build operation, so
+        /// --no-wait is not supported with this flag.
+        #[arg(long = "no-cas", overrides_with = "cas")]
+        no_cas: bool,
 
         /// Return as soon as the import is admitted, printing the build ID
         /// instead of waiting for publication. Follow it with
-        /// `tl sbx image build wait BUILD_ID`. CAS imports only (--cas).
-        #[arg(long = "no-wait", requires = "cas")]
+        /// `tl sbx image build wait BUILD_ID`. CAS images only.
+        #[arg(long = "no-wait", conflicts_with = "no_cas")]
         no_wait: bool,
 
         /// Print the sandbox image result JSON to stdout
@@ -1885,16 +1905,16 @@ enum ImageCommands {
         json: bool,
     },
 
-    /// Inspect, wait for or cancel a CAS image build or import (an Image
-    /// Service build operation). `tl sbx image create --cas` and `import
-    /// --cas` print the build ID at admission; `--no-wait` leaves the build
-    /// running. Legacy images have no build operation.
+    /// Inspect, wait for or cancel a CAS image build or import (a build
+    /// operation). `tl sbx image create` and `import` print the build ID of
+    /// a CAS image at admission; `--no-wait` leaves the build running.
+    /// Legacy images have no build operation.
     Build {
         #[command(subcommand)]
         command: ImageBuildCommands,
     },
 
-    /// List all sandbox images
+    /// List all CAS and legacy sandbox images
     Ls {
         /// Accepted for compatibility and ignored: the list always includes
         /// CAS and legacy images, told apart by the Format column.
@@ -1906,17 +1926,21 @@ enum ImageCommands {
         json: bool,
     },
 
-    /// Show details for a sandbox image
+    /// Show details for a CAS or legacy sandbox image
     Describe {
         /// Image name or ID
         name_or_id: String,
     },
 
-    /// Delete a published sandbox image. A build in progress is cancelled
-    /// with `tl sbx image build cancel BUILD_ID`, not by deleting its name:
-    /// a name whose only state is an unfinished first build has no
-    /// published image, so rm reports it as not found and leaves the build
-    /// running.
+    /// Delete a published CAS or legacy sandbox image. A name is deleted
+    /// from both the CAS and the legacy image registries: once its CAS image
+    /// is deleted, a legacy image of the same name can no longer be used, so
+    /// it is deleted too. An `image_` ID deletes only that CAS image and a
+    /// `sandbox_template_` ID only that legacy image. A build in progress is
+    /// cancelled with
+    /// `tl sbx image build cancel BUILD_ID`, not by deleting its name: a
+    /// name whose only state is an unfinished first build has no published
+    /// image, so rm reports it as not found and leaves the build running.
     #[command(alias = "delete")]
     Rm {
         /// Image name or ID
@@ -1924,15 +1948,15 @@ enum ImageCommands {
     },
 }
 
-/// `tl sbx image build get|wait|cancel`. CAS only: every subcommand
-/// addresses the Image Service build operation by its service-generated
-/// build ID, which admission returns and the CLI prints.
+/// `tl sbx image build get|wait|cancel`. CAS images only: every subcommand
+/// addresses a CAS image build operation by its service-generated build ID,
+/// which admission returns and the CLI prints.
 #[derive(Subcommand)]
 enum ImageBuildCommands {
     /// Show a build: status, phase, image name, attempt, builder sandbox,
     /// timestamps and deadline, result or error
     Get {
-        /// Build ID printed at admission (e.g. by `tl sbx image create --cas`)
+        /// Build ID printed at admission (e.g. by `tl sbx image create`)
         build_id: String,
 
         /// Print the build record as JSON to stdout
@@ -2858,7 +2882,8 @@ async fn run_command(
                             memory,
                             public,
                             docker_compat,
-                            cas,
+                            cas: _,
+                            no_cas,
                             build_arg,
                             no_wait,
                             json,
@@ -2884,7 +2909,7 @@ async fn run_command(
                                 memory,
                                 public,
                                 docker_compat,
-                                cas,
+                                !no_cas,
                                 &build_arg,
                                 no_wait,
                                 json,
@@ -2900,7 +2925,8 @@ async fn run_command(
                             memory,
                             public,
                             docker_compat,
-                            cas,
+                            cas: _,
+                            no_cas,
                             no_wait,
                             json,
                         } => {
@@ -2914,7 +2940,7 @@ async fn run_command(
                                 memory,
                                 public,
                                 docker_compat,
-                                cas,
+                                !no_cas,
                                 no_wait,
                                 json,
                             )
@@ -5450,23 +5476,80 @@ mod tests {
         }
     }
 
+    /// `create` and `import` build CAS images unless `--no-cas` is the last
+    /// of `--cas`/`--no-cas` given; `--cas` stays accepted for compatibility.
     #[test]
-    fn image_create_parses_cas() {
-        match parse_command(["tl", "sbx", "image", "create", "./Dockerfile", "--cas"]) {
-            Commands::Sbx(SbxCommands::Image(ImageCommands::Create { cas, .. })) => {
-                assert!(cas)
+    fn image_create_and_import_default_to_cas() {
+        fn no_cas(args: &[&str]) -> bool {
+            match Cli::try_parse_from(args).unwrap().command.unwrap() {
+                Commands::Sbx(SbxCommands::Image(
+                    ImageCommands::Create { no_cas, .. } | ImageCommands::Import { no_cas, .. },
+                )) => no_cas,
+                _ => panic!("expected sbx image create or import command"),
             }
-            _ => panic!("expected sbx image create command"),
+        }
+        for base in [
+            ["tl", "sbx", "image", "create", "./Dockerfile"],
+            ["tl", "sbx", "image", "import", "ubuntu:24.04"],
+        ] {
+            assert!(!no_cas(&base));
+            assert!(!no_cas(&[&base[..], &["--cas"]].concat()));
+            assert!(no_cas(&[&base[..], &["--no-cas"]].concat()));
+            assert!(no_cas(&[&base[..], &["--cas", "--no-cas"]].concat()));
+            assert!(!no_cas(&[&base[..], &["--no-cas", "--cas"]].concat()));
         }
     }
 
+    /// `--no-wait` and `--build-arg` need a CAS image build operation.
     #[test]
-    fn image_import_parses_cas() {
-        match parse_command(["tl", "sbx", "image", "import", "ubuntu:24.04", "--cas"]) {
-            Commands::Sbx(SbxCommands::Image(ImageCommands::Import { cas, .. })) => {
-                assert!(cas)
-            }
-            _ => panic!("expected sbx image import command"),
+    fn image_cas_only_options_conflict_with_no_cas() {
+        for args in [
+            &[
+                "tl",
+                "sbx",
+                "image",
+                "create",
+                "./Dockerfile",
+                "--no-cas",
+                "--no-wait",
+            ][..],
+            &[
+                "tl",
+                "sbx",
+                "image",
+                "create",
+                "./Dockerfile",
+                "--no-cas",
+                "--build-arg",
+                "A=1",
+            ],
+            &[
+                "tl",
+                "sbx",
+                "image",
+                "import",
+                "ubuntu:24.04",
+                "--no-cas",
+                "--no-wait",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err(), "{args:?}");
+        }
+        for args in [
+            &["tl", "sbx", "image", "create", "./Dockerfile", "--no-wait"][..],
+            &[
+                "tl",
+                "sbx",
+                "image",
+                "create",
+                "./Dockerfile",
+                "--no-cas",
+                "--cas",
+                "--no-wait",
+            ],
+            &["tl", "sbx", "image", "import", "ubuntu:24.04", "--no-wait"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_ok(), "{args:?}");
         }
     }
 

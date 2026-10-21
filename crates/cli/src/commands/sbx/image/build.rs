@@ -256,7 +256,7 @@ pub async fn wait(
         .map_err(build_error)?;
     drop(renderer);
     eprintln!(
-        "⚙️  Image '{}' registered ({})",
+        "⚙️  CAS image '{}' registered ({})",
         result.name.as_deref().unwrap_or("-"),
         result.id.as_deref().unwrap_or("-")
     );
@@ -325,7 +325,7 @@ pub fn cancel_outcome_lines(
                 .and_then(|build| build.result.as_ref())
             {
                 lines.push(format!(
-                    "Image '{}' registered ({})",
+                    "CAS image '{}' registered ({})",
                     result.name.as_deref().unwrap_or("-"),
                     result.id.as_deref().unwrap_or("-")
                 ));

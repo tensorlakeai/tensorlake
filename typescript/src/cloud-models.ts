@@ -158,12 +158,12 @@ export interface ApplicationBuildResponse {
 }
 
 /**
- * A registered sandbox image in the platform template shape. Both image
- * families answer it: legacy templates verbatim from the platform API, and
- * CAS images (`snapshotFormatVersion === "content_addressed_streaming_v1"`)
- * derived by the core from the Image Service's trimmed record (id, name,
- * snapshot id, visibility, sizes, timestamps); no content digest or build
- * provenance rides on either.
+ * A registered CAS or legacy sandbox image in the sandbox-template shape.
+ * Both image families answer it: legacy images verbatim from the legacy image
+ * registry, and CAS images (`snapshotFormatVersion ===
+ * "content_addressed_streaming_v1"`) derived by the core from the CAS image
+ * registry's trimmed record (id, name, snapshot id, visibility, sizes,
+ * timestamps); no content digest or build provenance rides on either.
  */
 export interface SandboxTemplate {
   id?: string;
