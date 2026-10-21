@@ -1,8 +1,10 @@
-//! `tl sbx image rm` of a CAS image whose name a legacy image also holds.
-//! Deleting the CAS image releases the name for new sandboxes, so the legacy
-//! image can no longer be used: deleting the name deletes it too, while
-//! deleting an `image_` id deletes only that image and warns. Removing the
-//! legacy image never fails the delete of the CAS image.
+//! `tl sbx image rm` and `describe` by name across the CAS and legacy image
+//! registries. Deleting a CAS image releases its name for new sandboxes, so
+//! a legacy image of the same name can no longer be used: deleting the name
+//! deletes it too, while deleting an `image_` id deletes only that image and
+//! warns. Removing the legacy image never fails the delete of the CAS image.
+//! The CAS image registry lowercases names, so a name is looked up there in
+//! lowercase and in the legacy image registry exactly as given.
 
 mod image_support;
 
@@ -202,4 +204,147 @@ async fn rm_legacy_name_makes_no_extra_request() {
     );
     assert_eq!(run.stdout().trim(), "Deleted image 'app'.");
     assert!(run.stderr().trim().is_empty(), "{}", run.stderr());
+}
+
+/// The CAS image registry stores `MyProject` as `myproject`, so the spelling
+/// used when creating the image deletes it; the legacy image cleaned up
+/// with it is the one named exactly like the CAS image.
+#[tokio::test]
+async fn rm_mixed_case_name_deletes_the_cas_image_by_its_canonical_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = run(
+        &["image", "rm", "MyProject"],
+        vec![
+            introspection(),
+            reply(
+                "DELETE",
+                "/images/v4/images/name/myproject",
+                204,
+                json!(null),
+            ),
+            reply(
+                "GET",
+                "/platform/v1/sandbox-templates/by-name/myproject",
+                200,
+                template_record("sandbox_template_1", "myproject"),
+            ),
+            reply(
+                "DELETE",
+                "/platform/v1/sandbox-templates/sandbox_template_1",
+                204,
+                json!(null),
+            ),
+        ],
+        dir.path(),
+    )
+    .await;
+    assert!(run.output.status.success(), "{}", run.stderr());
+    assert_eq!(
+        run.lines(),
+        vec![
+            "DELETE /images/v4/images/name/myproject HTTP/1.1",
+            "GET /platform/v1/sandbox-templates/by-name/myproject HTTP/1.1",
+            "DELETE /platform/v1/sandbox-templates/sandbox_template_1 HTTP/1.1",
+        ]
+    );
+    assert_eq!(
+        run.stdout().trim(),
+        "Deleted image 'MyProject'.\nAlso deleted legacy image 'myproject' (sandbox_template_1): it \
+         could no longer be used once the CAS image was deleted."
+    );
+}
+
+/// Only a clean CAS 404 falls through, and the legacy image registry gets
+/// the exact spelling, since legacy image names are case-sensitive.
+#[tokio::test]
+async fn rm_mixed_case_name_falls_back_to_the_exact_legacy_spelling() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = run(
+        &["image", "rm", "MyProject"],
+        vec![
+            introspection(),
+            reply(
+                "DELETE",
+                "/images/v4/images/name/myproject",
+                404,
+                json!({"error": "name not found"}),
+            ),
+            reply(
+                "DELETE",
+                "/platform/v1/sandbox-templates/by-name/MyProject",
+                204,
+                json!(null),
+            ),
+        ],
+        dir.path(),
+    )
+    .await;
+    assert!(run.output.status.success(), "{}", run.stderr());
+    assert_eq!(
+        run.lines(),
+        vec![
+            "DELETE /images/v4/images/name/myproject HTTP/1.1",
+            "DELETE /platform/v1/sandbox-templates/by-name/MyProject HTTP/1.1",
+        ]
+    );
+    assert_eq!(run.stdout().trim(), "Deleted image 'MyProject'.");
+}
+
+#[tokio::test]
+async fn describe_mixed_case_name_finds_the_cas_image_then_the_exact_legacy_spelling() {
+    let dir = tempfile::tempdir().unwrap();
+    let cas = run(
+        &["image", "describe", "MyProject"],
+        vec![
+            introspection(),
+            reply(
+                "GET",
+                "/images/v4/images/name/myproject",
+                200,
+                image_record("image_abc", "myproject"),
+            ),
+        ],
+        dir.path(),
+    )
+    .await;
+    assert!(cas.output.status.success(), "{}", cas.stderr());
+    assert_eq!(
+        cas.lines(),
+        vec!["GET /images/v4/images/name/myproject HTTP/1.1"]
+    );
+    assert!(cas.stdout().contains("image_abc"), "{}", cas.stdout());
+
+    let legacy = run(
+        &["image", "describe", "MyProject"],
+        vec![
+            introspection(),
+            reply(
+                "GET",
+                "/images/v4/images/name/myproject",
+                404,
+                json!({"error": "name not found"}),
+            ),
+            reply(
+                "GET",
+                "/platform/v1/sandbox-templates/by-name/MyProject",
+                200,
+                template_record("sandbox_template_1", "MyProject"),
+            ),
+        ],
+        dir.path(),
+    )
+    .await;
+    assert!(legacy.output.status.success(), "{}", legacy.stderr());
+    assert_eq!(
+        legacy.lines(),
+        vec![
+            "GET /images/v4/images/name/myproject HTTP/1.1",
+            "GET /platform/v1/sandbox-templates/by-name/MyProject HTTP/1.1",
+        ]
+    );
+    assert!(
+        legacy.stdout().contains("sandbox_template_1"),
+        "{}",
+        legacy.stdout()
+    );
 }

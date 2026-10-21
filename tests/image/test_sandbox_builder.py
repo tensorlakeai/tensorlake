@@ -364,6 +364,85 @@ class TestCasBuildOptions(unittest.TestCase):
         )
 
 
+# The CAS image naming rule's cases, identical to the Rust core's
+# CAS_IMAGE_NAME_CASES and the TypeScript SDK's table.
+CAS_IMAGE_NAME_CASES = [
+    ("app", "app"),
+    ("MyProject", "myproject"),
+    ("App:V1", "app:v1"),
+    ("app.v2", "app.v2"),
+    ("My Project", "my-project"),
+    ("my  project", "my-project"),
+    ("my__app", "my_app"),
+    ("-app-", "app"),
+    ("._app_.", "app"),
+    ("\u00dcn\u00efcode", "n-code"),
+    ("\u65e5\u672c", "sandbox-image"),
+    ("", "sandbox-image"),
+    ("...", "sandbox-image"),
+    ("image_foo", "sandbox-image"),
+    ("sandbox_template_x", "sandbox-image"),
+    ("0123456789abcdef" * 4, "sandbox-image"),
+]
+
+
+class TestCasImageNames(unittest.TestCase):
+    def test_generated_names_follow_the_shared_rule(self):
+        for raw, expected in CAS_IMAGE_NAME_CASES:
+            with self.subTest(raw=raw):
+                self.assertEqual(
+                    sbm._cas_image_name_from(raw, "sandbox-image"), expected
+                )
+        # The 255-character cap, then trailing separators are dropped again.
+        self.assertEqual(
+            sbm._cas_image_name_from("a" * 254 + "-bc", "sandbox-image"), "a" * 254
+        )
+
+    def test_generated_names_are_valid_and_already_canonical(self):
+        for raw, _ in CAS_IMAGE_NAME_CASES:
+            name = sbm._cas_image_name_from(raw, "sandbox-image")
+            with self.subTest(name=name):
+                self.assertTrue(sbm._is_addressable_cas_image_name(name))
+                self.assertEqual(sbm._canonical_cas_image_name(name), name)
+
+    def test_canonical_names_lowercase_ascii_only(self):
+        self.assertEqual(sbm._canonical_cas_image_name("Team/App:V1"), "team/app:v1")
+        self.assertEqual(
+            sbm._canonical_cas_image_name("\u00c9t\u00c9"), "\u00c9t\u00c9"
+        )
+
+    def test_cas_builds_and_imports_send_the_cas_spelling(self):
+        ctx = _make_ctx()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = Path(tmpdir) / "My Project"
+            project.mkdir()
+            dockerfile = project / "Dockerfile"
+            dockerfile.write_text("FROM scratch\n", encoding="utf-8")
+            with (
+                patch.object(sbm, "_build_context_from_env", return_value=ctx),
+                patch.object(sbm, "_run_rust_image_create", return_value={}) as create,
+                patch.object(sbm, "_run_rust_image_import", return_value={}) as imp,
+            ):
+                sbm.build_sandbox_image(str(dockerfile))
+                sbm.build_sandbox_image(str(dockerfile), registered_name="MyApp")
+                sbm.build_sandbox_image(str(dockerfile), cas=False)
+                sbm.build_sandbox_image(
+                    str(dockerfile), registered_name="MyApp", cas=False
+                )
+                sbm.import_sandbox_image("ubuntu:24.04", registered_name="MyBase")
+                sbm.import_sandbox_image(
+                    "ubuntu:24.04", registered_name="MyBase", cas=False
+                )
+
+        self.assertEqual(
+            [call.args[1] for call in create.call_args_list],
+            ["my-project", "myapp", "My Project", "MyApp"],
+        )
+        self.assertEqual(
+            [call.args[1] for call in imp.call_args_list], ["mybase", "MyBase"]
+        )
+
+
 class TestDeleteSandboxImage(unittest.TestCase):
     def test_deletes_sandbox_image_with_env_context(self):
         ctx = _make_ctx()

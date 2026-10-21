@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  __imageBuildInternals,
   __setNativeBindingForTest,
   createSandboxImage,
   deleteSandboxImage,
@@ -977,5 +978,78 @@ describe("CloudClient sandbox image methods", () => {
       useScopeHeaders: false,
     });
     client.close();
+  });
+});
+
+// The CAS image naming rule's cases, identical to the Rust core's
+// CAS_IMAGE_NAME_CASES and the Python SDK's table.
+const CAS_IMAGE_NAME_CASES: Array<[string, string]> = [
+  ["app", "app"],
+  ["MyProject", "myproject"],
+  ["App:V1", "app:v1"],
+  ["app.v2", "app.v2"],
+  ["My Project", "my-project"],
+  ["my  project", "my-project"],
+  ["my__app", "my_app"],
+  ["-app-", "app"],
+  ["._app_.", "app"],
+  ["\u00dcn\u00efcode", "n-code"],
+  ["\u65e5\u672c", "sandbox-image"],
+  ["", "sandbox-image"],
+  ["...", "sandbox-image"],
+  ["image_foo", "sandbox-image"],
+  ["sandbox_template_x", "sandbox-image"],
+  ["0123456789abcdef".repeat(4), "sandbox-image"],
+];
+
+describe("CAS image names", () => {
+  beforeEach(() => {
+    vi.stubEnv("TENSORLAKE_API_URL", "https://api.tensorlake.test");
+    vi.stubEnv("TENSORLAKE_API_KEY", "tl_key_test");
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    __setNativeBindingForTest(undefined);
+  });
+
+  it("derives generated names by the shared rule", () => {
+    for (const [raw, expected] of CAS_IMAGE_NAME_CASES) {
+      expect(__imageBuildInternals.casImageNameFrom(raw, "sandbox-image"), raw).toBe(expected);
+    }
+    // The 255-character cap, then trailing separators are dropped again.
+    expect(__imageBuildInternals.casImageNameFrom(`${"a".repeat(254)}-bc`, "sandbox-image")).toBe(
+      "a".repeat(254),
+    );
+  });
+
+  it("generates names that are valid and already canonical", () => {
+    for (const [raw] of CAS_IMAGE_NAME_CASES) {
+      const name = __imageBuildInternals.casImageNameFrom(raw, "sandbox-image");
+      expect(__imageBuildInternals.isAddressableCasImageName(name), name).toBe(true);
+      expect(__imageBuildInternals.canonicalCasImageName(name)).toBe(name);
+    }
+    expect(__imageBuildInternals.canonicalCasImageName("Team/App:V1")).toBe("team/app:v1");
+    expect(__imageBuildInternals.canonicalCasImageName("\u00c9t\u00c9")).toBe("\u00c9t\u00c9");
+  });
+
+  it("sends the CAS image registry spelling for CAS images and keeps legacy names", async () => {
+    const project = path.join(os.tmpdir(), `tensorlake-images-${Date.now()}`, "My Project");
+    await mkdir(project, { recursive: true });
+    const dockerfilePath = path.join(project, "Dockerfile");
+    await writeFile(dockerfilePath, "FROM scratch\n", "utf8");
+    const { captured } = makeFakeBinding();
+
+    const names: unknown[] = [];
+    for (const options of [{}, { registeredName: "MyApp" }, { cas: false }, { registeredName: "MyApp", cas: false }]) {
+      await createSandboxImage(dockerfilePath, options);
+      names.push(captured.options.registeredName);
+    }
+    expect(names).toEqual(["my-project", "myapp", "My Project", "MyApp"]);
+
+    await importSandboxImage("ubuntu:24.04", { registeredName: "MyBase" });
+    expect(captured.options.registeredName).toBe("mybase");
+    await importSandboxImage("ubuntu:24.04", { registeredName: "MyBase", cas: false });
+    expect(captured.options.registeredName).toBe("MyBase");
   });
 });

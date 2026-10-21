@@ -624,6 +624,84 @@ async fn cas_create_no_wait_uploads_and_seals_then_prints_the_build_id() {
     assert!(stderr.contains("Sealing build context"), "{stderr}");
 }
 
+/// A CAS image takes the CAS image registry's spelling before anything is
+/// shown or sent: an explicit name is lowercased, a generated default from
+/// the Dockerfile's directory becomes a valid CAS image name.
+#[tokio::test]
+async fn cas_names_are_canonical_before_they_are_shown_or_sent() {
+    let dir = tempfile::tempdir().unwrap();
+    let explicit = run(
+        &[
+            "image",
+            "import",
+            "--no-wait",
+            "-n",
+            "MyBase",
+            "ubuntu:24.04",
+        ],
+        vec![
+            introspection(),
+            reply(
+                "POST",
+                "/images/v4/builds",
+                201,
+                build_json("build-7", "pending", None),
+            ),
+        ],
+        dir.path(),
+    )
+    .await;
+    assert!(explicit.output.status.success(), "{}", explicit.stderr());
+    assert_eq!(explicit.requests[0].json()["name"], "mybase");
+    assert!(
+        explicit.stderr().contains("Selected image name: mybase"),
+        "{}",
+        explicit.stderr()
+    );
+
+    let project = dir.path().join("My Project");
+    std::fs::create_dir(&project).unwrap();
+    write_dockerfile(&project, "FROM scratch\n");
+    let server = start(vec![]).await;
+    let mut admission = build_json("build-9", "pending", None);
+    admission["kind"] = json!("dockerfile");
+    admission["context_upload"] = json!({
+        "url": format!("{}/upload/build-9", server.url),
+        "max_bytes": 10_000_000,
+    });
+    server.script(vec![
+        introspection(),
+        reply("POST", "/images/v4/builds", 201, admission),
+        reply("PUT", "/upload/build-9", 200, json!({})),
+        reply(
+            "POST",
+            "/images/v4/builds/build-9/context/seal",
+            200,
+            json!({"sealed": true}),
+        ),
+    ]);
+    let output = image_support::command(
+        &server.url,
+        &["image", "create", "--no-wait", "My Project/Dockerfile"],
+        dir.path(),
+    )
+    .output()
+    .await
+    .unwrap();
+    let requests = server.finish().await;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("Selected image name: my-project"),
+        "{stderr}"
+    );
+    let admission = requests
+        .iter()
+        .find(|request| request.line == "POST /images/v4/builds HTTP/1.1")
+        .expect("admission request");
+    assert_eq!(admission.json()["name"], "my-project");
+}
+
 #[tokio::test]
 async fn no_wait_with_no_cas_is_a_usage_error_before_any_request() {
     let dir = tempfile::tempdir().unwrap();

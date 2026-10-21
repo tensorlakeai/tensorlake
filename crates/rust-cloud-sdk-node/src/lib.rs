@@ -672,6 +672,8 @@ pub async fn find_sandbox_image(
 /// remove.
 #[napi(object)]
 pub struct SandboxImageLegacyCleanupFailureJs {
+    /// The legacy image's name: the deleted CAS image's canonical name.
+    pub legacy_image_name: String,
     /// The legacy image's `sandbox_template_` id, when known.
     pub legacy_image_id: Option<String>,
     pub error: String,
@@ -693,8 +695,9 @@ pub async fn delete_sandbox_image(
         let reference = reference.clone();
         async move {
             let deletion = catalog.delete_reporting(&reference).await?;
-            Ok(deletion.failed_legacy_cleanup().map(|(id, error)| {
+            Ok(deletion.failed_legacy_cleanup().map(|(name, id, error)| {
                 SandboxImageLegacyCleanupFailureJs {
+                    legacy_image_name: name.to_string(),
                     legacy_image_id: id.map(str::to_string),
                     error: error.to_string(),
                 }

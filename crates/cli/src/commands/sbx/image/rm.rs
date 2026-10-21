@@ -22,17 +22,17 @@ pub async fn run(ctx: &CliContext, name_or_id: &str) -> Result<()> {
         Ok(deletion) => {
             println!("Deleted image '{}'.", name_or_id);
             match deletion.same_named_legacy {
-                Some(LegacyImageDeletion::Deleted { id }) => println!(
-                    "Also deleted legacy image '{name_or_id}'{}: it could no longer be used \
-                     once the CAS image was deleted.",
+                Some(LegacyImageDeletion::Deleted { name, id }) => println!(
+                    "Also deleted legacy image '{name}'{}: it could no longer be used once the \
+                     CAS image was deleted.",
                     id_label(id.as_deref())
                 ),
-                Some(LegacyImageDeletion::Failed { id, error }) => eprintln!(
-                    "⚠️  Could not delete legacy image '{name_or_id}'{}, which can no longer be \
-                     used once the CAS image was deleted: {error}. Delete it with `tl sbx image \
-                     rm {}`.",
+                Some(LegacyImageDeletion::Failed { name, id, error }) => eprintln!(
+                    "⚠️  Could not delete legacy image '{name}'{}, which can no longer be used \
+                     once the CAS image was deleted: {error}. Delete it with `tl sbx image rm \
+                     {}`.",
                     id_label(id.as_deref()),
-                    id.as_deref().unwrap_or(name_or_id)
+                    id.as_deref().unwrap_or(&name)
                 ),
                 None if deletion.family == DeletedImageFamily::Cas => {
                     if let Some(name) = id_image_name {

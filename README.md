@@ -199,6 +199,12 @@ tl sbx image create --no-cas -n app ./Dockerfile   # legacy image
   operations below.
 - **Legacy images only:** `--builder_disk_mb` / `builder_disk_mb` and
   `--docker_compat` / `docker_compat`. A CAS image build ignores them.
+- **Names.** The CAS image registry stores names in lowercase, so `-n MyApp`
+  registers the CAS image `myapp`, and `MyApp` still finds and deletes it. A
+  default CAS image name (the Dockerfile's directory or the imported image's
+  name) is lowercased and made valid, with other characters replaced by `-`:
+  `My Project/Dockerfile` becomes `my-project`. Legacy image names are kept and
+  matched exactly as given.
 - **Base images.** A CAS image build can use CAS images and registry images as a
   base, but not legacy images: rebuild a legacy base image as a CAS image first.
   A `FROM tensorlake/<name>` reference uses the CAS image `tensorlake/cas/<name>`.

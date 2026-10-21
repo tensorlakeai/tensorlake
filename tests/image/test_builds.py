@@ -538,6 +538,17 @@ class TestStartBuild(unittest.TestCase):
         self.assertIn("FROM python:3.12-slim", args[13])
         self.assertTrue(args[14])  # a temporary, empty context directory
 
+    def test_start_import_sends_the_cas_image_registry_spelling(self):
+        started = json.dumps({"build": _build_json(), "client_request_id": "rid"})
+        with (
+            patch.object(builds, "_build_context_from_env", return_value=_ctx()),
+            patch.object(
+                builds, "_rust_start_image_import", return_value=started
+            ) as native,
+        ):
+            builds.start_import("ubuntu:24.04", registered_name="MyBase")
+        self.assertEqual(native.call_args.args[3], "mybase")
+
     def test_start_import_forwards_exact_positional_arguments(self):
         started = json.dumps({"build": _build_json(), "client_request_id": "rid"})
         with (

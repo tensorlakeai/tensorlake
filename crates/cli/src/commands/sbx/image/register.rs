@@ -2,7 +2,9 @@ use crate::auth::context::CliContext;
 use crate::commands::sbx::snapshot::fetch_snapshot_info;
 use crate::error::{CliError, Result};
 use tensorlake::{
-    sandbox_image_catalog::{CAS_SNAPSHOT_FORMAT_VERSION, validate_registered_name},
+    sandbox_image_catalog::{
+        CAS_SNAPSHOT_FORMAT_VERSION, canonical_cas_image_name, validate_registered_name,
+    },
     sandbox_templates::models::{CreateSandboxTemplateRequest, SandboxTemplate},
 };
 
@@ -147,6 +149,8 @@ pub async fn run(
         if dockerfile_path.is_some() {
             eprintln!("⚠️  --dockerfile is ignored for CAS snapshots.");
         }
+        // Shown and sent in the CAS image registry's spelling.
+        let image_name = &canonical_cas_image_name(image_name);
         let catalog = super::sandbox_image_catalog(ctx)?;
         let guard = super::build::CasInterruptGuard::install();
         let mut renderer = super::ImageBuildEventRenderer::new();

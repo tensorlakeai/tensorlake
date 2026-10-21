@@ -27,6 +27,14 @@ export interface CreateSandboxImageOptions {
    */
   dockerConfigJson?: string;
 
+  /**
+   * Name to register the image under. Defaults to the image's `name` or the
+   * Dockerfile stem (the parent directory's name for a file named
+   * `Dockerfile`).
+   * A CAS image name is lowercased, as the CAS image registry stores it; a
+   * default CAS image name is also made valid (other characters become `-`).
+   * Legacy image names are kept as given.
+   */
   registeredName?: string;
   cpus?: number;
   memoryMb?: number;
@@ -87,6 +95,9 @@ export interface ImportSandboxImageOptions {
    * Name to register the image under. Defaults to the image reference's last
    * path segment with any tag/digest stripped (e.g. `pytorch/pytorch:2.4.1`
    * -> `pytorch`).
+   * A CAS image name is lowercased, as the CAS image registry stores it; a
+   * default CAS image name is also made valid (other characters become `-`).
+   * Legacy image names are kept as given.
    */
   registeredName?: string;
   cpus?: number;
@@ -309,14 +320,112 @@ export function buildContextFromEnv(): BuildContext {
 // --- Default-name helper ---------------------------------------------------
 
 const DEFAULT_IMAGE_NAME = "default";
+const DEFAULT_SANDBOX_IMAGE_NAME = "sandbox-image";
+const DEFAULT_IMPORTED_IMAGE_NAME = "imported-image";
+const CAS_NAME_SEPARATORS = "._-";
+const RESERVED_IMAGE_NAME_PREFIXES = ["sandbox_template_", "image_", "cas-v1:"];
+const MAX_CAS_IMAGE_NAME_LENGTH = 255;
 
 function defaultRegisteredName(dockerfilePath: string): string {
   const parsed = path.parse(dockerfilePath);
   if (parsed.name.toLowerCase() === "dockerfile") {
     const parentName = path.basename(path.dirname(dockerfilePath)).trim();
-    return parentName || "sandbox-image";
+    return parentName || DEFAULT_SANDBOX_IMAGE_NAME;
   }
-  return parsed.name || "sandbox-image";
+  return parsed.name || DEFAULT_SANDBOX_IMAGE_NAME;
+}
+
+/**
+ * Mirror the Rust core's `registered_image_name`: the name a build or import
+ * registers, decided before anything is shown or sent. A CAS image takes the
+ * CAS image registry's spelling: an explicit name is lowercased as the
+ * registry would, and a generated default is turned into a valid CAS image
+ * name. Legacy image names are kept as they are.
+ */
+function registeredImageName(
+  explicit: string | undefined,
+  generated: string | undefined,
+  cas: boolean,
+  fallback: string = DEFAULT_SANDBOX_IMAGE_NAME,
+): string {
+  if (explicit || generated === undefined) {
+    const name = explicit ?? "";
+    return cas ? canonicalCasImageName(name) : name;
+  }
+  return cas ? casImageNameFrom(generated, fallback) : generated;
+}
+
+/**
+ * Mirror the Rust core's `canonical_cas_image_name`: the CAS image registry
+ * ASCII-lowercases every name, so `MyProject` and `myproject` name one CAS
+ * image.
+ */
+function canonicalCasImageName(name: string): string {
+  return name.replace(/[A-Z]/g, (c) => c.toLowerCase());
+}
+
+/**
+ * Mirror the Rust core's `cas_image_name_from`: a valid CAS image name for a
+ * generated default. The name is ASCII-lowercased and kept if that makes it
+ * valid. Otherwise every character other than `a-z`, `0-9`, `.`, `_` and `-`
+ * becomes `-`, each run of separators collapses to its first character,
+ * leading and trailing separators are dropped and the result is capped at
+ * 255 characters. `fallback` is used when no valid name remains.
+ */
+function casImageNameFrom(raw: string, fallback: string): string {
+  const lowered = canonicalCasImageName(raw);
+  if (isAddressableCasImageName(lowered)) {
+    return lowered;
+  }
+  let name = "";
+  for (const original of lowered) {
+    const ch = /^[a-z0-9._-]$/.test(original) ? original : "-";
+    const previous = name[name.length - 1];
+    if (
+      CAS_NAME_SEPARATORS.includes(ch) &&
+      previous !== undefined &&
+      CAS_NAME_SEPARATORS.includes(previous)
+    ) {
+      continue;
+    }
+    name += ch;
+  }
+  name = name
+    .replace(/^[._-]+|[._-]+$/g, "")
+    .slice(0, MAX_CAS_IMAGE_NAME_LENGTH)
+    .replace(/[._-]+$/, "");
+  return isAddressableCasImageName(name) ? name : fallback;
+}
+
+/**
+ * Mirror the Rust core's CAS image name grammar: valid in the CAS image
+ * registry and not mistaken for a content digest.
+ */
+function isAddressableCasImageName(name: string): boolean {
+  if (
+    name.length === 0 ||
+    name.length > MAX_CAS_IMAGE_NAME_LENGTH ||
+    RESERVED_IMAGE_NAME_PREFIXES.some((prefix) => name.startsWith(prefix)) ||
+    /^[0-9a-f]{64}$/.test(name)
+  ) {
+    return false;
+  }
+  const colon = name.indexOf(":");
+  const repository = colon === -1 ? name : name.slice(0, colon);
+  if (!repository.split("/").every((component) => /^[a-z0-9]+(?:[._-][a-z0-9]+)*$/.test(component))) {
+    return false;
+  }
+  if (colon === -1) {
+    return true;
+  }
+  const tag = name.slice(colon + 1);
+  return (
+    tag.length > 0 &&
+    tag.length <= 128 &&
+    /^[a-z0-9._-]+$/.test(tag) &&
+    !tag.startsWith(".") &&
+    !tag.startsWith("-")
+  );
 }
 
 /**
@@ -333,7 +442,7 @@ function defaultRegisteredNameFromImage(imageReference: string): string {
     colonIndex > 0 && colonIndex < lastSegment.length - 1
       ? lastSegment.slice(0, colonIndex)
       : lastSegment;
-  return name || "imported-image";
+  return name || DEFAULT_IMPORTED_IMAGE_NAME;
 }
 
 // --- Emit helpers ----------------------------------------------------------
@@ -389,6 +498,16 @@ export const __imageBuildInternals = {
   defaultRegisteredName: (dockerfilePath: string) => defaultRegisteredName(dockerfilePath),
   defaultRegisteredNameFromImage: (reference: string) =>
     defaultRegisteredNameFromImage(reference),
+  registeredImageName: (
+    explicit: string | undefined,
+    generated: string | undefined,
+    cas: boolean,
+    fallback?: string,
+  ) => registeredImageName(explicit, generated, cas, fallback),
+  casImageNameFrom: (raw: string, fallback: string) => casImageNameFrom(raw, fallback),
+  canonicalCasImageName: (name: string) => canonicalCasImageName(name),
+  isAddressableCasImageName: (name: string) => isAddressableCasImageName(name),
+  defaultImportedImageName: DEFAULT_IMPORTED_IMAGE_NAME,
 };
 
 /**
@@ -503,7 +622,11 @@ export async function createSandboxImage(
     if (!text.endsWith("\n")) text += "\n";
     dockerfileText = text;
     nativeContextDir = resolvedContext;
-    effectiveName = options.registeredName ?? source.name;
+    effectiveName = registeredImageName(
+      options.registeredName ?? source.name,
+      undefined,
+      options.cas ?? true,
+    );
   } else if (typeof source === "string") {
     const resolvedPath = path.resolve(source);
     if (!existsSync(resolvedPath)) {
@@ -512,8 +635,11 @@ export async function createSandboxImage(
     dockerfilePath = resolvedPath;
     dockerfileText = undefined;
     nativeContextDir = undefined;
-    effectiveName =
-      options.registeredName ?? defaultRegisteredName(resolvedPath);
+    effectiveName = registeredImageName(
+      options.registeredName,
+      defaultRegisteredName(resolvedPath),
+      options.cas ?? true,
+    );
   } else {
     throw new TypeError(
       `source must be an Image or a Dockerfile path, got ${typeof source}`,
@@ -647,8 +773,12 @@ export async function importSandboxImage(
   const reference = imageReference.trim();
 
   const context = buildContextFromEnv();
-  const effectiveName =
-    options.registeredName ?? defaultRegisteredNameFromImage(reference);
+  const effectiveName = registeredImageName(
+    options.registeredName,
+    defaultRegisteredNameFromImage(reference),
+    options.cas ?? true,
+    DEFAULT_IMPORTED_IMAGE_NAME,
+  );
 
   if (effectiveName === DEFAULT_IMAGE_NAME) {
     console.warn(
@@ -801,7 +931,9 @@ function parseTemplate(json: string): SandboxTemplate {
  *
  * A name is deleted from both the CAS and the legacy image registries: once
  * its CAS image is deleted, a legacy image of the same name can no longer
- * start sandboxes, so it is deleted too. Failing to delete that legacy image
+ * start sandboxes, so it is deleted too. CAS image names ignore case
+ * (`MyProject` deletes the CAS image `myproject`), legacy image names match
+ * exactly. Failing to delete that legacy image
  * does not reject, since the CAS image is already gone: a `console.warn`
  * names the legacy image, the error and the call that deletes it. An
  * `image_` or `sandbox_template_` id deletes only the image it names.
@@ -885,6 +1017,9 @@ function warnIncompleteLegacyCleanup(
  *
  * An `image_` id names the *current* CAS image under its name; a rebuild
  * replaces it. A build's own immutable result is read with `getImageBuild`.
+ *
+ * A name is looked up in the CAS image registry in lowercase, as the
+ * registry stores it, and in the legacy image registry exactly as given.
  *
  * Accepted merged-catalog difference from the released SDKs, for legacy
  * images: a name that fits the CAS image registry's grammar is looked up

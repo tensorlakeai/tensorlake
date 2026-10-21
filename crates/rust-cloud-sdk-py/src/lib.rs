@@ -202,16 +202,17 @@ impl CloudApiClient {
     /// reached a server: a lost response must not retry into deleting a
     /// same-named image in the other catalog.
     ///
-    /// Returns `None`, or `(legacy_image_id, error)` when the name's CAS
-    /// image was deleted but its same-named legacy image could not be. The
-    /// delete still succeeded; the Python layer turns this into a warning.
+    /// Returns `None`, or `(legacy_image_name, legacy_image_id, error)` when
+    /// the name's CAS image was deleted but its same-named legacy image could
+    /// not be. The delete still succeeded; the Python layer turns this into
+    /// a warning.
     #[pyo3(signature = (image_name, organization_id=None, project_id=None))]
     fn delete_sandbox_image(
         &self,
         image_name: String,
         organization_id: Option<String>,
         project_id: Option<String>,
-    ) -> PyResult<Option<(Option<String>, String)>> {
+    ) -> PyResult<Option<(String, Option<String>, String)>> {
         let catalog = self.sandbox_image_catalog(organization_id, project_id)?;
         run_with_connect_replay_blocking(
             catalog,
@@ -221,9 +222,9 @@ impl CloudApiClient {
                 let image_name = image_name.clone();
                 async move {
                     let deletion = catalog.delete_reporting(&image_name).await?;
-                    Ok(deletion
-                        .failed_legacy_cleanup()
-                        .map(|(id, error)| (id.map(str::to_string), error.to_string())))
+                    Ok(deletion.failed_legacy_cleanup().map(|(name, id, error)| {
+                        (name.to_string(), id.map(str::to_string), error.to_string())
+                    }))
                 }
             },
         )

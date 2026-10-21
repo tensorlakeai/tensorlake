@@ -396,6 +396,13 @@ describe("image build operations", () => {
     expect(options).toMatchObject({ imageReference: "ghcr.io/org/app:v1", registeredName: "app", cas: true });
   });
 
+  it("startImageImport sends the CAS image registry spelling of the name", async () => {
+    const binding = makeFakeBinding();
+    await startImageImport("ubuntu:24.04", { registeredName: "MyBase" });
+    const options = binding.startImageImport.mock.calls[0]![0] as Record<string, unknown>;
+    expect(options.registeredName).toBe("mybase");
+  });
+
   it("waitImageBuild runs the lookup inside the interruptible native wait, not as a separate call", async () => {
     const binding = makeFakeBinding();
     const result = await waitImageBuild("build-1", { timeoutMs: 1234 });

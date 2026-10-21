@@ -1778,7 +1778,8 @@ enum ImageCommands {
         dockerfile_path: String,
 
         /// Registered image name (defaults to the Dockerfile stem, or the parent directory name
-        /// when the file is named Dockerfile)
+        /// when the file is named Dockerfile). A CAS image name is lowercased; a default CAS
+        /// image name is also made valid, with other characters replaced by '-'
         #[arg(short = 'n', long)]
         registered_name: Option<String>,
 
@@ -1850,7 +1851,9 @@ enum ImageCommands {
         /// pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime, ghcr.io/org/app:v1)
         image_reference: String,
 
-        /// Registered image name (defaults to the image's last path segment)
+        /// Registered image name (defaults to the image's last path segment). A CAS image name
+        /// is lowercased; a default CAS image name is also made valid, with other characters
+        /// replaced by '-'
         #[arg(short = 'n', long)]
         registered_name: Option<String>,
 
@@ -1926,7 +1929,8 @@ enum ImageCommands {
         json: bool,
     },
 
-    /// Show details for a CAS or legacy sandbox image
+    /// Show details for a CAS or legacy sandbox image. CAS image names ignore
+    /// case; legacy image names match exactly.
     Describe {
         /// Image name or ID
         name_or_id: String,
@@ -1935,7 +1939,8 @@ enum ImageCommands {
     /// Delete a published CAS or legacy sandbox image. A name is deleted
     /// from both the CAS and the legacy image registries: once its CAS image
     /// is deleted, a legacy image of the same name can no longer be used, so
-    /// it is deleted too. An `image_` ID deletes only that CAS image and a
+    /// it is deleted too. CAS image names ignore case; legacy image names
+    /// match exactly. An `image_` ID deletes only that CAS image and a
     /// `sandbox_template_` ID only that legacy image. A build in progress is
     /// cancelled with
     /// `tl sbx image build cancel BUILD_ID`, not by deleting its name: a

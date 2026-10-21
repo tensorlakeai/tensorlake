@@ -417,7 +417,9 @@ def delete_sandbox_image(image_name: str) -> None:
 
     A name is deleted from both the CAS and the legacy image registries:
     once its CAS image is deleted, a legacy image of the same name can no
-    longer start sandboxes, so it is deleted too. Failing to delete that
+    longer start sandboxes, so it is deleted too. CAS image names ignore
+    case (``MyProject`` deletes the CAS image ``myproject``), legacy image
+    names match exactly. Failing to delete that
     legacy image does not raise, since the CAS image is already gone: a
     warning names the legacy image, the error and the call that deletes
     it. An ``image_`` or ``sandbox_template_`` id deletes only the image it
@@ -523,6 +525,9 @@ def find_sandbox_image_by_name(image_name: str) -> dict | None:
     An ``image_`` id names the *current* CAS image under its name; a
     rebuild replaces it. A build's own immutable result is read with
     :func:`tensorlake.image.builds.get_build`.
+
+    A name is looked up in the CAS image registry in lowercase, as the
+    registry stores it, and in the legacy image registry exactly as given.
 
     Accepted merged-catalog difference from the released SDKs, for legacy
     images: a name that fits the CAS image registry's grammar is looked up
@@ -702,7 +707,11 @@ def build_sandbox_image(
     Args:
         source: An :class:`Image` instance or a path to a Dockerfile.
         registered_name: Name to register the image under. Defaults to the
-            image's ``name`` or the Dockerfile stem.
+            image's ``name`` or the Dockerfile stem (the parent directory's
+            name for a file named ``Dockerfile``). A CAS image name
+            is lowercased, as the CAS image registry stores it; a default CAS
+            image name is also made valid (other characters become ``-``).
+            Legacy image names are kept as given.
         cpus: CPUs for the build sandbox.
         memory_mb: Memory for the build sandbox in MiB.
         disk_mb: Root disk size for the generated sandbox image in MiB.
@@ -773,7 +782,9 @@ def build_sandbox_image(
             dockerfile_text = image_to_dockerfile(source, build_args=build_args)
             if not dockerfile_text.endswith("\n"):
                 dockerfile_text += "\n"
-            effective_registered_name = registered_name or source.name
+            effective_registered_name = _registered_image_name(
+                registered_name or source.name, None, cas=cas
+            )
         elif isinstance(source, (str, os.PathLike)):
             path = Path(os.fspath(source)).resolve()
             if not path.is_file():
@@ -781,8 +792,8 @@ def build_sandbox_image(
             rust_dockerfile_path = str(path)
             rust_context_dir = None
             dockerfile_text = None
-            effective_registered_name = registered_name or _default_registered_name(
-                str(path)
+            effective_registered_name = _registered_image_name(
+                registered_name, _default_registered_name(str(path)), cas=cas
             )
         else:
             # Programmer error — propagate directly rather than wrapping.
@@ -856,7 +867,10 @@ def import_sandbox_image(
             ``ghcr.io/org/app@sha256:...``.
         registered_name: Name to register the image under. Defaults to the
             image reference's last path segment with any tag/digest stripped
-            (e.g. ``pytorch/pytorch:2.4.1`` -> ``pytorch``).
+            (e.g. ``pytorch/pytorch:2.4.1`` -> ``pytorch``). A CAS image name
+            is lowercased, as the CAS image registry stores it; a default CAS
+            image name is also made valid (other characters become ``-``).
+            Legacy image names are kept as given.
         cpus: CPUs for the build sandbox.
         memory_mb: Memory for the build sandbox in MiB.
         disk_mb: Root disk size for the generated sandbox image in MiB.
@@ -890,8 +904,11 @@ def import_sandbox_image(
         raise SandboxImageBuildError("image reference to import must not be empty")
 
     image_reference = image_reference.strip()
-    effective_registered_name = registered_name or _default_registered_name_from_image(
-        image_reference
+    effective_registered_name = _registered_image_name(
+        registered_name,
+        _default_registered_name_from_image(image_reference),
+        cas=cas,
+        fallback=_DEFAULT_IMPORTED_IMAGE_NAME,
     )
     if effective_registered_name == _DEFAULT_IMAGE_NAME:
         warnings.warn(
@@ -989,6 +1006,106 @@ def build_sandbox_application_image(
         raise SandboxImageBuildError(f"{type(e).__name__}: {e}") from e
 
 
+_DEFAULT_SANDBOX_IMAGE_NAME = "sandbox-image"
+_DEFAULT_IMPORTED_IMAGE_NAME = "imported-image"
+_CAS_NAME_SEPARATORS = "._-"
+_RESERVED_IMAGE_NAME_PREFIXES = ("sandbox_template_", "image_", "cas-v1:")
+_MAX_CAS_IMAGE_NAME_LENGTH = 255
+
+
+def _registered_image_name(
+    explicit: str | None,
+    generated: str | None,
+    *,
+    cas: bool,
+    fallback: str = _DEFAULT_SANDBOX_IMAGE_NAME,
+) -> str:
+    """Mirror the Rust core's ``registered_image_name``: the name a build or
+    import registers, decided before anything is shown or sent.
+
+    A CAS image takes the CAS image registry's spelling: an explicit name is
+    lowercased as the registry would, and a generated default is turned into
+    a valid CAS image name. Legacy image names are kept as they are.
+    """
+    if explicit or generated is None:
+        name = explicit or ""
+        return _canonical_cas_image_name(name) if cas else name
+    return _cas_image_name_from(generated, fallback) if cas else generated
+
+
+def _canonical_cas_image_name(name: str) -> str:
+    """Mirror the Rust core's ``canonical_cas_image_name``: the CAS image
+    registry ASCII-lowercases every name, so ``MyProject`` and ``myproject``
+    name one CAS image."""
+    return "".join(chr(ord(c) + 32) if "A" <= c <= "Z" else c for c in name)
+
+
+def _cas_image_name_from(raw: str, fallback: str) -> str:
+    """Mirror the Rust core's ``cas_image_name_from``: a valid CAS image name
+    for a generated default.
+
+    The name is ASCII-lowercased and kept if that makes it valid. Otherwise
+    every character other than ``a-z``, ``0-9``, ``.``, ``_`` and ``-``
+    becomes ``-``, each run of separators collapses to its first character,
+    leading and trailing separators are dropped and the result is capped at
+    255 characters. ``fallback`` is used when no valid name remains.
+    """
+    lowered = _canonical_cas_image_name(raw)
+    if _is_addressable_cas_image_name(lowered):
+        return lowered
+    chars: list[str] = []
+    for c in lowered:
+        if not ("a" <= c <= "z" or "0" <= c <= "9" or c in _CAS_NAME_SEPARATORS):
+            c = "-"
+        if c in _CAS_NAME_SEPARATORS and chars and chars[-1] in _CAS_NAME_SEPARATORS:
+            continue
+        chars.append(c)
+    name = "".join(chars).strip(_CAS_NAME_SEPARATORS)
+    name = name[:_MAX_CAS_IMAGE_NAME_LENGTH].rstrip(_CAS_NAME_SEPARATORS)
+    return name if _is_addressable_cas_image_name(name) else fallback
+
+
+def _is_addressable_cas_image_name(name: str) -> bool:
+    """Mirror the Rust core's CAS image name grammar: valid in the CAS image
+    registry and not mistaken for a content digest."""
+    if (
+        not name
+        or len(name) > _MAX_CAS_IMAGE_NAME_LENGTH
+        or name.startswith(_RESERVED_IMAGE_NAME_PREFIXES)
+    ):
+        return False
+    if len(name) == 64 and all(c in "0123456789abcdef" for c in name):
+        return False
+    repository, has_tag, tag = name.partition(":")
+    if not all(_is_cas_name_component(c) for c in repository.split("/")):
+        return False
+    if has_tag:
+        return (
+            0 < len(tag) <= 128
+            and all(
+                "a" <= c <= "z" or "0" <= c <= "9" or c in _CAS_NAME_SEPARATORS
+                for c in tag
+            )
+            and tag[0] not in ".-"
+        )
+    return True
+
+
+def _is_cas_name_component(component: str) -> bool:
+    if not component:
+        return False
+    previous_was_separator = True  # rejects a leading separator
+    for c in component:
+        is_separator = c in _CAS_NAME_SEPARATORS
+        if is_separator:
+            if previous_was_separator:
+                return False
+        elif not ("a" <= c <= "z" or "0" <= c <= "9"):
+            return False
+        previous_was_separator = is_separator
+    return not previous_was_separator  # rejects a trailing separator
+
+
 def _default_registered_name(dockerfile_path: str) -> str:
     """Mirror the Rust core's default name derivation for Dockerfile paths.
 
@@ -1000,8 +1117,8 @@ def _default_registered_name(dockerfile_path: str) -> str:
     stem = path.stem
     if stem.lower() == "dockerfile":
         parent_name = path.parent.name.strip()
-        return parent_name or "sandbox-image"
-    return stem or "sandbox-image"
+        return parent_name or _DEFAULT_SANDBOX_IMAGE_NAME
+    return stem or _DEFAULT_SANDBOX_IMAGE_NAME
 
 
 def _default_registered_name_from_image(image_reference: str) -> str:
@@ -1016,4 +1133,4 @@ def _default_registered_name_from_image(image_reference: str) -> str:
     last_segment = without_digest.rsplit("/", 1)[-1]
     repo, sep, tag = last_segment.rpartition(":")
     name = repo if sep and tag else last_segment
-    return name or "imported-image"
+    return name or _DEFAULT_IMPORTED_IMAGE_NAME

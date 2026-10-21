@@ -62,12 +62,14 @@ impl ImageDeletion {
     }
 
     /// The same-named legacy image this delete left behind and could not
-    /// remove: its `sandbox_template_` id when known, and why. `None` when
-    /// there was none or it was deleted. Callers surface it as a warning;
-    /// the delete itself succeeded.
-    pub fn failed_legacy_cleanup(&self) -> Option<(Option<&str>, &SdkError)> {
+    /// remove: its name, its `sandbox_template_` id when known, and why.
+    /// `None` when there was none or it was deleted. Callers surface it as
+    /// a warning; the delete itself succeeded.
+    pub fn failed_legacy_cleanup(&self) -> Option<(&str, Option<&str>, &SdkError)> {
         match &self.same_named_legacy {
-            Some(LegacyImageDeletion::Failed { id, error }) => Some((id.as_deref(), error)),
+            Some(LegacyImageDeletion::Failed { name, id, error }) => {
+                Some((name, id.as_deref(), error))
+            }
             _ => None,
         }
     }
@@ -83,14 +85,17 @@ pub enum DeletedImageFamily {
 }
 
 /// The legacy image a name's CAS delete left behind, which can no longer
-/// start sandboxes. `id` is its `sandbox_template_` id when known.
+/// start sandboxes: the one named exactly like the deleted CAS image. `id`
+/// is its `sandbox_template_` id when known.
 #[derive(Debug)]
 pub enum LegacyImageDeletion {
     Deleted {
+        name: String,
         id: Option<String>,
     },
     /// Not deleted; deleting the name or id again finishes the job.
     Failed {
+        name: String,
         id: Option<String>,
         error: SdkError,
     },
@@ -227,6 +232,61 @@ fn is_valid_name_component(component: &str) -> bool {
         previous_was_separator = is_separator;
     }
     !previous_was_separator
+}
+
+/// A CAS image name as the CAS image registry stores it. The registry
+/// ASCII-lowercases every name it creates, looks up or deletes, so
+/// `MyProject` and `myproject` name one CAS image. Legacy image names are
+/// matched exactly and are never canonicalized.
+pub fn canonical_cas_image_name(name: &str) -> String {
+    name.to_ascii_lowercase()
+}
+
+/// Derive a valid CAS image name from a generated default `raw` (a
+/// Dockerfile stem, its parent directory or an imported image's last path
+/// segment). The name is ASCII-lowercased and kept if that makes it valid.
+/// Otherwise every character other than `a-z`, `0-9`, `.`, `_` and `-`
+/// becomes `-`, each run of separators collapses to its first character,
+/// leading and trailing separators are dropped and the result is capped at
+/// 255 characters. `fallback` is used when no valid name remains. The
+/// result is unchanged by the registry's own canonicalization. The Python
+/// and TypeScript SDKs apply the same rule.
+pub fn cas_image_name_from(raw: &str, fallback: &str) -> String {
+    let lowered = canonical_cas_image_name(raw);
+    if is_addressable_cas_image_name(&lowered) {
+        return lowered;
+    }
+    let mut name = String::with_capacity(lowered.len());
+    for ch in lowered.chars() {
+        let ch = match ch {
+            ch @ ('a'..='z' | '0'..='9' | '.' | '_' | '-') => ch,
+            _ => '-',
+        };
+        if is_cas_name_separator(ch) && name.ends_with(is_cas_name_separator) {
+            continue;
+        }
+        name.push(ch);
+    }
+    let mut name = name.trim_matches(is_cas_name_separator).to_string();
+    name.truncate(MAX_CAS_IMAGE_NAME_LEN);
+    let name = name.trim_end_matches(is_cas_name_separator);
+    if is_addressable_cas_image_name(name) {
+        name.to_string()
+    } else {
+        fallback.to_string()
+    }
+}
+
+const MAX_CAS_IMAGE_NAME_LEN: usize = 255;
+
+fn is_cas_name_separator(ch: char) -> bool {
+    matches!(ch, '.' | '_' | '-')
+}
+
+/// Valid in the CAS image registry and not mistaken for a content digest
+/// when used as a reference.
+fn is_addressable_cas_image_name(name: &str) -> bool {
+    validate_image_service_name(name).is_ok() && !is_lower_sha256_hex(name)
 }
 
 /// Whether a template record describes a CAS image.
@@ -802,9 +862,13 @@ impl SandboxImageCatalog {
         }
     }
 
+    /// The CAS image registry is asked for the canonical (lowercase)
+    /// spelling, the legacy image registry for the spelling given, and only
+    /// after a clean CAS 404.
     async fn find_by_name(&self, name: &str) -> Result<Option<SandboxTemplate>, SdkError> {
-        if validate_image_service_name(name).is_ok()
-            && let Some(image) = self.image_service.get_by_name(name).await?
+        let cas_name = canonical_cas_image_name(name);
+        if validate_image_service_name(&cas_name).is_ok()
+            && let Some(image) = self.image_service.get_by_name(&cas_name).await?
         {
             return Ok(Some(image));
         }
@@ -832,7 +896,9 @@ impl SandboxImageCatalog {
     ///
     /// A name is deleted from both registries: once its CAS image is
     /// deleted, a legacy image of the same name can no longer start
-    /// sandboxes, so it is deleted too. Failing to delete that legacy image
+    /// sandboxes, so it is deleted too. The CAS image is addressed in the
+    /// registry's lowercase spelling, a legacy image by the exact spelling
+    /// given; see [`canonical_cas_image_name`]. Failing to delete that legacy image
     /// does not fail the call, since the CAS image is already gone;
     /// [`Self::delete_reporting`] reports it. An `image_` or
     /// `sandbox_template_` id deletes only the image it names.
@@ -866,13 +932,17 @@ impl SandboxImageCatalog {
         })
     }
 
+    /// Spellings as in [`Self::find_by_name`]. A deleted CAS image releases
+    /// its canonical name for new sandboxes, so the legacy image cleaned up
+    /// with it is the one named exactly that.
     async fn delete_by_name(&self, name: &str) -> Result<Option<ImageDeletion>, SdkError> {
-        if validate_image_service_name(name).is_ok()
-            && self.image_service.delete_by_name(name).await?
+        let cas_name = canonical_cas_image_name(name);
+        if validate_image_service_name(&cas_name).is_ok()
+            && self.image_service.delete_by_name(&cas_name).await?
         {
             return Ok(Some(ImageDeletion {
                 family: DeletedImageFamily::Cas,
-                same_named_legacy: self.delete_same_named_legacy_image(name).await,
+                same_named_legacy: self.delete_same_named_legacy_image(&cas_name).await,
             }));
         }
         Ok(self
@@ -888,16 +958,26 @@ impl SandboxImageCatalog {
     async fn delete_same_named_legacy_image(&self, name: &str) -> Option<LegacyImageDeletion> {
         let template = match self.templates.find_by_name(name).await {
             Ok(template) => template?.into_inner(),
-            Err(error) => return Some(LegacyImageDeletion::Failed { id: None, error }),
+            Err(error) => {
+                return Some(LegacyImageDeletion::Failed {
+                    name: name.to_string(),
+                    id: None,
+                    error,
+                });
+            }
         };
         let deleted = match template.id.as_deref() {
             Some(id) => self.templates.delete_by_id(id).await,
             None => self.templates.delete_by_name(name).await,
         };
         match deleted {
-            Ok(true) => Some(LegacyImageDeletion::Deleted { id: template.id }),
+            Ok(true) => Some(LegacyImageDeletion::Deleted {
+                name: name.to_string(),
+                id: template.id,
+            }),
             Ok(false) => None,
             Err(error) => Some(LegacyImageDeletion::Failed {
+                name: name.to_string(),
                 id: template.id,
                 error,
             }),
@@ -920,11 +1000,70 @@ impl SandboxImageCatalog {
 mod tests {
     use super::*;
 
+    /// The CAS image naming rule's cases. The Python and TypeScript SDK
+    /// tests check the same table so all three derive identical names.
+    const CAS_IMAGE_NAME_CASES: &[(&str, &str)] = &[
+        ("app", "app"),
+        ("MyProject", "myproject"),
+        ("App:V1", "app:v1"),
+        ("app.v2", "app.v2"),
+        ("My Project", "my-project"),
+        ("my  project", "my-project"),
+        ("my__app", "my_app"),
+        ("-app-", "app"),
+        ("._app_.", "app"),
+        ("\u{dc}n\u{ef}code", "n-code"),
+        ("\u{65e5}\u{672c}", "sandbox-image"),
+        ("", "sandbox-image"),
+        ("...", "sandbox-image"),
+        ("image_foo", "sandbox-image"),
+        ("sandbox_template_x", "sandbox-image"),
+        (
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "sandbox-image",
+        ),
+    ];
+
+    #[test]
+    fn cas_image_name_from_follows_the_shared_rule() {
+        for (raw, expected) in CAS_IMAGE_NAME_CASES {
+            assert_eq!(
+                cas_image_name_from(raw, "sandbox-image"),
+                *expected,
+                "{raw:?}"
+            );
+        }
+        // The 255-character cap, then trailing separators are dropped again.
+        let long = format!("{}-bc", "a".repeat(254));
+        assert_eq!(cas_image_name_from(&long, "sandbox-image"), "a".repeat(254));
+    }
+
+    #[test]
+    fn generated_cas_image_names_are_valid_and_already_canonical() {
+        for (raw, _) in CAS_IMAGE_NAME_CASES {
+            let name = cas_image_name_from(raw, "sandbox-image");
+            assert!(validate_image_service_name(&name).is_ok(), "{name:?}");
+            assert_eq!(canonical_cas_image_name(&name), name, "{name:?}");
+            assert_eq!(
+                classify_image_reference(&name).unwrap(),
+                ImageReference::Name(name.clone())
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_cas_image_names_lowercase_ascii_only() {
+        assert_eq!(canonical_cas_image_name("Team/App:V1"), "team/app:v1");
+        assert_eq!(canonical_cas_image_name("myproject"), "myproject");
+        assert_eq!(canonical_cas_image_name("\u{c9}t\u{c9}"), "\u{c9}t\u{c9}");
+    }
+
     #[test]
     fn failed_legacy_cleanup_reports_only_a_failed_legacy_delete() {
         let failed = ImageDeletion {
             family: DeletedImageFamily::Cas,
             same_named_legacy: Some(LegacyImageDeletion::Failed {
+                name: "app".to_string(),
                 id: Some("sandbox_template_1".to_string()),
                 error: SdkError::ServerError {
                     status: StatusCode::CONFLICT,
@@ -932,13 +1071,17 @@ mod tests {
                 },
             }),
         };
-        let (id, error) = failed.failed_legacy_cleanup().unwrap();
+        let (name, id, error) = failed.failed_legacy_cleanup().unwrap();
+        assert_eq!(name, "app");
         assert_eq!(id, Some("sandbox_template_1"));
         assert!(error.to_string().contains("retry the delete"), "{error}");
 
         let deleted = ImageDeletion {
             family: DeletedImageFamily::Cas,
-            same_named_legacy: Some(LegacyImageDeletion::Deleted { id: None }),
+            same_named_legacy: Some(LegacyImageDeletion::Deleted {
+                name: "app".to_string(),
+                id: None,
+            }),
         };
         assert!(deleted.failed_legacy_cleanup().is_none());
         assert!(

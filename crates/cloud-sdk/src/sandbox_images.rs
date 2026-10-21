@@ -588,7 +588,7 @@ where
 /// Parse and validate the Dockerfile plan for a build, shared by the legacy
 /// and CAS entry points.
 fn load_build_plan(options: &SandboxImageBuildOptions) -> Result<DockerfileBuildPlan> {
-    let plan = if let Some(dockerfile_text) = &options.dockerfile_text {
+    let mut plan = if let Some(dockerfile_text) = &options.dockerfile_text {
         load_dockerfile_text_plan(
             &options.dockerfile_path,
             options.context_dir.as_deref(),
@@ -601,6 +601,11 @@ fn load_build_plan(options: &SandboxImageBuildOptions) -> Result<DockerfileBuild
             options.common.registered_name.as_deref(),
         )?
     };
+    plan.registered_name = registered_image_name(
+        &options.common,
+        plan.registered_name,
+        DEFAULT_SANDBOX_IMAGE_NAME,
+    );
     crate::sandbox_image_catalog::validate_registered_name(&plan.registered_name)
         .map_err(SandboxImageBuildError::usage)?;
     Ok(plan)
@@ -609,13 +614,33 @@ fn load_build_plan(options: &SandboxImageBuildOptions) -> Result<DockerfileBuild
 /// Plan and validate a registry import, shared by the legacy and CAS entry
 /// points.
 fn load_import_plan(options: &SandboxImageImportOptions) -> Result<DockerfileBuildPlan> {
-    let plan = plan_image_import(
+    let mut plan = plan_image_import(
         &options.image_reference,
         options.common.registered_name.as_deref(),
     )?;
+    plan.registered_name = registered_image_name(
+        &options.common,
+        plan.registered_name,
+        DEFAULT_IMPORTED_IMAGE_NAME,
+    );
     crate::sandbox_image_catalog::validate_registered_name(&plan.registered_name)
         .map_err(SandboxImageBuildError::usage)?;
     Ok(plan)
+}
+
+/// The name a build or import registers, decided before anything is shown
+/// or sent. A CAS image takes the CAS image registry's spelling: an explicit
+/// name is lowercased as the registry would, and a generated default is
+/// turned into a valid CAS image name. Legacy image names are kept as they
+/// are.
+fn registered_image_name(options: &CommonBuildOptions, planned: String, fallback: &str) -> String {
+    if !options.cas {
+        return planned;
+    }
+    match options.registered_name.as_deref() {
+        Some(explicit) => crate::sandbox_image_catalog::canonical_cas_image_name(explicit),
+        None => crate::sandbox_image_catalog::cas_image_name_from(&planned, fallback),
+    }
 }
 
 /// The CAS image registry operation behind [`crate::image_builds::start_build`]:
@@ -2795,7 +2820,7 @@ fn default_registered_name_from_image(image_ref: &str) -> String {
         _ => last_segment,
     };
     if name.is_empty() {
-        "imported-image".to_string()
+        DEFAULT_IMPORTED_IMAGE_NAME.to_string()
     } else {
         name.to_string()
     }
@@ -3007,15 +3032,19 @@ fn default_registered_name(dockerfile_path: &Path) -> String {
             .and_then(|value| value.to_str())
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .unwrap_or("sandbox-image")
+            .unwrap_or(DEFAULT_SANDBOX_IMAGE_NAME)
             .to_string();
     }
     if stem.is_empty() {
-        "sandbox-image".to_string()
+        DEFAULT_SANDBOX_IMAGE_NAME.to_string()
     } else {
         stem.to_string()
     }
 }
+
+/// Default names when neither the caller nor the source supplies one.
+const DEFAULT_SANDBOX_IMAGE_NAME: &str = "sandbox-image";
+const DEFAULT_IMPORTED_IMAGE_NAME: &str = "imported-image";
 
 fn logical_dockerfile_lines(dockerfile_text: &str) -> Vec<(usize, String)> {
     let mut logical_lines = Vec::new();
@@ -3604,6 +3633,43 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
         assert!(message.contains("rootfs builder exited with status 1"));
         assert!(message.contains("The builder sandbox ran out of memory"));
         assert!(message.contains("The builder sandbox ran out of disk space"));
+    }
+
+    #[test]
+    fn cas_builds_register_the_cas_image_registry_spelling() {
+        let mut options = common_build_options(false);
+        options.cas = true;
+        options.registered_name = Some("MyProject".to_string());
+        // An explicit name is lowercased, as the registry would store it.
+        assert_eq!(
+            super::registered_image_name(&options, "MyProject".to_string(), "sandbox-image"),
+            "myproject"
+        );
+        // A generated default becomes a valid CAS image name.
+        options.registered_name = None;
+        assert_eq!(
+            super::registered_image_name(&options, "My Project".to_string(), "sandbox-image"),
+            "my-project"
+        );
+        assert_eq!(
+            super::registered_image_name(
+                &options,
+                "\u{65e5}\u{672c}".to_string(),
+                "imported-image"
+            ),
+            "imported-image"
+        );
+        // Legacy image names are kept as given.
+        options.cas = false;
+        assert_eq!(
+            super::registered_image_name(&options, "My Project".to_string(), "sandbox-image"),
+            "My Project"
+        );
+        options.registered_name = Some("MyProject".to_string());
+        assert_eq!(
+            super::registered_image_name(&options, "MyProject".to_string(), "sandbox-image"),
+            "MyProject"
+        );
     }
 
     #[test]

@@ -73,6 +73,7 @@ from ._dockerfile import image_to_dockerfile
 from .image import Image
 from .sandbox_builder import (
     _DEFAULT_IMAGE_NAME,
+    _DEFAULT_IMPORTED_IMAGE_NAME,
     SandboxImageBuildError,
     SandboxImageLoadError,
     _build_context_from_env,
@@ -80,6 +81,7 @@ from .sandbox_builder import (
     _default_registered_name_from_image,
     _image_requires_context,
     _noop_emit,
+    _registered_image_name,
     _snake_case_keys,
     _stderr_emit,
 )
@@ -764,7 +766,7 @@ def _prepare_source(
             str(Path(rust_context_dir) / "Dockerfile"),
             dockerfile_text,
             rust_context_dir,
-            registered_name or source.name,
+            _registered_image_name(registered_name or source.name, None, cas=True),
         )
     if isinstance(source, (str, os.PathLike)):
         path = Path(os.fspath(source)).resolve()
@@ -774,7 +776,9 @@ def _prepare_source(
             str(path),
             None,
             None,
-            registered_name or _default_registered_name(str(path)),
+            _registered_image_name(
+                registered_name, _default_registered_name(str(path)), cas=True
+            ),
         )
     raise TypeError(
         "source must be an Image or a Dockerfile path, got " f"{type(source).__name__}"
@@ -879,7 +883,12 @@ def start_import(
     if not isinstance(image_reference, str) or not image_reference.strip():
         raise SandboxImageBuildError("image reference to import must not be empty")
     reference = image_reference.strip()
-    name = registered_name or _default_registered_name_from_image(reference)
+    name = _registered_image_name(
+        registered_name,
+        _default_registered_name_from_image(reference),
+        cas=True,
+        fallback=_DEFAULT_IMPORTED_IMAGE_NAME,
+    )
     if name == _DEFAULT_IMAGE_NAME:
         warnings.warn(
             f"Importing sandbox image with the default name {_DEFAULT_IMAGE_NAME!r}. "

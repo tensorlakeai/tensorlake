@@ -117,7 +117,10 @@ class Image:
         image instead.
 
         Args:
-            registered_name: Name to register the image under. Defaults to ``self.name``.
+            registered_name: Name to register the image under. Defaults to
+                ``self.name``. A CAS image name is lowercased, as the CAS
+                image registry stores it; a legacy image name is kept as
+                given.
             cpus: CPUs for the build sandbox (default 2.0).
             memory_mb: Memory for the build sandbox in MiB (default 4096).
             disk_mb: Root disk size for the generated sandbox image in MiB.

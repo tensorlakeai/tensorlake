@@ -678,12 +678,20 @@ export async function startImageBuild(
     let text = dockerfileContent(source);
     if (!text.endsWith("\n")) text += "\n";
     dockerfileText = text;
-    name = options.registeredName ?? source.name;
+    name = __imageBuildInternals.registeredImageName(
+      options.registeredName ?? source.name,
+      undefined,
+      true,
+    );
   } else if (typeof source === "string") {
     const resolved = path.resolve(source);
     if (!existsSync(resolved)) throw new Error(`Dockerfile not found: ${source}`);
     dockerfilePath = resolved;
-    name = options.registeredName ?? __imageBuildInternals.defaultRegisteredName(resolved);
+    name = __imageBuildInternals.registeredImageName(
+      options.registeredName,
+      __imageBuildInternals.defaultRegisteredName(resolved),
+      true,
+    );
   } else {
     throw new TypeError(`source must be an Image or a Dockerfile path, got ${typeof source}`);
   }
@@ -731,8 +739,12 @@ export async function startImageImport(
     throw new Error("image reference to import must not be empty");
   }
   const reference = imageReference.trim();
-  const name =
-    options.registeredName ?? __imageBuildInternals.defaultRegisteredNameFromImage(reference);
+  const name = __imageBuildInternals.registeredImageName(
+    options.registeredName,
+    __imageBuildInternals.defaultRegisteredNameFromImage(reference),
+    true,
+    __imageBuildInternals.defaultImportedImageName,
+  );
   const emitter = makeEmitter({ emit: deps.emit ?? options.emit, verbose: options.verbose });
   const credentials = credentialsFromEnv();
   const binding = __imageBuildInternals.loadNativeBinding();
