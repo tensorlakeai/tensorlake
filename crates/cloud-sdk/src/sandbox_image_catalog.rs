@@ -60,6 +60,17 @@ impl ImageDeletion {
             same_named_legacy: None,
         }
     }
+
+    /// The same-named legacy image this delete left behind and could not
+    /// remove: its `sandbox_template_` id when known, and why. `None` when
+    /// there was none or it was deleted. Callers surface it as a warning;
+    /// the delete itself succeeded.
+    pub fn failed_legacy_cleanup(&self) -> Option<(Option<&str>, &SdkError)> {
+        match &self.same_named_legacy {
+            Some(LegacyImageDeletion::Failed { id, error }) => Some((id.as_deref(), error)),
+            _ => None,
+        }
+    }
 }
 
 /// The catalog an image was deleted from.
@@ -908,6 +919,34 @@ impl SandboxImageCatalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_legacy_cleanup_reports_only_a_failed_legacy_delete() {
+        let failed = ImageDeletion {
+            family: DeletedImageFamily::Cas,
+            same_named_legacy: Some(LegacyImageDeletion::Failed {
+                id: Some("sandbox_template_1".to_string()),
+                error: SdkError::ServerError {
+                    status: StatusCode::CONFLICT,
+                    message: "retry the delete".to_string(),
+                },
+            }),
+        };
+        let (id, error) = failed.failed_legacy_cleanup().unwrap();
+        assert_eq!(id, Some("sandbox_template_1"));
+        assert!(error.to_string().contains("retry the delete"), "{error}");
+
+        let deleted = ImageDeletion {
+            family: DeletedImageFamily::Cas,
+            same_named_legacy: Some(LegacyImageDeletion::Deleted { id: None }),
+        };
+        assert!(deleted.failed_legacy_cleanup().is_none());
+        assert!(
+            ImageDeletion::only(DeletedImageFamily::Legacy)
+                .failed_legacy_cleanup()
+                .is_none()
+        );
+    }
 
     fn template(name: &str, created_at: Option<&str>, format: &str) -> SandboxTemplate {
         SandboxTemplate {

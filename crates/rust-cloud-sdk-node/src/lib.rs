@@ -668,19 +668,38 @@ pub async fn find_sandbox_image(
         .map_err(|error| Error::from_reason(error.to_string()))
 }
 
+/// The same-named legacy image a name's CAS delete left behind and could not
+/// remove.
+#[napi(object)]
+pub struct SandboxImageLegacyCleanupFailureJs {
+    /// The legacy image's `sandbox_template_` id, when known.
+    pub legacy_image_id: Option<String>,
+    pub error: String,
+}
+
 /// Delete one sandbox image by name or id. A name whose CAS image is deleted
 /// also loses its same-named legacy image, which can no longer start
 /// sandboxes. Not found in either catalog is a 404 `remote_api` error.
-/// Replayed only when the request provably never reached a server.
+/// Replayed only when the request provably never reached a server. Resolves
+/// to the legacy image that could not be deleted, or null; the delete still
+/// succeeded and the TypeScript layer turns it into a warning.
 #[napi]
 pub async fn delete_sandbox_image(
     options: SandboxImageCatalogOptionsJs,
     reference: String,
-) -> Result<()> {
+) -> Result<Option<SandboxImageLegacyCleanupFailureJs>> {
     let catalog = sandbox_image_catalog(options)?;
     retry(catalog, RetryPolicy::non_idempotent(), |catalog| {
         let reference = reference.clone();
-        async move { catalog.delete(&reference).await }
+        async move {
+            let deletion = catalog.delete_reporting(&reference).await?;
+            Ok(deletion.failed_legacy_cleanup().map(|(id, error)| {
+                SandboxImageLegacyCleanupFailureJs {
+                    legacy_image_id: id.map(str::to_string),
+                    error: error.to_string(),
+                }
+            }))
+        }
     })
     .await
     .map_err(sandbox::into_napi_error)

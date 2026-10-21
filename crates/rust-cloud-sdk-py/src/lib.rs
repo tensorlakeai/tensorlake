@@ -201,13 +201,17 @@ impl CloudApiClient {
     /// `remote_api` error. Replayed only when the request provably never
     /// reached a server: a lost response must not retry into deleting a
     /// same-named image in the other catalog.
+    ///
+    /// Returns `None`, or `(legacy_image_id, error)` when the name's CAS
+    /// image was deleted but its same-named legacy image could not be. The
+    /// delete still succeeded; the Python layer turns this into a warning.
     #[pyo3(signature = (image_name, organization_id=None, project_id=None))]
     fn delete_sandbox_image(
         &self,
         image_name: String,
         organization_id: Option<String>,
         project_id: Option<String>,
-    ) -> PyResult<()> {
+    ) -> PyResult<Option<(Option<String>, String)>> {
         let catalog = self.sandbox_image_catalog(organization_id, project_id)?;
         run_with_connect_replay_blocking(
             catalog,
@@ -215,7 +219,12 @@ impl CloudApiClient {
             into_py_error,
             move |catalog| {
                 let image_name = image_name.clone();
-                async move { catalog.delete(&image_name).await }
+                async move {
+                    let deletion = catalog.delete_reporting(&image_name).await?;
+                    Ok(deletion
+                        .failed_legacy_cleanup()
+                        .map(|(id, error)| (id.map(str::to_string), error.to_string())))
+                }
             },
         )
     }

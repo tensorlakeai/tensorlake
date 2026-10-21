@@ -778,6 +778,35 @@ describe("sandbox image catalog", () => {
     await expect(deleteSandboxImage("missing")).rejects.toThrow("not found");
   });
 
+  it("warns, without rejecting, when a name's same-named legacy image could not be deleted", async () => {
+    const { binding } = makeFakeBinding();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await deleteSandboxImage("app");
+    expect(warn).not.toHaveBeenCalled();
+
+    binding.deleteSandboxImage.mockResolvedValueOnce({
+      legacyImageId: "sandbox_template_1",
+      error: "Server error: 409 Conflict - retry the delete",
+    });
+    await expect(deleteSandboxImage("app")).resolves.toBeUndefined();
+    expect(warn).toHaveBeenCalledTimes(1);
+    const message = String(warn.mock.calls[0]![0]);
+    expect(message).toContain("Deleted CAS image 'app'");
+    expect(message).toContain("legacy image of the same name (sandbox_template_1)");
+    expect(message).toContain("409 Conflict - retry the delete");
+    expect(message).toContain('deleteSandboxImage("sandbox_template_1")');
+
+    binding.deleteSandboxImage.mockResolvedValueOnce({
+      legacyImageId: null,
+      error: "Server error: 500 - internal error",
+    });
+    await deleteSandboxImage("app");
+    const unnamed = String(warn.mock.calls[1]![0]);
+    expect(unnamed).toContain("legacy image of the same name, which");
+    expect(unnamed).toContain('deleteSandboxImage("app")');
+  });
+
   it("requires an API key", async () => {
     vi.stubEnv("TENSORLAKE_API_KEY", "");
     vi.stubEnv("TENSORLAKE_PAT", "tl_pat_test");
@@ -863,6 +892,15 @@ describe("CloudClient sandbox image methods", () => {
     await client.deleteSandboxImage("team/app");
     expect(binding.deleteSandboxImage).toHaveBeenCalledWith(credentials, "team/app");
     await expect(client.deleteSandboxImage("")).rejects.toThrow(TypeError);
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    binding.deleteSandboxImage.mockResolvedValueOnce({
+      legacyImageId: "sandbox_template_1",
+      error: "Server error: 409 Conflict",
+    });
+    await client.deleteSandboxImage("team/app");
+    expect(String(warn.mock.calls[0]![0])).toContain("Deleted CAS image 'team/app'");
+    warn.mockRestore();
     client.close();
   });
 

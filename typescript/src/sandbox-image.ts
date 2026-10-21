@@ -245,12 +245,13 @@ interface NativeBinding {
   ): Promise<string | null>;
   /**
    * Delete one image by name or id; a name is deleted from both catalogs.
-   * Unknown in both catalogs rejects.
+   * Unknown in both catalogs rejects. Resolves to the same-named legacy
+   * image a name's CAS delete could not remove, or null.
    */
   deleteSandboxImage(
     options: NativeBindingCatalogOptions,
     reference: string,
-  ): Promise<void>;
+  ): Promise<NativeLegacyCleanupFailure | null | undefined>;
 }
 
 let cachedNativeBinding: NativeBinding | undefined;
@@ -801,9 +802,9 @@ function parseTemplate(json: string): SandboxTemplate {
  * A name is deleted from both the CAS and the legacy image registries: once
  * its CAS image is deleted, a legacy image of the same name can no longer
  * start sandboxes, so it is deleted too. Failing to delete that legacy image
- * does not reject, since the CAS image is already gone; deleting the name
- * again removes it. An `image_` or `sandbox_template_` id deletes only the
- * image it names.
+ * does not reject, since the CAS image is already gone: a `console.warn`
+ * names the legacy image, the error and the call that deletes it. An
+ * `image_` or `sandbox_template_` id deletes only the image it names.
  *
  * Deleting removes a *published* image. An unfinished CAS image build is
  * cancelled with `cancelImageBuild({ buildId })` (or `tl sbx image build
@@ -823,7 +824,10 @@ export async function deleteSandboxImage(imageName: string): Promise<void> {
   if (typeof imageName !== "string" || imageName.length === 0) {
     throw new TypeError("imageName must be a non-empty string");
   }
-  await loadNativeBinding().deleteSandboxImage(catalogOptionsFromEnv(), imageName);
+  warnIncompleteLegacyCleanup(
+    imageName,
+    await loadNativeBinding().deleteSandboxImage(catalogOptionsFromEnv(), imageName),
+  );
 }
 
 /** @internal `APIClient.deleteSandboxImage` with the client's credentials. */
@@ -834,9 +838,36 @@ export async function deleteSandboxImageWithCredentials(
   if (typeof imageName !== "string" || imageName.length === 0) {
     throw new TypeError("imageName must be a non-empty string");
   }
-  await loadNativeBinding().deleteSandboxImage(
-    catalogOptionsFromCredentials(credentials),
+  warnIncompleteLegacyCleanup(
     imageName,
+    await loadNativeBinding().deleteSandboxImage(
+      catalogOptionsFromCredentials(credentials),
+      imageName,
+    ),
+  );
+}
+
+/** The same-named legacy image a name's CAS delete could not remove. */
+interface NativeLegacyCleanupFailure {
+  legacyImageId?: string | null;
+  error: string;
+}
+
+// The CAS image is gone, so the delete succeeded; report the legacy image it
+// left behind, which can no longer start sandboxes, and how to delete it.
+function warnIncompleteLegacyCleanup(
+  imageName: string,
+  failure: NativeLegacyCleanupFailure | null | undefined,
+): void {
+  if (failure == null) {
+    return;
+  }
+  const legacyImageId = failure.legacyImageId ?? undefined;
+  const label = legacyImageId ? ` (${legacyImageId})` : "";
+  console.warn(
+    `Deleted CAS image '${imageName}', but could not delete the legacy image of the ` +
+      `same name${label}, which can no longer start sandboxes: ${failure.error}. ` +
+      `Delete it with deleteSandboxImage("${legacyImageId ?? imageName}").`,
   );
 }
 

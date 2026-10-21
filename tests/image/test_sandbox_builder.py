@@ -370,8 +370,12 @@ class TestDeleteSandboxImage(unittest.TestCase):
 
         with (
             patch.object(sbm, "_build_context_from_env", return_value=ctx),
-            patch.object(sbm, "_rust_delete_sandbox_image") as rust_delete,
+            patch.object(
+                sbm, "_rust_delete_sandbox_image", return_value=None
+            ) as rust_delete,
+            warnings.catch_warnings(record=True) as caught,
         ):
+            warnings.simplefilter("always")
             sbm.delete_sandbox_image("tensorlake/test:1")
 
         rust_delete.assert_called_once_with(
@@ -382,6 +386,52 @@ class TestDeleteSandboxImage(unittest.TestCase):
             None,
             "default",
         )
+        self.assertEqual(caught, [])
+
+    def test_delete_warns_when_the_same_named_legacy_image_remains(self):
+        """The CAS image is gone, so the delete succeeds; the legacy image
+        it could not delete is reported as a warning with the call that
+        finishes the job."""
+        ctx = _make_ctx()
+
+        with (
+            patch.object(sbm, "_build_context_from_env", return_value=ctx),
+            patch.object(
+                sbm,
+                "_rust_delete_sandbox_image",
+                return_value=(
+                    "sandbox_template_1",
+                    "Server error: 409 Conflict - retry the delete",
+                ),
+            ),
+        ):
+            with self.assertWarns(UserWarning) as caught:
+                sbm.delete_sandbox_image("app")
+
+        message = str(caught.warning)
+        self.assertIn("Deleted CAS image 'app'", message)
+        self.assertIn("legacy image of the same name (sandbox_template_1)", message)
+        self.assertIn("409 Conflict - retry the delete", message)
+        self.assertIn("delete_sandbox_image('sandbox_template_1')", message)
+        self.assertEqual(caught.filename, __file__)
+
+    def test_delete_warning_names_the_image_when_the_legacy_id_is_unknown(self):
+        ctx = _make_ctx()
+
+        with (
+            patch.object(sbm, "_build_context_from_env", return_value=ctx),
+            patch.object(
+                sbm,
+                "_rust_delete_sandbox_image",
+                return_value=(None, "Server error: 500 - internal error"),
+            ),
+        ):
+            with self.assertWarns(UserWarning) as caught:
+                sbm.delete_sandbox_image("app")
+
+        message = str(caught.warning)
+        self.assertIn("legacy image of the same name, which", message)
+        self.assertIn("delete_sandbox_image('app')", message)
 
     def test_delete_requires_credentials(self):
         ctx = _make_ctx(api_key=None, personal_access_token=None)

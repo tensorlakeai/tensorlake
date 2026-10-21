@@ -333,7 +333,9 @@ in TypeScript delete a published CAS or legacy image by name or ID.
   legacy image of the same name can no longer start sandboxes, so it is deleted
   too. The CLI reports it with `Also deleted legacy image ...`. If deleting the
   legacy image fails, the call still succeeds because the CAS image is gone; the
-  CLI prints the `tl sbx image rm sandbox_template_...` command that removes it.
+  CLI prints the `tl sbx image rm sandbox_template_...` command that removes it,
+  and the SDKs warn (`warnings.warn` in Python, `console.warn` in TypeScript)
+  with the legacy image, the error and the delete call that removes it.
 - **An ID deletes only that image.** An `image_` ID deletes that CAS image and a
   `sandbox_template_` ID that legacy image. When deleting an `image_` ID leaves a
   legacy image of the same name behind, the CLI warns that it can no longer be
