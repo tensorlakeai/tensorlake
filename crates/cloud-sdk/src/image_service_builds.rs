@@ -586,18 +586,10 @@ async fn resolve_parents(
     let mut parents = Vec::new();
     let mut pinned_references = Vec::new();
     for reference in candidates {
-        let catalog_reference = cas_catalog_reference(reference);
         let public_id = match direct_pin_public_id(reference)? {
             Some(public_id) => Some(public_id),
-            None => lookup_catalog_name(client, catalog_reference.as_ref()).await?,
+            None => lookup_catalog_name(client, reference).await?,
         };
-        if public_id.is_none() && catalog_reference.as_ref() != reference {
-            return Err(SandboxImageBuildError::usage(format!(
-                "CAS base image '{}' was not found while resolving Dockerfile reference \
-                 '{}'. Publish the CAS base first or use an existing tensorlake/cas image.",
-                catalog_reference, reference
-            )));
-        }
         let Some(public_id) = public_id else {
             if templates.find_by_name(reference).await?.is_some() {
                 return Err(SandboxImageBuildError::usage(format!(
@@ -608,16 +600,9 @@ async fn resolve_parents(
             }
             continue; // external registry reference, pulled by the guest
         };
-        if catalog_reference.as_ref() == reference {
-            emit(SandboxImageBuildEvent::Status(format!(
-                "Resolved '{reference}' to CAS image {public_id}"
-            )));
-        } else {
-            emit(SandboxImageBuildEvent::Status(format!(
-                "Resolved '{reference}' through CAS image '{}' to {public_id}",
-                catalog_reference
-            )));
-        }
+        emit(SandboxImageBuildEvent::Status(format!(
+            "Resolved '{reference}' to CAS image {public_id}"
+        )));
         pinned_references.push(reference.to_string());
         parents.push(json!({ "reference": reference, "public_id": public_id }));
     }
@@ -630,20 +615,6 @@ async fn resolve_parents(
         )));
     }
     Ok(parents)
-}
-
-/// Map Tensorlake-managed Dockerfile references onto their CAS catalog
-/// namespace. The original reference is retained in the submitted parent pin
-/// because BuildKit binds the mounted context to the exact token written in
-/// the Dockerfile; only the authenticated catalog lookup uses this name.
-fn cas_catalog_reference(reference: &str) -> std::borrow::Cow<'_, str> {
-    let Some(remainder) = reference.strip_prefix("tensorlake/") else {
-        return std::borrow::Cow::Borrowed(reference);
-    };
-    if remainder == "cas" || remainder.starts_with("cas/") || remainder.starts_with("cas:") {
-        return std::borrow::Cow::Borrowed(reference);
-    }
-    std::borrow::Cow::Owned(format!("tensorlake/cas/{remainder}"))
 }
 
 /// An `image_<id>` reference pins the registered image directly, with no
@@ -2417,19 +2388,19 @@ mod tests {
 
     #[tokio::test]
     async fn parents_pin_by_public_id_and_refuse_legacy_templates() {
-        // The Image Service knows `team/base`; `old-base` is unknown there
-        // but registered as a legacy platform template.
+        // The Image Service knows `team/base`; the legacy managed image is
+        // unknown there but registered as a legacy platform template.
         let (image_service_url, image_service) = scripted_image_service_with_status(vec![
             (
                 200,
                 published_image_record("image_base1", "team/base", &"c".repeat(64)),
             ),
-            (404, json!({"error": "name \"old-base\" not found"})),
+            (404, json!({"error": "not found"})),
         ])
         .await;
         let (platform_url, platform) = scripted_image_service_with_status(vec![(
             200,
-            json!({"id": "sandbox_template_1", "name": "old-base", "snapshotId": "snap-1"}),
+            json!({"id": "sandbox_template_1", "name": "tensorlake/legacy/ubuntu-minimal", "snapshotId": "snap-1"}),
         )])
         .await;
         let client = ClientBuilder::new(&image_service_url).build().unwrap();
@@ -2438,15 +2409,20 @@ mod tests {
         );
         let mut plan = plan_with_context(std::env::temp_dir());
         plan.base_image = "team/base".to_string();
-        plan.additional_image_references = vec!["old-base".to_string()];
+        plan.additional_image_references = vec!["tensorlake/legacy/ubuntu-minimal".to_string()];
         let mut events = Vec::new();
         let error = resolve_parents(&client, &templates, &plan, &mut |event| events.push(event))
             .await
             .unwrap_err()
             .to_string();
-        assert!(error.contains("'old-base' is a legacy image"), "{error}");
         assert!(
-            error.contains("Rebuild 'old-base' first (CAS is now the default)"),
+            error.contains("'tensorlake/legacy/ubuntu-minimal' is a legacy image"),
+            "{error}"
+        );
+        assert!(
+            error.contains(
+                "Rebuild 'tensorlake/legacy/ubuntu-minimal' first (CAS is now the default)"
+            ),
             "{error}"
         );
         assert!(events.contains(&SandboxImageBuildEvent::Status(
@@ -2479,24 +2455,58 @@ mod tests {
         platform.await.unwrap();
     }
 
-    #[test]
-    fn tensorlake_references_use_the_cas_catalog_namespace() {
-        for (reference, expected) in [
-            ("tensorlake/ubuntu-minimal", "tensorlake/cas/ubuntu-minimal"),
-            (
-                "tensorlake/ubuntu-minimal:latest",
-                "tensorlake/cas/ubuntu-minimal:latest",
-            ),
-            (
-                "tensorlake/cas/ubuntu-minimal",
-                "tensorlake/cas/ubuntu-minimal",
-            ),
-            ("tensorlake/cas:latest", "tensorlake/cas:latest"),
-            ("ubuntu:24.04", "ubuntu:24.04"),
-            ("ghcr.io/team/image:v1", "ghcr.io/team/image:v1"),
-        ] {
-            assert_eq!(cas_catalog_reference(reference), expected);
-        }
+    #[tokio::test]
+    async fn managed_parent_names_are_resolved_without_rewriting() {
+        let references = [
+            ("tensorlake/ubuntu-minimal", "image_base"),
+            ("tensorlake/ubuntu-minimal:latest", "image_tagged"),
+            ("tensorlake/cas/cuda:13.3", "image_gpu"),
+        ];
+        let (image_service_url, image_service) = recording_image_service(
+            references
+                .iter()
+                .map(|(reference, id)| {
+                    Reply::Status(200, published_image_record(id, reference, ""))
+                })
+                .collect(),
+        )
+        .await;
+        let (platform_url, platform) = recording_image_service(vec![]).await;
+        let client = ClientBuilder::new(&image_service_url).build().unwrap();
+        let templates = SandboxTemplatesClient::new_api_key_scoped(
+            ClientBuilder::new(&platform_url).build().unwrap(),
+        );
+        let mut plan = plan_with_context(std::env::temp_dir());
+        plan.base_image = references[0].0.to_string();
+        plan.additional_image_references = references[1..]
+            .iter()
+            .map(|(reference, _)| reference.to_string())
+            .collect();
+
+        let parents = resolve_parents(&client, &templates, &plan, &mut |_| {})
+            .await
+            .unwrap();
+        assert_eq!(
+            parents,
+            references
+                .iter()
+                .map(|(reference, id)| json!({"reference": reference, "public_id": id}))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            image_service
+                .completed()
+                .await
+                .iter()
+                .map(|request| request.line.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "GET /images/name/tensorlake/ubuntu-minimal HTTP/1.1",
+                "GET /images/name/tensorlake/ubuntu-minimal:latest HTTP/1.1",
+                "GET /images/name/tensorlake/cas/cuda:13.3 HTTP/1.1",
+            ]
+        );
+        assert!(platform.completed().await.is_empty());
     }
 
     #[test]
