@@ -15,7 +15,7 @@
 
 </div>
 
-Tensorlake is a compute infrastructure platform for building agentic applications with sandboxes. 
+Tensorlake is a compute infrastructure platform for building agentic applications with sandboxes.
 
 The Sandbox API creates MicroVM sandboxes which you can use to run agents, or use them as an isolated environment for running tools or LLM generated code.
 
@@ -206,7 +206,6 @@ tl sbx image create --no-cas -n app ./Dockerfile   # legacy image
   matched exactly as given.
 - **Base images.** A CAS image build can use CAS images and registry images as a
   base, but not legacy images: rebuild a legacy base image as a CAS image first.
-  A `FROM tensorlake/<name>` reference uses the CAS image `tensorlake/cas/<name>`.
 - Application images built by `tensorlake deploy` stay legacy images.
 
 ### Registry credentials for image builds and imports
