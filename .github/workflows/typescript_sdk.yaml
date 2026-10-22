@@ -2,6 +2,26 @@ name: TypeScript SDK Tests
 
 on:
   workflow_dispatch:
+    inputs:
+      environment:
+        description: Integration test environment
+        type: choice
+        options: [dev, prod]
+        default: dev
+        required: true
+      sandbox_image:
+        description: Sandbox image used by the integration suites
+        type: string
+        default: tensorlake/ubuntu-minimal
+        required: true
+      integration_only:
+        description: Run only the cloud integration suite
+        type: boolean
+        default: true
+      expected_project_id:
+        description: Refuse to run if the environment key belongs to another project
+        type: string
+        default: ''
 
   pull_request:
     paths:
@@ -53,6 +73,7 @@ defaults:
 
 jobs:
   function-executor-compatibility:
+    if: github.event_name != 'workflow_dispatch' || !inputs.integration_only
     name: Python/TypeScript function executor compatibility
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -98,6 +119,7 @@ jobs:
         run: make test_function_executor_compatibility
 
   unit-tests:
+    if: github.event_name != 'workflow_dispatch' || !inputs.integration_only
     name: Unit tests
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -132,7 +154,7 @@ jobs:
 
   native-binding-smoke:
     name: Native Function Agent binding smoke tests
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: (github.event_name != 'workflow_dispatch' || !inputs.integration_only) && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -239,9 +261,19 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    environment: prod
+    environment: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'prod' }}
+    env:
+      TENSORLAKE_API_URL: ${{ github.event_name == 'workflow_dispatch' && inputs.environment == 'dev' && 'https://api.tensorlake.dev' || 'https://api.tensorlake.ai' }}
+      TENSORLAKE_API_KEY: ${{ secrets.TENSORLAKE_API_KEY }}
+      TENSORLAKE_SANDBOX_IMAGE: ${{ inputs.sandbox_image || 'tensorlake/ubuntu-minimal' }}
+      TENSORLAKE_TEST_CLEANUP_GRACE_SECS: ${{ github.event_name == 'workflow_dispatch' && '315360000' || '60' }}
+      TENSORLAKE_EXPECTED_PROJECT_ID: ${{ inputs.expected_project_id }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Verify integration test project
+        working-directory: ${{ github.workspace }}
+        run: python3 .github/scripts/integration_test_context.py
 
       - name: Vendor canonical Function Agent core
         uses: ./.github/actions/vendor-function-agent-core
@@ -313,8 +345,3 @@ jobs:
 
       - name: Run integration tests
         run: npm run test:integration
-        env:
-          TENSORLAKE_API_KEY: ${{ secrets.TENSORLAKE_API_KEY }}
-          TENSORLAKE_ORGANIZATION_ID: ${{ vars.TENSORLAKE_ORGANIZATION_ID }}
-          TENSORLAKE_PROJECT_ID: ${{ vars.TENSORLAKE_PROJECT_ID }}
-          TENSORLAKE_TEST_CLEANUP_GRACE_SECS: "60"

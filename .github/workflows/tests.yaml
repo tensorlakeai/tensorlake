@@ -2,6 +2,26 @@ name: Tests
 
 on:
   workflow_dispatch:
+    inputs:
+      environment:
+        description: Integration test environment
+        type: choice
+        options: [dev, prod]
+        default: dev
+        required: true
+      sandbox_image:
+        description: Sandbox image used by the integration suites
+        type: string
+        default: tensorlake/ubuntu-minimal
+        required: true
+      integration_only:
+        description: Run only the cloud integration suite
+        type: boolean
+        default: true
+      expected_project_id:
+        description: Refuse to run if the environment key belongs to another project
+        type: string
+        default: ''
 
   push:
     branches:
@@ -17,6 +37,7 @@ permissions:
 
 jobs:
   public_source_checks:
+    if: github.event_name != 'workflow_dispatch' || !inputs.integration_only
     name: Public Python source checks
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -60,7 +81,7 @@ jobs:
     name: Rust full-feature workspace tests
     # The customer CLI and native function runners need private source from artifact_storage and
     # compute-engine-internal. Fork pull requests cannot read either repository-scoped App secret.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: (github.event_name != 'workflow_dispatch' || !inputs.integration_only) && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest-xlarge
     timeout-minutes: 30
     steps:
@@ -128,7 +149,7 @@ jobs:
 
   macos_private_source_contract:
     name: macOS private client tests
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: (github.event_name != 'workflow_dispatch' || !inputs.integration_only) && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: macos-14
     timeout-minutes: 20
     steps:
@@ -162,7 +183,7 @@ jobs:
 
   windows_build_smoke:
     name: Windows build smoke test
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: (github.event_name != 'workflow_dispatch' || !inputs.integration_only) && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: windows-latest
     timeout-minutes: 40
     steps:
@@ -216,7 +237,7 @@ jobs:
 
   run_tests:
     name: Lint and test
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: (github.event_name != 'workflow_dispatch' || !inputs.integration_only) && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest-xlarge
     timeout-minutes: 30
     steps:
@@ -280,9 +301,18 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    environment: prod
+    environment: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'prod' }}
+    env:
+      TENSORLAKE_API_URL: ${{ github.event_name == 'workflow_dispatch' && inputs.environment == 'dev' && 'https://api.tensorlake.dev' || 'https://api.tensorlake.ai' }}
+      TENSORLAKE_API_KEY: ${{ secrets.TENSORLAKE_API_KEY }}
+      TENSORLAKE_SANDBOX_IMAGE: ${{ inputs.sandbox_image || 'tensorlake/ubuntu-minimal' }}
+      TENSORLAKE_TEST_CLEANUP_GRACE_SECS: ${{ github.event_name == 'workflow_dispatch' && '315360000' || '60' }}
+      TENSORLAKE_EXPECTED_PROJECT_ID: ${{ inputs.expected_project_id }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Verify integration test project
+        run: python3 .github/scripts/integration_test_context.py
 
       - name: Vendor canonical Function Agent core
         uses: ./.github/actions/vendor-function-agent-core
@@ -317,7 +347,3 @@ jobs:
 
       - name: Run Sandbox integration tests
         run: make test_sandbox
-        env:
-          TENSORLAKE_API_URL: https://api.tensorlake.ai
-          TENSORLAKE_API_KEY: ${{ secrets.TENSORLAKE_API_KEY }}
-          TENSORLAKE_TEST_CLEANUP_GRACE_SECS: "60"
