@@ -118,7 +118,7 @@ describe.skipIf(process.env.TENSORLAKE_TEST_NATIVE_CLOUD !== "1")("native image 
 
   it("an AbortSignal reaches the Rust cancellation handshake by build id", async () => {
     on("GET", "/images/v4/builds/build-1", () => [200, build("running")]);
-    on("POST", "/images/v4/builds/cancel", () => [200, { outcome: "cancelled", build: build("cancelled") }]);
+    on("POST", "/images/v4/builds/build-1/cancel", () => [200, { outcome: "cancelled", build: build("cancelled") }]);
     const controller = new AbortController();
     const events: Array<Record<string, unknown>> = [];
     const pending = waitImageBuild("build-1", { signal: controller.signal, emit: (e) => events.push(e) });
@@ -128,16 +128,17 @@ describe.skipIf(process.env.TENSORLAKE_TEST_NATIVE_CLOUD !== "1")("native image 
     expect(error).toBeInstanceOf(ImageBuildInterruptedError);
     expect((error as ImageBuildInterruptedError).outcome).toBe("cancelled");
     expect((error as ImageBuildInterruptedError).confirmed).toBe(true);
-    const cancel = requests.find((r) => r.url === "/images/v4/builds/cancel");
+    const cancel = requests.find((r) => r.url === "/images/v4/builds/build-1/cancel");
     expect(cancel).toBeDefined();
-    expect(JSON.parse(cancel!.body)).toEqual({ build_id: "build-1" });
+    // The build id rides in the path; the by-id cancel carries no body.
+    expect(cancel!.body).toBe("");
     expect(events.some((e) => e.type === "interrupted" && e.outcome === "cancelled")).toBe(true);
   });
 
   it("an AbortSignal on a CAS import cancels while a timeout only stops waiting", async () => {
     on("POST", "/images/v4/builds", () => [201, build("pending")]);
     on("GET", "/images/v4/builds/build-1", () => [200, build("running")]);
-    on("POST", "/images/v4/builds/cancel", () => [
+    on("POST", "/images/v4/builds/build-1/cancel", () => [
       200,
       { outcome: "already_completed", build: build("succeeded", { result: result() }) },
     ]);
@@ -159,7 +160,7 @@ describe.skipIf(process.env.TENSORLAKE_TEST_NATIVE_CLOUD !== "1")("native image 
     requests = [];
     const timeout = await waitImageBuild("build-1", { timeoutMs: 300 }).catch((e: unknown) => e);
     expect((timeout as Error).name).toBe("ImageBuildTimeoutError");
-    expect(requests.some((r) => r.url === "/images/v4/builds/cancel")).toBe(false);
+    expect(requests.some((r) => r.url === "/images/v4/builds/build-1/cancel")).toBe(false);
   });
 
   it("surfaces typed conflicts, not-found and not_admitted through the binding", async () => {
@@ -207,7 +208,7 @@ describe.skipIf(process.env.TENSORLAKE_TEST_NATIVE_CLOUD !== "1")("native image 
     // `MyProject` deletes the CAS image `myproject`; the legacy image of that
     // name cannot be deleted, so the call succeeds and the warning, built from
     // the binding's real return value, names `myproject` for recovery.
-    on("DELETE", "/images/v4/images/name/myproject", () => [202, { deleting: true }]);
+    on("DELETE", "/images/v4/names/myproject", () => [202, { deleting: true }]);
     on("GET", "/platform/v1/sandbox-templates/by-name/myproject", () => [500, { message: "internal error" }]);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
@@ -219,7 +220,7 @@ describe.skipIf(process.env.TENSORLAKE_TEST_NATIVE_CLOUD !== "1")("native image 
       expect(message).toContain('deleteSandboxImage("myproject")');
       expect(message).not.toContain("MyProject");
       expect(requests.map((r) => `${r.method} ${r.url}`)).toEqual([
-        "DELETE /images/v4/images/name/myproject",
+        "DELETE /images/v4/names/myproject",
         "GET /platform/v1/sandbox-templates/by-name/myproject",
       ]);
     } finally {

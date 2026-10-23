@@ -225,7 +225,7 @@ async fn legacy_describe_by_name_probes_the_image_service_then_the_platform() {
             introspection(),
             reply(
                 "GET",
-                "/images/v4/images/name/legacy-img",
+                "/images/v4/names/legacy-img",
                 404,
                 json!({"error": "name not found"}),
             ),
@@ -243,7 +243,7 @@ async fn legacy_describe_by_name_probes_the_image_service_then_the_platform() {
     assert_eq!(
         run.lines(),
         vec![
-            "GET /images/v4/images/name/legacy-img HTTP/1.1",
+            "GET /images/v4/names/legacy-img HTTP/1.1",
             "GET /platform/v1/sandbox-templates/by-name/legacy-img HTTP/1.1",
         ]
     );
@@ -260,7 +260,7 @@ async fn legacy_describe_by_name_probes_the_image_service_then_the_platform() {
     assert_eq!(unavailable.code(), Some(1), "{}", unavailable.stderr());
     assert_eq!(
         unavailable.lines(),
-        vec!["GET /images/v4/images/name/legacy-img HTTP/1.1"]
+        vec!["GET /images/v4/names/legacy-img HTTP/1.1"]
     );
     assert!(
         unavailable
@@ -280,7 +280,7 @@ async fn run_describe_with_image_service(
         &["image", "describe", "legacy-img"],
         vec![
             introspection(),
-            reply("GET", "/images/v4/images/name/legacy-img", status, body),
+            reply("GET", "/images/v4/names/legacy-img", status, body),
         ],
         dir,
     )
@@ -305,7 +305,7 @@ async fn legacy_ls_reads_both_catalogs_and_prints_the_accepted_table() {
             ),
             reply(
                 "GET",
-                "/images/v4/images?page_size=100",
+                "/images/v4/?page_size=100",
                 200,
                 json!({"items": [], "pagination": {"next": null}}),
             ),
@@ -319,7 +319,7 @@ async fn legacy_ls_reads_both_catalogs_and_prints_the_accepted_table() {
     assert_eq!(
         lines,
         vec![
-            "GET /images/v4/images?page_size=100 HTTP/1.1",
+            "GET /images/v4/?page_size=100 HTTP/1.1",
             "GET /platform/v1/sandbox-templates?pageSize=100 HTTP/1.1",
         ]
     );
@@ -350,7 +350,7 @@ async fn run_ls_json(dir: &std::path::Path) -> image_support::CliRun {
             ),
             reply(
                 "GET",
-                "/images/v4/images?page_size=100",
+                "/images/v4/?page_size=100",
                 200,
                 json!({"items": []}),
             ),
@@ -399,7 +399,7 @@ async fn legacy_rm_by_name_falls_through_only_on_a_clean_404() {
             introspection(),
             reply(
                 "DELETE",
-                "/images/v4/images/name/legacy-img",
+                "/images/v4/names/legacy-img",
                 404,
                 json!({"error": "name not found"}),
             ),
@@ -417,7 +417,7 @@ async fn legacy_rm_by_name_falls_through_only_on_a_clean_404() {
     assert_eq!(
         run.lines(),
         vec![
-            "DELETE /images/v4/images/name/legacy-img HTTP/1.1",
+            "DELETE /images/v4/names/legacy-img HTTP/1.1",
             "DELETE /platform/v1/sandbox-templates/by-name/legacy-img HTTP/1.1",
         ]
     );
@@ -429,7 +429,7 @@ async fn legacy_rm_by_name_falls_through_only_on_a_clean_404() {
         vec![
             reply(
                 "DELETE",
-                "/images/v4/images/name/legacy-img",
+                "/images/v4/names/legacy-img",
                 404,
                 json!({"error": "nope"}),
             ),
@@ -463,7 +463,7 @@ async fn legacy_rm_by_name_never_falls_through_on_other_answers() {
         dir.path(),
         vec![reply(
             "DELETE",
-            "/images/v4/images/name/legacy-img",
+            "/images/v4/names/legacy-img",
             202,
             json!({"deleting": true}),
         )],
@@ -475,7 +475,7 @@ async fn legacy_rm_by_name_never_falls_through_on_other_answers() {
     assert_eq!(
         accepted.lines(),
         vec![
-            "DELETE /images/v4/images/name/legacy-img HTTP/1.1",
+            "DELETE /images/v4/names/legacy-img HTTP/1.1",
             "GET /platform/v1/sandbox-templates/by-name/legacy-img HTTP/1.1",
         ]
     );
@@ -490,7 +490,7 @@ async fn legacy_rm_by_name_never_falls_through_on_other_answers() {
         dir.path(),
         vec![reply(
             "DELETE",
-            "/images/v4/images/name/legacy-img",
+            "/images/v4/names/legacy-img",
             409,
             json!({"error": "Image 'legacy-img' already has an unfinished build 'build-3'. Cancel it before starting another.", "code": "image_build_in_progress"}),
         )],
@@ -499,7 +499,7 @@ async fn legacy_rm_by_name_never_falls_through_on_other_answers() {
     assert_eq!(conflict.code(), Some(1));
     assert_eq!(
         conflict.lines(),
-        vec!["DELETE /images/v4/images/name/legacy-img HTTP/1.1"]
+        vec!["DELETE /images/v4/names/legacy-img HTTP/1.1"]
     );
     assert!(
         conflict.stderr().contains("unfinished build 'build-3'"),
@@ -511,7 +511,7 @@ async fn legacy_rm_by_name_never_falls_through_on_other_answers() {
         dir.path(),
         vec![reply(
             "DELETE",
-            "/images/v4/images/name/legacy-img",
+            "/images/v4/names/legacy-img",
             503,
             json!({"error": "deploying"}),
         )],
@@ -520,7 +520,7 @@ async fn legacy_rm_by_name_never_falls_through_on_other_answers() {
     assert_eq!(unavailable.code(), Some(1));
     assert_eq!(
         unavailable.lines(),
-        vec!["DELETE /images/v4/images/name/legacy-img HTTP/1.1"]
+        vec!["DELETE /images/v4/names/legacy-img HTTP/1.1"]
     );
     assert!(
         unavailable
@@ -533,13 +533,13 @@ async fn legacy_rm_by_name_never_falls_through_on_other_answers() {
     // A lost response is never replayed across catalogs.
     let dropped = run_rm_with_image_service(
         dir.path(),
-        vec![reset("DELETE", "/images/v4/images/name/legacy-img")],
+        vec![reset("DELETE", "/images/v4/names/legacy-img")],
     )
     .await;
     assert_eq!(dropped.code(), Some(1));
     assert_eq!(
         dropped.lines(),
-        vec!["DELETE /images/v4/images/name/legacy-img HTTP/1.1"]
+        vec!["DELETE /images/v4/names/legacy-img HTTP/1.1"]
     );
 }
 

@@ -68,7 +68,14 @@ pub const IMAGE_SERVICE_URL_ENV: &str = "TENSORLAKE_IMAGE_SERVICE_URL";
 /// Ingress route that fronts the Image Service. The ingress authenticates,
 /// replaces any client-supplied identity headers with verified ones, and maps
 /// this prefix onto the service's own routes -- so the paths below are
-/// prefix-relative (`/builds`, not `/v1/builds`).
+/// prefix-relative (`/builds`, not `/v1/builds`). Under that prefix the
+/// 2026-10-21 URL cleanup reads as it should: the image collection is the
+/// root (`GET /images/v4`), ids live under `/id/`, names under `/names/`,
+/// adoption is `/from-snapshot`, and cancellation puts the build id in the
+/// path (`/builds/{id}/cancel`). The service keeps the older spellings
+/// (`/images`, `/images/name/…`, `/images/from-snapshot`, the selector
+/// cancel) mounted for older SDKs, so this SDK needs no fallback logic:
+/// newer shapes only, with rollout ordered service-first.
 const IMAGE_SERVICE_INGRESS_PATH: &str = "/images/v4";
 
 /// The retired immutable reference scheme. A Dockerfile reference written in
@@ -647,7 +654,7 @@ fn direct_pin_public_id(reference: &str) -> Result<Option<String>> {
 /// rejects) and fall through to a registry pull, matching how the legacy
 /// path treats template-registry misses.
 async fn lookup_catalog_name(client: &Client, reference: &str) -> Result<Option<String>> {
-    let path = format!("/images/name/{reference}");
+    let path = format!("/names/{reference}");
     let request = client.request(Method::GET, &path).build()?;
     let response = client.execute_raw(request).await?;
     match response.status() {
@@ -998,7 +1005,7 @@ fn decode_admission(body: &str) -> BuildResult<AdmittedBuild> {
 // Admission
 // ---------------------------------------------------------------------------
 
-/// Admit an operation (`POST /builds`, `POST /images/from-snapshot`) under
+/// Admit an operation (`POST /builds`, `POST /from-snapshot`) under
 /// `request_id`, reconnecting across transient failures with the same key.
 /// An interruption while the admission is unresolved stops the retries and
 /// resolves the outcome through the cancel route's request-id selector; it
@@ -1053,7 +1060,7 @@ pub(crate) async fn admit_build(
     Ok(created)
 }
 
-/// Admit a direct publication (`POST /images/from-snapshot`) under
+/// Admit a direct publication (`POST /from-snapshot`) under
 /// `request_id`: 201 is the published image, `503 publication_pending` the
 /// operation to keep retrying under the same key. Conflicts and validation
 /// answers are typed like build admission; an interruption while unresolved
@@ -1248,10 +1255,13 @@ async fn get_build_attempt(
     }
 }
 
-/// `POST /builds/cancel` with exactly one selector, repeated across
-/// transient failures for `budget`. The cancel route never admits anything,
-/// so repeating it is safe; a budget that runs out is reported as an error
-/// the caller turns into "acknowledgement unknown".
+/// Cancel a build, repeated across transient failures for `budget`. By
+/// build id the request is `POST /builds/{build_id}/cancel`; by client
+/// request id it is the selector form `POST /builds/cancel`, which the
+/// service keeps for that selector and for older SDKs. Neither cancel
+/// route ever admits anything, so repeating is safe; a budget that runs
+/// out is reported as an error the caller turns into "acknowledgement
+/// unknown".
 pub(crate) async fn cancel_build(
     client: &Client,
     selector: &CancelBuildSelector,
@@ -1259,13 +1269,18 @@ pub(crate) async fn cancel_build(
 ) -> BuildResult<CancelBuildResponse> {
     let deadline = Instant::now() + budget;
     let mut silent = |_event| {};
-    let body = selector.body();
     let attempted = with_reconnects("CAS image API", deadline, None, &mut silent, || async {
-        let request = client
-            .request(Method::POST, "/builds/cancel")
-            .json(&body)
-            .build()
-            .map_err(SdkError::Http)?;
+        let request = match selector {
+            CancelBuildSelector::BuildId(build_id) => client
+                .request(Method::POST, &format!("/builds/{build_id}/cancel"))
+                .build()
+                .map_err(SdkError::Http)?,
+            CancelBuildSelector::ClientRequestId(_) => client
+                .request(Method::POST, "/builds/cancel")
+                .json(&selector.body())
+                .build()
+                .map_err(SdkError::Http)?,
+        };
         let response = send_raw(client, request).await?;
         match response.status {
             status if status.is_success() => {
@@ -3025,8 +3040,10 @@ mod tests {
 
         let requests = server.finish().await;
         assert_eq!(requests.len(), 5);
-        assert_eq!(requests[0].line, "POST /builds/cancel HTTP/1.1");
-        assert_eq!(requests[0].json(), json!({"build_id": "build-1"}));
+        // The build id rides in the path; the by-id cancel carries no body.
+        assert_eq!(requests[0].line, "POST /builds/build-1/cancel HTTP/1.1");
+        assert_eq!(requests[0].json(), Value::Null);
+        assert_eq!(requests[2].line, "POST /builds/cancel HTTP/1.1");
         assert_eq!(requests[2].json(), json!({"client_request_id": "rid-lost"}));
         assert!(requests[0].header("idempotency-key").is_none());
     }
@@ -3287,9 +3304,11 @@ mod tests {
         let requests = server.finish().await;
         assert_eq!(requests.len(), 3);
         // The handshake retried the transient cancel failure with the same
-        // selector and never touched admission.
-        assert_eq!(requests[1].line, "POST /builds/cancel HTTP/1.1");
-        assert_eq!(requests[2].json(), json!({"build_id": "build-1"}));
+        // selector and never touched admission; both by-id cancels carry
+        // the id in the path and no body.
+        assert_eq!(requests[1].line, "POST /builds/build-1/cancel HTTP/1.1");
+        assert_eq!(requests[2].line, "POST /builds/build-1/cancel HTTP/1.1");
+        assert_eq!(requests[2].json(), Value::Null);
     }
 
     fn pending_reply(build_id: &str) -> Reply {
@@ -3444,12 +3463,9 @@ mod tests {
         let requests = server.finish().await;
         let cancel = requests
             .iter()
-            .find(|request| request.line.starts_with("POST /builds/cancel "))
+            .find(|request| request.line.starts_with("POST /builds/build-1/cancel "))
             .expect("cancel by build id");
-        assert_eq!(
-            serde_json::from_str::<Value>(&cancel.body).unwrap(),
-            json!({"build_id": "build-1"})
-        );
+        assert_eq!(cancel.json(), Value::Null, "the id rides in the path");
     }
 
     fn registration_policy(limit: Duration, poll_interval: Duration) -> RegistrationWaitPolicy {
@@ -3503,7 +3519,7 @@ mod tests {
         assert!(
             requests
                 .iter()
-                .all(|request| request.line.ends_with("/images/from-snapshot HTTP/1.1")),
+                .all(|request| request.line.ends_with("/from-snapshot HTTP/1.1")),
             "{:?}",
             requests.iter().map(|r| &r.line).collect::<Vec<_>>()
         );
@@ -3560,7 +3576,7 @@ mod tests {
         assert!(
             requests
                 .iter()
-                .all(|request| request.line.ends_with("/images/from-snapshot HTTP/1.1")),
+                .all(|request| request.line.ends_with("/from-snapshot HTTP/1.1")),
             "no cancel and nothing but the same POST: {:?}",
             requests.iter().map(|r| &r.line).collect::<Vec<_>>()
         );
@@ -3613,7 +3629,7 @@ mod tests {
             "one complete POST, no second attempt and no cancel: {:?}",
             requests.iter().map(|r| &r.line).collect::<Vec<_>>()
         );
-        assert!(requests[0].line.ends_with("/images/from-snapshot HTTP/1.1"));
+        assert!(requests[0].line.ends_with("/from-snapshot HTTP/1.1"));
     }
 
     #[test]

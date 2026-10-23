@@ -170,7 +170,7 @@ class TestCasInterruption(unittest.TestCase):
                 200,
                 _build(status="running"),
             )
-            service.handlers[("POST", "/images/v4/builds/cancel")] = (
+            service.handlers[("POST", "/images/v4/builds/build-1/cancel")] = (
                 200,
                 {"outcome": "cancelled", "build": _build(status="cancelled")},
             )
@@ -191,9 +191,10 @@ class TestCasInterruption(unittest.TestCase):
                     emit=events.append,
                     docker_config_json="{}",
                 )
-            cancels = service.recorded("POST", "/images/v4/builds/cancel")
+            cancels = service.recorded("POST", "/images/v4/builds/build-1/cancel")
             self.assertEqual(len(cancels), 1, service.requests)
-            self.assertEqual(cancels[0][3], {"build_id": "build-1"})
+            # The build id rides in the path; the by-id cancel carries no body.
+            self.assertEqual(cancels[0][3], {})
             admissions = service.recorded("POST", "/images/v4/builds")
             self.assertEqual(len(admissions), 1, "admission is never replayed")
             self.assertEqual(len(admissions[0][2]["idempotency-key"]), 32)
@@ -211,7 +212,7 @@ class TestCasInterruption(unittest.TestCase):
                 200,
                 _build(status="running"),
             )
-            service.handlers[("POST", "/images/v4/builds/cancel")] = (
+            service.handlers[("POST", "/images/v4/builds/build-1/cancel")] = (
                 200,
                 {
                     "outcome": "already_completed",
@@ -238,8 +239,8 @@ class TestCasInterruption(unittest.TestCase):
                 with self.assertRaises(KeyboardInterrupt):
                     handle.wait(emit=events.append)
             self.assertEqual(
-                service.recorded("POST", "/images/v4/builds/cancel")[0][3],
-                {"build_id": "build-1"},
+                service.recorded("POST", "/images/v4/builds/build-1/cancel")[0][3],
+                {},
             )
         interrupted = [event for event in events if event["type"] == "interrupted"][0]
         self.assertEqual(interrupted["outcome"], "already_completed")
@@ -272,7 +273,9 @@ class TestCasInterruption(unittest.TestCase):
                 )
             self.assertEqual(str(raised.exception), "callback boom")
             time.sleep(0.3)
-            self.assertEqual(service.recorded("POST", "/images/v4/builds/cancel"), [])
+            self.assertEqual(
+                service.recorded("POST", "/images/v4/builds/build-1/cancel"), []
+            )
         self.assertEqual(seen[-1], "build_accepted", seen)
 
     def test_legacy_emitter_swallows_callback_errors_and_the_wait_completes(self):
@@ -374,7 +377,7 @@ class TestBuildOperationsNative(unittest.TestCase):
                 status="future_status", kind="future_kind", phase="future_phase"
             )
             service.handlers[("GET", "/images/v4/builds/build-1")] = (200, record)
-            service.handlers[("POST", "/images/v4/builds/cancel")] = (
+            service.handlers[("POST", "/images/v4/builds/build-1/cancel")] = (
                 200,
                 {"outcome": "future_outcome", "build": record},
             )
@@ -532,7 +535,7 @@ class TestBuildOperationsNative(unittest.TestCase):
                 200,
                 next(statuses),
             )
-            service.handlers[("GET", "/images/v4/images/name/img")] = (
+            service.handlers[("GET", "/images/v4/names/img")] = (
                 200,
                 _result(),
             )
@@ -573,7 +576,9 @@ class TestBuildOperationsNative(unittest.TestCase):
                     builds.wait_build("build-1", timeout=0.3)
             self.assertEqual(raised.exception.build_id, "build-1")
             self.assertIn("may still be running", str(raised.exception))
-            self.assertEqual(service.recorded("POST", "/images/v4/builds/cancel"), [])
+            self.assertEqual(
+                service.recorded("POST", "/images/v4/builds/build-1/cancel"), []
+            )
 
 
 @unittest.skipIf(_cloud_sdk is None, "requires the built native SDK")
@@ -588,7 +593,7 @@ class TestDeleteThroughTheNativeBoundary(unittest.TestCase):
             _env(),
             patch.dict(os.environ, {"TENSORLAKE_API_URL": service.url}),
         ):
-            service.handlers[("DELETE", "/images/v4/images/name/myproject")] = (
+            service.handlers[("DELETE", "/images/v4/names/myproject")] = (
                 202,
                 {"deleting": True},
             )
@@ -606,7 +611,7 @@ class TestDeleteThroughTheNativeBoundary(unittest.TestCase):
         self.assertEqual(
             [(method, path) for method, path, _, _ in service.requests],
             [
-                ("DELETE", "/images/v4/images/name/myproject"),
+                ("DELETE", "/images/v4/names/myproject"),
                 ("GET", "/platform/v1/sandbox-templates/by-name/myproject"),
             ],
         )
