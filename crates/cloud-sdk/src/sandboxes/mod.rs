@@ -891,7 +891,6 @@ impl SandboxesClient {
         snapshot_id: Option<&str>,
         owner: Option<&str>,
     ) -> Result<Traced<SandboxInfo>, SdkError> {
-        let uri = self.endpoint(&format!("sandboxes/{sandbox_id}/file_systems"));
         let body = FileSystemMount {
             file_system_id: file_system_id.to_string(),
             mount_path: mount_path.to_string(),
@@ -899,12 +898,25 @@ impl SandboxesClient {
             prefetch,
             snapshot_id: snapshot_id.map(str::to_string),
             owner: owner.map(str::to_string),
+            source_path: None,
         };
-        validate_mount_snapshot_pins(std::slice::from_ref(&body))?;
-        validate_mount_owners(std::slice::from_ref(&body))?;
+        self.attach_file_system_with_request(sandbox_id, &body)
+            .await
+    }
+
+    /// Attach a filesystem with optional subtree selection through `source_path`.
+    /// Omit `source_path` to mount the whole filesystem, including on older guests.
+    pub async fn attach_file_system_with_request(
+        &self,
+        sandbox_id: &str,
+        mount: &FileSystemMount,
+    ) -> Result<Traced<SandboxInfo>, SdkError> {
+        let uri = self.endpoint(&format!("sandboxes/{sandbox_id}/file_systems"));
+        validate_mount_snapshot_pins(std::slice::from_ref(mount))?;
+        validate_mount_owners(std::slice::from_ref(mount))?;
         let req = self
             .client
-            .build_post_json_request(Method::POST, &uri, &body)?;
+            .build_post_json_request(Method::POST, &uri, mount)?;
         self.client.execute_json(req).await
     }
 
@@ -1755,6 +1767,7 @@ mod process_ref_tests {
             prefetch: false,
             snapshot_id: Some("0abc123def".to_string()),
             owner: None,
+            source_path: None,
         };
         let error = validate_mount_snapshot_pins(std::slice::from_ref(&pinned_writable))
             .expect_err("a writable snapshot pin must be rejected client-side");
@@ -1786,6 +1799,7 @@ mod process_ref_tests {
             prefetch: false,
             snapshot_id: None,
             owner: owner.map(str::to_string),
+            source_path: None,
         };
 
         for good in [None, Some("agent"), Some("1001:1001"), Some("agent:wheel")] {

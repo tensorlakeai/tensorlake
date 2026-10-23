@@ -39,7 +39,7 @@ fn print_mounts_table(mounts: &[FileSystemMount]) {
         return;
     }
 
-    let mut table = new_table(&["File System ID", "Mount Path", "Options"]);
+    let mut table = new_table(&["File System ID", "Source Path", "Mount Path", "Options"]);
     for mount in mounts {
         let mut options = Vec::new();
         if mount.read_only {
@@ -57,11 +57,36 @@ fn print_mounts_table(mounts: &[FileSystemMount]) {
         };
         table.add_row(vec![
             Cell::new(source),
+            Cell::new(mount.source_path.as_deref().unwrap_or("/")),
             Cell::new(mount.mount_path.as_str()),
             Cell::new(options.join(",")),
         ]);
     }
     println!("{table}");
+}
+
+/// Reject noncanonical subtree selections before sending a request. Keep the
+/// path intact: normalizing `..` could select a different directory than intended.
+pub(super) fn validate_source_path(source_path: Option<&str>) -> Result<()> {
+    let Some(path) = source_path else {
+        return Ok(());
+    };
+    if path.len() > 4096 || path.chars().any(char::is_control) {
+        return Err(CliError::usage(
+            "source_path must be at most 4096 bytes with no control characters".to_string(),
+        ));
+    }
+    if path != "/"
+        && (!path.starts_with('/')
+            || path.ends_with('/')
+            || path.contains("//")
+            || path.split('/').any(|part| matches!(part, "." | "..")))
+    {
+        return Err(CliError::usage(format!(
+            "source_path must be an absolute canonical path: {path:?}"
+        )));
+    }
+    Ok(())
 }
 
 /// Build the attach request body. The option keys are present only when set:
@@ -76,29 +101,24 @@ fn build_attach_body(
     prefetch: bool,
     snapshot_id: Option<&str>,
     owner: Option<&str>,
+    source_path: Option<&str>,
 ) -> Result<serde_json::Value> {
     if snapshot_id.is_some() && !read_only {
         return Err(CliError::usage(
             "--snapshot requires --read-only: snapshot-pinned mounts are read-only".to_string(),
         ));
     }
-    let mut body = serde_json::json!({
-        "file_system_id": file_system_id,
-        "mount_path": mount_path,
-    });
-    if read_only {
-        body["read_only"] = serde_json::Value::Bool(true);
-    }
-    if prefetch {
-        body["prefetch"] = serde_json::Value::Bool(true);
-    }
-    if let Some(snapshot_id) = snapshot_id {
-        body["snapshot_id"] = serde_json::Value::String(snapshot_id.to_string());
-    }
-    if let Some(owner) = owner {
-        body["owner"] = serde_json::Value::String(owner.to_string());
-    }
-    Ok(body)
+    validate_source_path(source_path)?;
+    let mount = FileSystemMount {
+        file_system_id: file_system_id.to_string(),
+        mount_path: mount_path.to_string(),
+        source_path: source_path.map(str::to_string),
+        read_only,
+        prefetch,
+        snapshot_id: snapshot_id.map(str::to_string),
+        owner: owner.map(str::to_string),
+    };
+    Ok(serde_json::to_value(mount)?)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -111,6 +131,7 @@ pub async fn attach(
     prefetch: bool,
     snapshot_id: Option<&str>,
     owner: Option<&str>,
+    source_path: Option<&str>,
     output_json: bool,
 ) -> Result<()> {
     let client = ctx.client()?;
@@ -122,6 +143,7 @@ pub async fn attach(
         prefetch,
         snapshot_id,
         owner,
+        source_path,
     )?;
 
     let resp = client
@@ -198,7 +220,8 @@ mod tests {
 
     #[test]
     fn attach_body_omits_unset_mount_modes() {
-        let body = build_attach_body("skills", "/mnt/skills", false, false, None, None).unwrap();
+        let body =
+            build_attach_body("skills", "/mnt/skills", false, false, None, None, None).unwrap();
         assert_eq!(
             body,
             serde_json::json!({
@@ -216,6 +239,7 @@ mod tests {
             true,
             false,
             Some("0abc123def"),
+            None,
             None,
         )
         .unwrap();
@@ -239,6 +263,7 @@ mod tests {
             true,
             Some("0abc123def"),
             None,
+            None,
         )
         .unwrap_err();
         assert!(
@@ -251,8 +276,16 @@ mod tests {
 
     #[test]
     fn attach_body_includes_owner_only_when_set() {
-        let body =
-            build_attach_body("skills", "/mnt/skills", false, false, None, Some("agent")).unwrap();
+        let body = build_attach_body(
+            "skills",
+            "/mnt/skills",
+            false,
+            false,
+            None,
+            Some("agent"),
+            None,
+        )
+        .unwrap();
         assert_eq!(
             body,
             serde_json::json!({
@@ -261,5 +294,42 @@ mod tests {
                 "owner": "agent",
             })
         );
+    }
+
+    #[test]
+    fn attach_body_preserves_subtree_with_pin_modes_and_owner() {
+        let body = build_attach_body(
+            "data",
+            "/mnt/data",
+            true,
+            true,
+            Some("snap"),
+            Some("agent"),
+            Some("/a,b with spaces"),
+        )
+        .unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "file_system_id": "data", "mount_path": "/mnt/data",
+                "source_path": "/a,b with spaces", "snapshot_id": "snap",
+                "read_only": true, "prefetch": true, "owner": "agent"
+            })
+        );
+    }
+
+    #[test]
+    fn attach_body_rejects_noncanonical_source_paths() {
+        for path in [
+            "", "relative", "/a/", "//a", "/a//b", "/a/./b", "/a/../b", "/a\n", "/a\0",
+        ] {
+            assert!(
+                build_attach_body("data", "/mnt/data", false, false, None, None, Some(path))
+                    .is_err(),
+                "{path:?}"
+            );
+        }
+        assert!(validate_source_path(Some(&format!("/{}", "x".repeat(4096)))).is_err());
+        assert!(validate_source_path(Some("/")).is_ok());
     }
 }
