@@ -1299,6 +1299,7 @@ describe("TypeScript function executor protocol conformance", () => {
     expect(terminalBatch).toEqual([{ finishAllocation: {
       outcomeCode: "ALLOCATION_OUTCOME_CODE_FAILURE",
       failureReason: "ALLOCATION_FAILURE_REASON_REPLAY_EVENT_HISTORY_MISMATCH",
+      allocationEventClock: 1,
     } }]);
   });
 
@@ -1357,6 +1358,7 @@ describe("TypeScript function executor protocol conformance", () => {
     expect(terminalBatch).toEqual([{ finishAllocation: {
       outcomeCode: "ALLOCATION_OUTCOME_CODE_FAILURE",
       failureReason: "ALLOCATION_FAILURE_REASON_REPLAY_EVENT_HISTORY_MISMATCH",
+      allocationEventClock: 4,
     } }]);
   });
 
@@ -1405,6 +1407,7 @@ describe("TypeScript function executor protocol conformance", () => {
     expect(terminalBatch).toEqual([{ finishAllocation: {
       outcomeCode: "ALLOCATION_OUTCOME_CODE_FAILURE",
       failureReason: "ALLOCATION_FAILURE_REASON_REPLAY_EVENT_HISTORY_MISMATCH",
+      allocationEventClock: 2,
     } }]);
   });
 
@@ -1471,6 +1474,7 @@ describe("TypeScript function executor protocol conformance", () => {
     expect(terminalBatch).toEqual([{ finishAllocation: {
       outcomeCode: "ALLOCATION_OUTCOME_CODE_FAILURE",
       failureReason: "ALLOCATION_FAILURE_REASON_REPLAY_EVENT_HISTORY_MISMATCH",
+      allocationEventClock: 3,
     } }]);
   });
 
@@ -1540,6 +1544,7 @@ describe("TypeScript function executor protocol conformance", () => {
     expect(terminalBatch).toEqual([{ finishAllocation: {
       outcomeCode: "ALLOCATION_OUTCOME_CODE_FAILURE",
       failureReason: "ALLOCATION_FAILURE_REASON_REPLAY_EVENT_HISTORY_MISMATCH",
+      allocationEventClock: 3,
     } }]);
   });
 
@@ -1606,6 +1611,7 @@ describe("TypeScript function executor protocol conformance", () => {
     expect(terminalBatch).toEqual([{ finishAllocation: {
       outcomeCode: "ALLOCATION_OUTCOME_CODE_FAILURE",
       failureReason: "ALLOCATION_FAILURE_REASON_REPLAY_EVENT_HISTORY_MISMATCH",
+      allocationEventClock: 3,
     } }]);
   });
 
@@ -2456,6 +2462,7 @@ describe("TypeScript function executor protocol conformance", () => {
     expect(terminalBatch).toEqual([{ finishAllocation: {
       outcomeCode: "ALLOCATION_OUTCOME_CODE_FAILURE",
       failureReason: "ALLOCATION_FAILURE_REASON_REPLAY_EVENT_HISTORY_MISMATCH",
+      allocationEventClock: 3,
     } }]);
   });
 
@@ -2553,6 +2560,7 @@ describe("TypeScript function executor protocol conformance", () => {
     expect(terminalBatch).toEqual([{ finishAllocation: {
       outcomeCode: "ALLOCATION_OUTCOME_CODE_FAILURE",
       failureReason: "ALLOCATION_FAILURE_REASON_REPLAY_EVENT_HISTORY_MISMATCH",
+      allocationEventClock: 5,
     } }]);
   });
 
@@ -2631,6 +2639,7 @@ describe("TypeScript function executor protocol conformance", () => {
     expect(terminalBatch).toEqual([{ finishAllocation: {
       outcomeCode: "ALLOCATION_OUTCOME_CODE_FAILURE",
       failureReason: "ALLOCATION_FAILURE_REASON_REPLAY_EVENT_HISTORY_MISMATCH",
+      allocationEventClock: 3,
     } }]);
   });
 
@@ -2740,6 +2749,7 @@ describe("TypeScript function executor protocol conformance", () => {
       expect(terminalBatch).toEqual([{ finishAllocation: {
         outcomeCode: "ALLOCATION_OUTCOME_CODE_FAILURE",
         failureReason: "ALLOCATION_FAILURE_REASON_REPLAY_EVENT_HISTORY_MISMATCH",
+        allocationEventClock: 3,
       } }]);
     },
   );
@@ -2843,6 +2853,7 @@ describe("TypeScript function executor protocol conformance", () => {
     expect(terminalBatch).toEqual([{ finishAllocation: {
       outcomeCode: "ALLOCATION_OUTCOME_CODE_FAILURE",
       failureReason: "ALLOCATION_FAILURE_REASON_REPLAY_EVENT_HISTORY_MISMATCH",
+      allocationEventClock: 6,
     } }]);
   });
 
@@ -2909,6 +2920,7 @@ describe("TypeScript function executor protocol conformance", () => {
     expect(terminalBatch).toEqual([{ finishAllocation: {
       outcomeCode: "ALLOCATION_OUTCOME_CODE_FAILURE",
       failureReason: "ALLOCATION_FAILURE_REASON_REPLAY_EVENT_HISTORY_MISMATCH",
+      allocationEventClock: 3,
     } }]);
   });
 
@@ -2990,6 +3002,7 @@ describe("TypeScript function executor protocol conformance", () => {
     expect(terminalBatch).toEqual([{ finishAllocation: {
       outcomeCode: "ALLOCATION_OUTCOME_CODE_FAILURE",
       failureReason: "ALLOCATION_FAILURE_REASON_REPLAY_EVENT_HISTORY_MISMATCH",
+      allocationEventClock: 3,
     } }]);
   });
 
@@ -3062,6 +3075,7 @@ describe("TypeScript function executor protocol conformance", () => {
       expect(terminalBatch).toEqual([{ finishAllocation: {
         outcomeCode: "ALLOCATION_OUTCOME_CODE_FAILURE",
         failureReason: "ALLOCATION_FAILURE_REASON_REPLAY_EVENT_HISTORY_MISMATCH",
+        allocationEventClock: 3,
       } }]);
     },
   );
@@ -3244,6 +3258,7 @@ describe("TypeScript function executor protocol conformance", () => {
     expect(terminalBatch).toEqual([{ finishAllocation: {
       outcomeCode: "ALLOCATION_OUTCOME_CODE_FAILURE",
       failureReason: "ALLOCATION_FAILURE_REASON_REPLAY_EVENT_HISTORY_MISMATCH",
+      allocationEventClock: 6,
     } }]);
   });
 
