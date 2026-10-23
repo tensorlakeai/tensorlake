@@ -1,9 +1,12 @@
+import asyncio
+import gc
 import json
 import unittest
+import warnings
 from unittest.mock import AsyncMock
 
 from tensorlake._tracing import Traced, TracedIterator
-from tensorlake.sandbox import AsyncSandbox, SandboxConnectionError
+from tensorlake.sandbox import AsyncOutputStream, AsyncSandbox, SandboxConnectionError
 from tensorlake.sandbox.exceptions import SandboxError
 from tensorlake.sandbox.models import (
     CommandExitReason,
@@ -17,6 +20,56 @@ from tensorlake.sandbox.models import (
 )
 
 _TRACE_ID = "00-deadbeefdeadbeefdeadbeefdeadbeef-cafebabecafebabe-01"
+
+
+class _FakeOutputStream:
+    """Stand-in for the native ``OutputEventStream``: hands out one event per call.
+
+    Mirrors the native contract: the follow request opens on ``open()`` or on
+    the first ``next``, the trace id is known from then on, and ``close()``
+    drops the events not yet taken.
+    """
+
+    def __init__(self, events, error=None, open_error=None):
+        self._events = [json.dumps(event) for event in events]
+        self._error = error
+        self._open_error = open_error
+        self.opened = False
+        self.closed = False
+
+    def open(self):
+        if self._open_error is not None:
+            raise self._open_error
+        self.opened = True
+
+    def next(self):
+        if not self.opened:
+            self.open()
+        if self.closed:
+            return None
+        if self._events:
+            return self._events.pop(0)
+        if self._error is not None:
+            error, self._error = self._error, None
+            raise error
+        return None
+
+    async def next_async(self):
+        return self.next()
+
+    def trace_id(self):
+        return _TRACE_ID if self.opened else None
+
+    def close(self):
+        self.closed = True
+
+    @property
+    def pending(self):
+        return len(self._events)
+
+
+async def _never_finishes():
+    await asyncio.Event().wait()
 
 
 def _process_info_dict(pid: int = 101) -> dict:
@@ -38,6 +91,10 @@ class _FakeAsyncRustProxyClient:
     """
 
     def __init__(self):
+        self.followed = None
+        self.follow_stream = None
+        self.follow_error = None
+        self.follow_open_error = None
         self.start_payload_json: str | None = None
         self.run_payload_json: str | None = None
         self.write_stdin_calls: list[tuple[int, bytes]] = []
@@ -92,22 +149,35 @@ class _FakeAsyncRustProxyClient:
             {"pid": 101, "lines": ["a", "b", "err"], "line_count": 3}
         )
 
-    async def follow_stdout_json_async(self, process):
-        return _TRACE_ID, [
-            json.dumps({"line": "out", "timestamp": 1_700_000_000, "stream": "stdout"})
-        ]
+    def follow_stdout_stream(self, process):
+        assert process == "101"
+        self.followed = "stdout"
+        return self._follow_stream(
+            [{"line": "out", "timestamp": 1_700_000_000, "stream": "stdout"}]
+        )
 
-    async def follow_stderr_json_async(self, process):
-        return _TRACE_ID, [
-            json.dumps({"line": "err", "timestamp": 1_700_000_001, "stream": "stderr"})
-        ]
+    def follow_stderr_stream(self, process):
+        assert process == "101"
+        self.followed = "stderr"
+        return self._follow_stream(
+            [{"line": "err", "timestamp": 1_700_000_001, "stream": "stderr"}]
+        )
 
-    async def follow_output_json_async(self, process):
-        return _TRACE_ID, [
-            json.dumps(
-                {"line": "hello", "timestamp": 1_700_000_000, "stream": "stdout"}
-            )
-        ]
+    def follow_output_stream(self, process):
+        assert process == "101"
+        self.followed = "output"
+        return self._follow_stream(
+            [
+                {"line": "hello", "timestamp": 1_700_000_000, "stream": "stdout"},
+                {"line": "world", "timestamp": 1_700_000_001, "stream": "stdout"},
+            ]
+        )
+
+    def _follow_stream(self, events):
+        self.follow_stream = _FakeOutputStream(
+            events, error=self.follow_error, open_error=self.follow_open_error
+        )
+        return self.follow_stream
 
     async def run_process_json_async(self, payload_json):
         self.run_payload_json = payload_json
@@ -432,33 +502,158 @@ class TestAsyncSandboxRustBackend(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(traced.line_count, 3)
 
-    async def test_follow_stdout_returns_traced_iterator(self):
-        sandbox, _ = _make_async_sandbox()
+    async def test_follow_stdout_streams_events_live(self):
+        sandbox, fake = _make_async_sandbox()
 
-        events = await sandbox.follow_stdout(101)
+        stream = sandbox.follow_stdout(101)
+
+        self.assertIsInstance(stream, AsyncOutputStream)
+        self.assertEqual(fake.followed, "stdout")
+        # The follow request opens on the first await.
+        self.assertFalse(fake.follow_stream.opened)
+        self.assertIsNone(stream.trace_id)
+        lines = []
+        async for event in stream:
+            self.assertEqual(stream.trace_id, _TRACE_ID)
+            lines.append(event.line)
+        self.assertEqual(lines, ["out"])
+        self.assertEqual(stream.trace_id, _TRACE_ID)
+
+    async def test_follow_stderr_await_collects_traced_iterator(self):
+        sandbox, fake = _make_async_sandbox()
+
+        events = await sandbox.follow_stderr(101)
 
         self.assertIsInstance(events, TracedIterator)
         self.assertEqual(events.trace_id, _TRACE_ID)
-        items = list(events)
-        self.assertEqual([e.line for e in items], ["out"])
+        self.assertEqual(fake.followed, "stderr")
+        self.assertEqual([e.line for e in events], ["err"])
 
-    async def test_follow_stderr_returns_traced_iterator(self):
+    async def test_follow_output_is_schedulable_with_create_task(self):
+        sandbox, fake = _make_async_sandbox()
+
+        task = asyncio.create_task(sandbox.follow_output(101))
+        events = await task
+
+        self.assertIsInstance(events, TracedIterator)
+        self.assertEqual(events.trace_id, _TRACE_ID)
+        self.assertEqual([e.line for e in events], ["hello", "world"])
+        self.assertEqual(fake.followed, "output")
+
+    @unittest.skipUnless(hasattr(asyncio, "TaskGroup"), "TaskGroup needs 3.11+")
+    async def test_follow_stdout_is_schedulable_with_task_group(self):
         sandbox, _ = _make_async_sandbox()
 
-        events = await sandbox.follow_stderr(101)
-        items = list(events)
+        async with asyncio.TaskGroup() as tg:
+            task = tg.create_task(sandbox.follow_stdout(101))
 
-        self.assertEqual([e.line for e in items], ["err"])
+        self.assertEqual([e.line for e in task.result()], ["out"])
 
-    async def test_follow_output_returns_traced_iterator(self):
+    async def test_follow_output_task_cancel_propagates(self):
         sandbox, _ = _make_async_sandbox()
+        stream = sandbox.follow_output(101)
+        stream._native.next_async = _never_finishes
 
-        events = await sandbox.follow_output(101)
-        items = list(events)
+        task = asyncio.create_task(stream)
+        await asyncio.sleep(0)
+        task.cancel()
 
-        self.assertEqual(len(items), 1)
-        self.assertEqual(items[0].line, "hello")
-        self.assertEqual(items[0].stream, "stdout")
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+    async def test_follow_output_close_ends_pending_task(self):
+        sandbox, fake = _make_async_sandbox()
+        stream = sandbox.follow_output(101)
+        gate = asyncio.Event()
+        real_next = fake.follow_stream.next_async
+
+        async def gated_next():
+            await gate.wait()
+            return await real_next()
+
+        fake.follow_stream.next_async = gated_next
+        task = asyncio.create_task(stream)
+        await asyncio.sleep(0)
+        self.assertFalse(task.done())
+
+        stream.close()
+        self.assertTrue(stream.closed)
+        self.assertTrue(fake.follow_stream.closed)
+        gate.set()
+        events = await task
+
+        # Closing drops the events not yet received, but the trace id of the
+        # opened follow request is still reported.
+        self.assertIsInstance(events, TracedIterator)
+        self.assertEqual([e.line for e in events], [])
+        self.assertEqual(events.trace_id, _TRACE_ID)
+
+    async def test_follow_output_close_before_first_await_keeps_trace_id(self):
+        sandbox, _ = _make_async_sandbox()
+        stream = sandbox.follow_output(101)
+
+        task = asyncio.create_task(stream)
+        stream.close()
+        events = await task
+
+        self.assertEqual(list(events), [])
+        self.assertEqual(events.trace_id, _TRACE_ID)
+
+    async def test_follow_output_close_closes_undriven_collector(self):
+        sandbox, _ = _make_async_sandbox()
+        stream = sandbox.follow_output(101)
+
+        stream.__await__()  # creates the collector without driving it
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            stream.close()
+            del stream
+            gc.collect()
+
+    async def test_follow_output_open_error_raises_on_first_await(self):
+        fake = _FakeAsyncRustProxyClient()
+        fake.follow_open_error = RuntimeError("process not found")
+        sandbox, _ = _make_async_sandbox(fake)
+
+        stream = sandbox.follow_output(101)
+        with self.assertRaises(SandboxError) as ctx:
+            await stream
+
+        self.assertIn("process not found", str(ctx.exception))
+
+    async def test_follow_output_pulls_one_event_at_a_time(self):
+        sandbox, fake = _make_async_sandbox()
+
+        stream = sandbox.follow_output(101)
+
+        self.assertEqual(fake.follow_stream.pending, 2)
+        first = await stream.__anext__()
+        self.assertEqual(first.line, "hello")
+        self.assertEqual(fake.follow_stream.pending, 1)
+        self.assertEqual((await stream.__anext__()).line, "world")
+        with self.assertRaises(StopAsyncIteration):
+            await stream.__anext__()
+
+    async def test_follow_output_context_manager_closes_stream(self):
+        sandbox, fake = _make_async_sandbox()
+
+        async with sandbox.follow_output(101) as stream:
+            self.assertEqual((await stream.__anext__()).line, "hello")
+
+        self.assertTrue(fake.follow_stream.closed)
+
+    async def test_follow_output_error_maps_to_sandbox_error(self):
+        fake = _FakeAsyncRustProxyClient()
+        fake.follow_error = RuntimeError("stream dropped")
+        sandbox, _ = _make_async_sandbox(fake)
+
+        lines = []
+        with self.assertRaises(SandboxError) as ctx:
+            async for event in sandbox.follow_output(101):
+                lines.append(event.line)
+
+        self.assertEqual(lines, ["hello", "world"])
+        self.assertIn("stream dropped", str(ctx.exception))
 
     async def test_read_file_returns_bytes(self):
         sandbox, fake = _make_async_sandbox()
