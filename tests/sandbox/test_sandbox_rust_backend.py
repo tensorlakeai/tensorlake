@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import MagicMock
 
 from tensorlake._tracing import Traced, TracedIterator
-from tensorlake.sandbox import Sandbox, SandboxConnectionError
+from tensorlake.sandbox import OutputStream, Sandbox, SandboxConnectionError
 from tensorlake.sandbox.exceptions import SandboxError
 from tensorlake.sandbox.models import (
     CommandExitReason,
@@ -17,10 +17,60 @@ from tensorlake.sandbox.models import (
 _TRACE_ID = "00-deadbeefdeadbeefdeadbeefdeadbeef-cafebabecafebabe-01"
 
 
+class _FakeOutputStream:
+    """Stand-in for the native ``OutputEventStream``: hands out one event per call.
+
+    Mirrors the native contract: the follow request opens on ``open()`` or on
+    the first ``next``, the trace id is known from then on, and ``close()``
+    drops the events not yet taken.
+    """
+
+    def __init__(self, events, error=None, open_error=None):
+        self._events = [json.dumps(event) for event in events]
+        self._error = error
+        self._open_error = open_error
+        self.opened = False
+        self.closed = False
+
+    def open(self):
+        if self._open_error is not None:
+            raise self._open_error
+        self.opened = True
+
+    def next(self):
+        if not self.opened:
+            self.open()
+        if self.closed:
+            return None
+        if self._events:
+            return self._events.pop(0)
+        if self._error is not None:
+            error, self._error = self._error, None
+            raise error
+        return None
+
+    async def next_async(self):
+        return self.next()
+
+    def trace_id(self):
+        return _TRACE_ID if self.opened else None
+
+    def close(self):
+        self.closed = True
+
+    @property
+    def pending(self):
+        return len(self._events)
+
+
 class _FakeRustProxyClient:
     def __init__(self):
         self.start_payload_json = None
         self.run_payload_json = None
+        self.followed = None
+        self.follow_stream = None
+        self.follow_error = None
+        self.follow_open_error = None
 
     def close(self):
         return None
@@ -101,17 +151,35 @@ class _FakeRustProxyClient:
             }
         )
 
-    def follow_output_json(self, process):
+    def follow_stdout_stream(self, process):
         assert process == "101"
-        return _TRACE_ID, [
-            json.dumps(
-                {
-                    "line": "hello",
-                    "timestamp": 1_700_000_000,
-                    "stream": "stdout",
-                }
-            )
-        ]
+        self.followed = "stdout"
+        return self._follow_stream(
+            [{"line": "out", "timestamp": 1_700_000_000, "stream": "stdout"}]
+        )
+
+    def follow_stderr_stream(self, process):
+        assert process == "101"
+        self.followed = "stderr"
+        return self._follow_stream(
+            [{"line": "err", "timestamp": 1_700_000_001, "stream": "stderr"}]
+        )
+
+    def follow_output_stream(self, process):
+        assert process == "101"
+        self.followed = "output"
+        return self._follow_stream(
+            [
+                {"line": "hello", "timestamp": 1_700_000_000, "stream": "stdout"},
+                {"line": "world", "timestamp": 1_700_000_001, "stream": "stdout"},
+            ]
+        )
+
+    def _follow_stream(self, events):
+        self.follow_stream = _FakeOutputStream(
+            events, error=self.follow_error, open_error=self.follow_open_error
+        )
+        return self.follow_stream
 
     def run_process_json(self, payload_json):
         self.run_payload_json = payload_json
@@ -287,21 +355,83 @@ class TestSandboxRustBackend(unittest.TestCase):
         self.assertEqual(pids, [101])
 
     def test_follow_output_uses_rust_backend(self):
-        sandbox, _ = _make_sandbox()
+        sandbox, fake = _make_sandbox()
 
         events = list(sandbox.follow_output(101))
 
-        self.assertEqual(len(events), 1)
-        self.assertEqual(events[0].line, "hello")
+        self.assertEqual(fake.followed, "output")
+        self.assertEqual([e.line for e in events], ["hello", "world"])
         self.assertEqual(events[0].stream, "stdout")
 
-    def test_follow_output_returns_traced_iterator(self):
-        sandbox, _ = _make_sandbox()
+    def test_follow_output_returns_live_stream(self):
+        sandbox, fake = _make_sandbox()
 
-        events = sandbox.follow_output(101)
+        stream = sandbox.follow_output(101)
 
-        self.assertIsInstance(events, TracedIterator)
-        self.assertEqual(events.trace_id, _TRACE_ID)
+        self.assertIsInstance(stream, OutputStream)
+        # The follow request opened before the stream was returned.
+        self.assertTrue(fake.follow_stream.opened)
+        self.assertEqual(stream.trace_id, _TRACE_ID)
+        # Events are pulled one at a time, not collected up front.
+        self.assertEqual(fake.follow_stream.pending, 2)
+        self.assertEqual(next(stream).line, "hello")
+        self.assertEqual(fake.follow_stream.pending, 1)
+        self.assertEqual(next(stream).line, "world")
+        with self.assertRaises(StopIteration):
+            next(stream)
+        self.assertEqual(stream.trace_id, _TRACE_ID)
+
+    def test_follow_stdout_and_stderr_use_their_own_streams(self):
+        sandbox, fake = _make_sandbox()
+
+        self.assertEqual([e.line for e in sandbox.follow_stdout(101)], ["out"])
+        self.assertEqual(fake.followed, "stdout")
+        self.assertEqual([e.line for e in sandbox.follow_stderr(101)], ["err"])
+        self.assertEqual(fake.followed, "stderr")
+
+    def test_follow_output_context_manager_closes_stream(self):
+        sandbox, fake = _make_sandbox()
+
+        with sandbox.follow_output(101) as stream:
+            self.assertEqual(next(stream).line, "hello")
+
+        self.assertTrue(fake.follow_stream.closed)
+
+    def test_follow_output_error_maps_to_sandbox_error(self):
+        fake = _FakeRustProxyClient()
+        fake.follow_error = RuntimeError("stream dropped")
+        sandbox, _ = _make_sandbox(fake)
+
+        stream = sandbox.follow_output(101)
+        self.assertEqual(next(stream).line, "hello")
+        self.assertEqual(next(stream).line, "world")
+        with self.assertRaises(SandboxError) as ctx:
+            next(stream)
+
+        self.assertIn("stream dropped", str(ctx.exception))
+
+    def test_follow_output_open_error_raises_at_call_time(self):
+        fake = _FakeRustProxyClient()
+        fake.follow_open_error = RuntimeError("process not found")
+        sandbox, _ = _make_sandbox(fake)
+
+        with self.assertRaises(SandboxError) as ctx:
+            sandbox.follow_output(101)
+
+        self.assertIn("process not found", str(ctx.exception))
+
+    def test_follow_output_close_drops_pending_events(self):
+        sandbox, fake = _make_sandbox()
+
+        stream = sandbox.follow_output(101)
+        self.assertFalse(stream.closed)
+        stream.close()
+
+        self.assertTrue(stream.closed)
+        self.assertTrue(fake.follow_stream.closed)
+        with self.assertRaises(StopIteration):
+            next(stream)
+        self.assertEqual(stream.trace_id, _TRACE_ID)
 
     def test_run_uses_streaming_endpoint(self):
         sandbox, fake = _make_sandbox()

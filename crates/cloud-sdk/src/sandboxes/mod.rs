@@ -3,12 +3,13 @@ pub mod models;
 pub mod resize;
 pub mod tunnel;
 
-use futures::{StreamExt, TryStreamExt};
+use futures::{Stream, StreamExt, TryStreamExt};
 use reqwest::Method;
 use reqwest::StatusCode;
 use reqwest::header::{ACCEPT, CONTENT_LENGTH, HeaderValue};
 use serde_json::Value;
 use std::path::Path;
+use std::pin::Pin;
 use std::time::{Duration, Instant};
 use tokio::fs::File;
 use tokio_util::io::ReaderStream;
@@ -168,6 +169,29 @@ fn validate_mount_owners(mounts: &[FileSystemMount]) -> Result<(), SdkError> {
     }
     Ok(())
 }
+
+/// Which output of a sandbox process a follow request reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessOutputKind {
+    Stdout,
+    Stderr,
+    /// stdout and stderr interleaved.
+    Output,
+}
+
+impl ProcessOutputKind {
+    fn path_segment(self) -> &'static str {
+        match self {
+            ProcessOutputKind::Stdout => "stdout",
+            ProcessOutputKind::Stderr => "stderr",
+            ProcessOutputKind::Output => "output",
+        }
+    }
+}
+
+/// The events of one follow request, as the sandbox sends them. The stream
+/// ends when the process exits and the sandbox closes the response.
+pub type OutputEvents = Pin<Box<dyn Stream<Item = Result<OutputEvent, SdkError>> + Send>>;
 
 /// A reference to a sandbox process: either its OS **pid** or a managed-process **name**
 /// given at creation. This is the single place the pid/name path segment is built, reused by
@@ -1307,8 +1331,7 @@ impl SandboxProxyClient {
     where
         F: std::future::Future<Output = Result<(), SdkError>>,
     {
-        let seg = process.into().to_path_segment();
-        self.follow_stream_cb(&format!("/api/v1/processes/{seg}/stdout/follow"), on_event)
+        self.follow_stream_cb(process, ProcessOutputKind::Stdout, on_event)
             .await
     }
 
@@ -1333,8 +1356,7 @@ impl SandboxProxyClient {
     where
         F: std::future::Future<Output = Result<(), SdkError>>,
     {
-        let seg = process.into().to_path_segment();
-        self.follow_stream_cb(&format!("/api/v1/processes/{seg}/stderr/follow"), on_event)
+        self.follow_stream_cb(process, ProcessOutputKind::Stderr, on_event)
             .await
     }
 
@@ -1359,8 +1381,7 @@ impl SandboxProxyClient {
     where
         F: std::future::Future<Output = Result<(), SdkError>>,
     {
-        let seg = process.into().to_path_segment();
-        self.follow_stream_cb(&format!("/api/v1/processes/{seg}/output/follow"), on_event)
+        self.follow_stream_cb(process, ProcessOutputKind::Output, on_event)
             .await
     }
 
@@ -1445,16 +1466,19 @@ impl SandboxProxyClient {
         Ok(trace_id)
     }
 
-    async fn follow_stream_cb<F>(
+    /// Open a follow request for `kind` of `process`. Returns once the
+    /// response headers arrive, with the request `trace_id` and the stream
+    /// of its events, so a caller can report an unknown process before the
+    /// first event and read the events at its own pace.
+    pub async fn follow_events(
         &self,
-        path: &str,
-        mut on_event: impl FnMut(OutputEvent) -> F,
-    ) -> Result<String, SdkError>
-    where
-        F: std::future::Future<Output = Result<(), SdkError>>,
-    {
+        process: impl Into<ProcessRef>,
+        kind: ProcessOutputKind,
+    ) -> Result<Traced<OutputEvents>, SdkError> {
+        let seg = process.into().to_path_segment();
+        let path = format!("/api/v1/processes/{seg}/{}/follow", kind.path_segment());
         let req = self
-            .request(Method::GET, path)
+            .request(Method::GET, &path)
             .header(ACCEPT, "text/event-stream")
             .build()?;
         let (response, idle_timeout) = self.client.execute_stream_traced(req).await?;
@@ -1470,7 +1494,7 @@ impl SandboxProxyClient {
                 "expected text/event-stream response from {path}, got content-type: {content_type}"
             )));
         }
-        let stream =
+        let events =
             event_stream(response.into_inner(), idle_timeout).filter_map(move |event| async move {
                 match event {
                     Ok(msg) => match serde_json::from_str::<OutputEvent>(&msg.data) {
@@ -1480,8 +1504,22 @@ impl SandboxProxyClient {
                     Err(error) => Some(Err(error)),
                 }
             });
-        futures::pin_mut!(stream);
-        while let Some(event) = stream.next().await {
+        Ok(Traced::new(trace_id, Box::pin(events)))
+    }
+
+    async fn follow_stream_cb<F>(
+        &self,
+        process: impl Into<ProcessRef>,
+        kind: ProcessOutputKind,
+        mut on_event: impl FnMut(OutputEvent) -> F,
+    ) -> Result<String, SdkError>
+    where
+        F: std::future::Future<Output = Result<(), SdkError>>,
+    {
+        let traced = self.follow_events(process, kind).await?;
+        let trace_id = traced.trace_id.clone();
+        let mut events = traced.into_inner();
+        while let Some(event) = events.next().await {
             on_event(event?).await?;
         }
         Ok(trace_id)

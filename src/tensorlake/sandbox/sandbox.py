@@ -178,6 +178,64 @@ _GET_OR_CREATE_ATTEMPTS = 4
 _GET_OR_CREATE_RETRY_DELAY_SEC = 0.5
 
 
+class OutputStream:
+    """Live output of a sandbox process.
+
+    Iterate to receive each ``OutputEvent`` as the sandbox emits it. The
+    iteration ends when the process exits and the sandbox closes the stream.
+    Use the stream as a context manager, or call ``close()``, to stop early.
+
+    The follow request opens before the stream is returned, so an unknown
+    process raises at call time, and ``trace_id``, the W3C trace ID of the
+    follow request, is set from the start. The SDK reconnects across
+    transient failures and resumes after the events already received.
+
+    This is a live stream, not a list: it has no ``len()``, and each event
+    is received once. Use ``list(stream)`` to collect the events.
+    """
+
+    def __init__(self, native: Any) -> None:
+        self._native = native
+
+    @property
+    def trace_id(self) -> str:
+        return self._native.trace_id()
+
+    @property
+    def closed(self) -> bool:
+        """Whether ``close()`` was called."""
+        return self._native.closed
+
+    def __iter__(self) -> OutputStream:
+        return self
+
+    def __next__(self) -> OutputEvent:
+        try:
+            raw = self._native.next()
+        except Exception as e:
+            _raise_as_sandbox_error(e)
+        if raw is None:
+            raise StopIteration
+        return OutputEvent.model_validate_json(raw)
+
+    def close(self) -> None:
+        """Stop following. The sandbox process keeps running.
+
+        Events not yet received are dropped, and the next ``next()`` raises
+        ``StopIteration``. Safe to call more than once.
+        """
+        self._native.close()
+
+    def __enter__(self) -> OutputStream:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    def __repr__(self) -> str:
+        return f"OutputStream(trace_id={self.trace_id!r})"
+
+
 class Sandbox:
     """Client for interacting with a running sandbox.
 
@@ -2013,66 +2071,69 @@ class Sandbox:
         process: int | str = _PROCESS_ARG_UNSET,
         *,
         pid: int | str = _PROCESS_ARG_UNSET,
-    ) -> TracedIterator[OutputEvent]:
-        """Collect all stdout output events from a process and return them as an iterable.
+    ) -> OutputStream:
+        """Follow a process's stdout as a live stream.
+
+        Each ``OutputEvent`` is yielded as the sandbox emits it. The stream
+        ends when the process exits. The follow request opens before this
+        returns, so an unknown process raises here.
 
         Args:
             process: PID or process name given on creation.
-
-        Blocks until the process exits and all output has been received."""
+        """
         seg = _resolve_process_arg(process, pid)
+        native = self._rust_client.follow_stdout_stream(seg)
         try:
-            trace_id, events_json = self._rust_client.follow_stdout_json(seg)
-            return TracedIterator(
-                trace_id,
-                [OutputEvent.model_validate_json(ej) for ej in events_json],
-            )
+            native.open()
         except Exception as e:
             _raise_as_sandbox_error(e)
+        return OutputStream(native)
 
     def follow_stderr(
         self,
         process: int | str = _PROCESS_ARG_UNSET,
         *,
         pid: int | str = _PROCESS_ARG_UNSET,
-    ) -> TracedIterator[OutputEvent]:
-        """Collect all stderr output events from a process and return them as an iterable.
+    ) -> OutputStream:
+        """Follow a process's stderr as a live stream.
+
+        Each ``OutputEvent`` is yielded as the sandbox emits it. The stream
+        ends when the process exits. The follow request opens before this
+        returns, so an unknown process raises here.
 
         Args:
             process: PID or process name given on creation.
-
-        Blocks until the process exits and all output has been received."""
+        """
         seg = _resolve_process_arg(process, pid)
+        native = self._rust_client.follow_stderr_stream(seg)
         try:
-            trace_id, events_json = self._rust_client.follow_stderr_json(seg)
-            return TracedIterator(
-                trace_id,
-                [OutputEvent.model_validate_json(ej) for ej in events_json],
-            )
+            native.open()
         except Exception as e:
             _raise_as_sandbox_error(e)
+        return OutputStream(native)
 
     def follow_output(
         self,
         process: int | str = _PROCESS_ARG_UNSET,
         *,
         pid: int | str = _PROCESS_ARG_UNSET,
-    ) -> TracedIterator[OutputEvent]:
-        """Collect all combined output events from a process and return them as an iterable.
+    ) -> OutputStream:
+        """Follow a process's combined stdout and stderr as a live stream.
+
+        Each ``OutputEvent`` is yielded as the sandbox emits it. The stream
+        ends when the process exits. The follow request opens before this
+        returns, so an unknown process raises here.
 
         Args:
             process: PID or process name given on creation.
-
-        Blocks until the process exits and all output has been received."""
+        """
         seg = _resolve_process_arg(process, pid)
+        native = self._rust_client.follow_output_stream(seg)
         try:
-            trace_id, events_json = self._rust_client.follow_output_json(seg)
-            return TracedIterator(
-                trace_id,
-                [OutputEvent.model_validate_json(ej) for ej in events_json],
-            )
+            native.open()
         except Exception as e:
             _raise_as_sandbox_error(e)
+        return OutputStream(native)
 
     # --- File operations ---
 

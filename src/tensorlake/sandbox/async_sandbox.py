@@ -8,9 +8,10 @@ asyncio event loop instead of blocking a worker thread.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import Coroutine, Mapping
 from typing import TYPE_CHECKING, Any, Literal, overload
 from urllib.parse import urlparse
 
@@ -74,6 +75,110 @@ from .tunnel import DEFAULT_LOCAL_HOST, DEFAULT_TUNNEL_CONNECT_TIMEOUT, AsyncTcp
 
 if TYPE_CHECKING:
     from .async_client import AsyncSandboxClient
+
+
+class AsyncOutputStream(Coroutine[Any, Any, TracedIterator[OutputEvent]]):
+    """Live output of a sandbox process for asyncio code.
+
+    Use ``async for event in sandbox.follow_output(pid)`` to receive each
+    ``OutputEvent`` as the sandbox emits it. The loop ends when the process
+    exits and the sandbox closes the stream.
+
+    Awaiting the stream instead collects every event and returns a
+    ``TracedIterator`` once the process exits. This keeps
+    ``events = await sandbox.follow_output(pid)`` working. The stream is
+    also a coroutine, so ``asyncio.create_task(sandbox.follow_output(pid))``
+    and ``TaskGroup.create_task(...)`` schedule that collection as before.
+
+    The follow request opens on the first ``await``, which is where an
+    unknown process raises. ``trace_id`` is the W3C trace ID of the follow
+    request: ``None`` before that first ``await``, set from then on. The SDK
+    reconnects across transient failures and resumes after the events
+    already received.
+
+    Use the stream as an async context manager, or call ``close()``, to stop
+    early.
+    """
+
+    def __init__(self, native: Any) -> None:
+        self._native = native
+        self._collector: Coroutine[Any, Any, TracedIterator[OutputEvent]] | None = None
+
+    @property
+    def trace_id(self) -> str | None:
+        return self._native.trace_id()
+
+    @property
+    def closed(self) -> bool:
+        """Whether ``close()`` was called."""
+        return self._native.closed
+
+    def __aiter__(self) -> AsyncOutputStream:
+        return self
+
+    async def __anext__(self) -> OutputEvent:
+        try:
+            raw = await self._native.next_async()
+        except Exception as e:
+            _raise_as_sandbox_error(e)
+        if raw is None:
+            raise StopAsyncIteration
+        return OutputEvent.model_validate_json(raw)
+
+    # Coroutine protocol. ``asyncio.create_task`` and ``TaskGroup.create_task``
+    # drive the stream through ``send``/``throw`` as they would a coroutine
+    # returned by an ``async def`` follow method.
+
+    def _coroutine(self) -> Coroutine[Any, Any, TracedIterator[OutputEvent]]:
+        if self._collector is None:
+            self._collector = self._collect()
+        return self._collector
+
+    def __await__(self):
+        return self._coroutine().__await__()
+
+    def send(self, value: Any) -> Any:
+        return self._coroutine().send(value)
+
+    def throw(self, typ: Any, val: Any = None, tb: Any = None) -> Any:
+        if val is None and tb is None:
+            return self._coroutine().throw(typ)
+        return self._coroutine().throw(typ, val, tb)
+
+    async def _collect(self) -> TracedIterator[OutputEvent]:
+        items = [event async for event in self]
+        trace_id = self.trace_id
+        if trace_id is None:
+            # The stream ends only after its follow request opened, even
+            # when closed first. Reaching this means the native task died.
+            raise SandboxError("the follow request ended before it opened")
+        return TracedIterator(trace_id, items)
+
+    def close(self) -> None:
+        """Stop following. The sandbox process keeps running.
+
+        Events not yet received are dropped. A pending ``await`` or task on
+        this stream ends normally with the events received so far, once the
+        follow request has opened. Safe to call more than once.
+        """
+        self._native.close()
+        collector = self._collector
+        if collector is not None and (
+            inspect.getcoroutinestate(collector) == inspect.CORO_CREATED
+        ):
+            # Created by ``__await__`` but never driven: close it so Python
+            # does not warn that it was never awaited. One that is running
+            # or suspended belongs to the task driving it.
+            collector.close()
+
+    async def __aenter__(self) -> AsyncOutputStream:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        self.close()
+
+    def __repr__(self) -> str:
+        return f"AsyncOutputStream(trace_id={self.trace_id!r})"
 
 
 class AsyncSandbox:
@@ -1318,59 +1423,62 @@ class AsyncSandbox:
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    async def follow_stdout(
+    def follow_stdout(
         self,
         process: int | str = _PROCESS_ARG_UNSET,
         *,
         pid: int | str = _PROCESS_ARG_UNSET,
-    ) -> TracedIterator[OutputEvent]:
-        """Follow stdout output events by PID or process name given on creation."""
-        seg = _resolve_process_arg(process, pid)
-        try:
-            trace_id, events_json = await self._rust_client.follow_stdout_json_async(
-                seg
-            )
-            return TracedIterator(
-                trace_id, [OutputEvent.model_validate_json(ej) for ej in events_json]
-            )
-        except Exception as e:
-            _raise_as_sandbox_error(e)
+    ) -> AsyncOutputStream:
+        """Follow a process's stdout as a live stream.
 
-    async def follow_stderr(
-        self,
-        process: int | str = _PROCESS_ARG_UNSET,
-        *,
-        pid: int | str = _PROCESS_ARG_UNSET,
-    ) -> TracedIterator[OutputEvent]:
-        """Follow stderr output events by PID or process name given on creation."""
-        seg = _resolve_process_arg(process, pid)
-        try:
-            trace_id, events_json = await self._rust_client.follow_stderr_json_async(
-                seg
-            )
-            return TracedIterator(
-                trace_id, [OutputEvent.model_validate_json(ej) for ej in events_json]
-            )
-        except Exception as e:
-            _raise_as_sandbox_error(e)
+        Use ``async for`` to receive each ``OutputEvent`` as the sandbox
+        emits it, or ``await`` the result to collect all events after the
+        process exits. The follow request opens on the first ``await``,
+        which is where an unknown process raises.
 
-    async def follow_output(
+        Args:
+            process: PID or process name given on creation.
+        """
+        seg = _resolve_process_arg(process, pid)
+        return AsyncOutputStream(self._rust_client.follow_stdout_stream(seg))
+
+    def follow_stderr(
         self,
         process: int | str = _PROCESS_ARG_UNSET,
         *,
         pid: int | str = _PROCESS_ARG_UNSET,
-    ) -> TracedIterator[OutputEvent]:
-        """Follow combined output events by PID or process name given on creation."""
+    ) -> AsyncOutputStream:
+        """Follow a process's stderr as a live stream.
+
+        Use ``async for`` to receive each ``OutputEvent`` as the sandbox
+        emits it, or ``await`` the result to collect all events after the
+        process exits. The follow request opens on the first ``await``,
+        which is where an unknown process raises.
+
+        Args:
+            process: PID or process name given on creation.
+        """
         seg = _resolve_process_arg(process, pid)
-        try:
-            trace_id, events_json = await self._rust_client.follow_output_json_async(
-                seg
-            )
-            return TracedIterator(
-                trace_id, [OutputEvent.model_validate_json(ej) for ej in events_json]
-            )
-        except Exception as e:
-            _raise_as_sandbox_error(e)
+        return AsyncOutputStream(self._rust_client.follow_stderr_stream(seg))
+
+    def follow_output(
+        self,
+        process: int | str = _PROCESS_ARG_UNSET,
+        *,
+        pid: int | str = _PROCESS_ARG_UNSET,
+    ) -> AsyncOutputStream:
+        """Follow a process's combined stdout and stderr as a live stream.
+
+        Use ``async for`` to receive each ``OutputEvent`` as the sandbox
+        emits it, or ``await`` the result to collect all events after the
+        process exits. The follow request opens on the first ``await``,
+        which is where an unknown process raises.
+
+        Args:
+            process: PID or process name given on creation.
+        """
+        seg = _resolve_process_arg(process, pid)
+        return AsyncOutputStream(self._rust_client.follow_output_stream(seg))
 
     # --- File operations ---
 
