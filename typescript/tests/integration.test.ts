@@ -83,6 +83,17 @@ async function createAndConnectWithStartupRetry(
       return await client.createAndConnect(options);
     } catch (error) {
       lastError = error;
+      if (error instanceof SandboxError && error.sandboxId) {
+        try {
+          await client.delete(error.sandboxId);
+        } catch (cleanupError) {
+          if (!(cleanupError instanceof SandboxNotFoundError)) {
+            console.warn(
+              `Failed to clean up test sandbox ${error.sandboxId} (${cleanupError instanceof Error ? cleanupError.name : "unknown error"})`,
+            );
+          }
+        }
+      }
       if (
         !(error instanceof SandboxError) ||
         !error.message.includes("terminated during startup") ||
