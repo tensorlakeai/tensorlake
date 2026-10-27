@@ -1198,7 +1198,18 @@ class AsyncSandbox:
         *,
         pid: int | str = _PROCESS_ARG_UNSET,
     ) -> Traced[None]:
-        """Kill a process by PID or process name given on creation."""
+        """Kill a process and everything it started.
+
+        The daemon tears the process down as one unit. An unmanaged process's
+        whole process group is SIGKILLed at once, including children that
+        detached with ``setsid``. For a managed process this stops the whole
+        supervisor (it will not be restarted) gracefully: SIGTERM to the
+        process group, then SIGKILL once the process's ``stop_grace_ms``
+        (default 10 s) has elapsed.
+
+        Args:
+            process: PID or process name given on creation.
+        """
         seg = _resolve_process_arg(process, pid)
         try:
             trace_id = await self._rust_client.kill_process_async(seg)
@@ -1229,7 +1240,17 @@ class AsyncSandbox:
         *,
         pid: int | str = _PROCESS_ARG_UNSET,
     ) -> Traced[SendSignalResponse]:
-        """Send a signal to a process by PID or process name given on creation."""
+        """Send a signal to a process and everything it started.
+
+        The signal is delivered to the process's whole process group, as a
+        terminal's job control would; SIGKILL also reaps children that
+        detached with ``setsid``. There is no escalation: a process that
+        ignores SIGTERM keeps running.
+
+        Args:
+            process: PID or process name given on creation.
+            signal: Signal number (e.g. 15 for SIGTERM, 9 for SIGKILL)
+        """
         seg = _resolve_process_arg(process, pid)
         if signal is _PROCESS_ARG_UNSET:
             raise TypeError("missing required argument: `signal`")
