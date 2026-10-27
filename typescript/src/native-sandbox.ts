@@ -118,6 +118,8 @@ export interface NativeSandboxClient {
   deleteSandbox(sandboxId: string): Promise<string>;
   suspendSandbox(sandboxId: string): Promise<string>;
   resumeSandbox(sandboxId: string): Promise<string>;
+  suspendSandboxAndWait(sandboxId: string, waitSec: number): Promise<boolean>;
+  resumeSandboxAndWait(sandboxId: string, waitSec: number): Promise<boolean>;
   attachFileSystem(
     sandboxId: string,
     fileSystemId: string,

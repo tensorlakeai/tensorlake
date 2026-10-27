@@ -856,9 +856,26 @@ describe("SandboxClient", () => {
       client.close();
     });
 
-    it("polls until Suspended when wait=true (default)", async () => {
+    it("waits on the server when wait=true (default)", async () => {
+      const stub = installNativeStub();
+
+      const client = SandboxClient.forLocalhost();
+      await expect(
+        client.suspend("sbx-1", { timeout: 20 }),
+      ).resolves.toBeUndefined();
+      expect(stub.client.suspendSandboxAndWait).toHaveBeenCalledWith(
+        "sbx-1",
+        20,
+      );
+      expect(stub.client.suspendSandbox).not.toHaveBeenCalled();
+      expect(stub.client.getSandbox).not.toHaveBeenCalled();
+      client.close();
+    });
+
+    it("polls until Suspended when the server wait runs out", async () => {
       const stub = installNativeStub({
         client: {
+          suspendSandboxAndWait: vi.fn(async () => false),
           getSandbox: vi.fn(async () => ({
             traceId: "t",
             json: JSON.stringify({
@@ -873,7 +890,10 @@ describe("SandboxClient", () => {
 
       const client = SandboxClient.forLocalhost();
       await expect(client.suspend("sbx-1")).resolves.toBeUndefined();
-      expect(stub.client.suspendSandbox).toHaveBeenCalledWith("sbx-1");
+      expect(stub.client.suspendSandboxAndWait).toHaveBeenCalledWith(
+        "sbx-1",
+        300,
+      );
       expect(stub.client.getSandbox).toHaveBeenCalled();
       client.close();
     });
@@ -891,9 +911,24 @@ describe("SandboxClient", () => {
       client.close();
     });
 
-    it("polls until Running when wait=true (default)", async () => {
+    it("waits on the server when wait=true (default)", async () => {
+      const stub = installNativeStub();
+
+      const client = SandboxClient.forLocalhost();
+      await expect(client.resume("sbx-1")).resolves.toBeUndefined();
+      expect(stub.client.resumeSandboxAndWait).toHaveBeenCalledWith(
+        "sbx-1",
+        300,
+      );
+      expect(stub.client.resumeSandbox).not.toHaveBeenCalled();
+      expect(stub.client.getSandbox).not.toHaveBeenCalled();
+      client.close();
+    });
+
+    it("polls until Running when the server wait runs out", async () => {
       const stub = installNativeStub({
         client: {
+          resumeSandboxAndWait: vi.fn(async () => false),
           getSandbox: vi.fn(async () => ({
             traceId: "t",
             json: JSON.stringify({
@@ -908,8 +943,56 @@ describe("SandboxClient", () => {
 
       const client = SandboxClient.forLocalhost();
       await expect(client.resume("sbx-1")).resolves.toBeUndefined();
-      expect(stub.client.resumeSandbox).toHaveBeenCalledWith("sbx-1");
       expect(stub.client.getSandbox).toHaveBeenCalled();
+      client.close();
+    });
+
+    it("returns on a conflict when the sandbox is already running", async () => {
+      const stub = installNativeStub({
+        client: {
+          resumeSandboxAndWait: vi.fn(async () => {
+            throw nativeError(409, "superseded");
+          }),
+          getSandbox: vi.fn(async () => ({
+            traceId: "t",
+            json: JSON.stringify({
+              id: "sbx-1",
+              status: "running",
+              namespace: "default",
+              resources: { cpus: 1, memory_mb: 1024, disk_mb: 1024 },
+            }),
+          })),
+        },
+      });
+
+      const client = SandboxClient.forLocalhost();
+      await expect(client.resume("sbx-1")).resolves.toBeUndefined();
+      expect(stub.client.getSandbox).toHaveBeenCalledTimes(1);
+      client.close();
+    });
+
+    it("raises a conflict when the resume failed", async () => {
+      installNativeStub({
+        client: {
+          resumeSandboxAndWait: vi.fn(async () => {
+            throw nativeError(409, "Resident resume failed");
+          }),
+          getSandbox: vi.fn(async () => ({
+            traceId: "t",
+            json: JSON.stringify({
+              id: "sbx-1",
+              status: "suspended",
+              namespace: "default",
+              resources: { cpus: 1, memory_mb: 1024, disk_mb: 1024 },
+            }),
+          })),
+        },
+      });
+
+      const client = SandboxClient.forLocalhost();
+      await expect(client.resume("sbx-1")).rejects.toMatchObject({
+        statusCode: 409,
+      });
       client.close();
     });
   });

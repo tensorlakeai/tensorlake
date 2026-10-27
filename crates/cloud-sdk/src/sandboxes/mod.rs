@@ -42,10 +42,15 @@ pub const TERMINATION_REASON_CANCELLED: &str = "cancelled";
 /// lifecycle gateway can answer a transient proxy error until it starts.
 const WAIT_TRANSIENT_RETRIES: usize = 10;
 
-/// Most of the request timeout [`SandboxesClient::create_and_wait`] leaves
-/// for the server's answer, so its `timeout` reaches the client before the
-/// client's own deadline. A quarter of shorter timeouts is used instead.
-const CREATE_RESPONSE_GRACE: Duration = Duration::from_secs(5);
+/// Most of the request timeout a server-side wait
+/// ([`SandboxesClient::create_and_wait`], [`SandboxesClient::suspend_and_wait`],
+/// [`SandboxesClient::resume_and_wait`]) leaves for the server's answer, so
+/// it reaches the client before the client's own deadline. A quarter of
+/// shorter timeouts is used instead.
+const WAIT_RESPONSE_GRACE: Duration = Duration::from_secs(5);
+
+/// Longest wait the Sandbox Engine holds a suspend or resume request open.
+const LIFECYCLE_WAIT_CAP: Duration = Duration::from_secs(30);
 /// Most pages a listing follows. Each page after the first asks for
 /// `LIST_PAGE_LIMIT` items, so this bounds a listing at about 100,000.
 const MAX_LIST_PAGES: usize = 1000;
@@ -478,7 +483,7 @@ impl SandboxesClient {
             .client
             .build_post_json_request(Method::POST, &uri, request)?;
         if let Some(timeout) = self.client.request_timeout() {
-            let grace = CREATE_RESPONSE_GRACE.min(timeout / 4);
+            let grace = WAIT_RESPONSE_GRACE.min(timeout / 4);
             req.headers_mut().insert(
                 REQUEST_TIMEOUT_GRACE_HEADER,
                 HeaderValue::from(grace.as_millis() as u64),
@@ -861,6 +866,62 @@ impl SandboxesClient {
         let uri = self.endpoint(&format!("sandboxes/{sandbox_id}/resume"));
         let req = self.client.build_empty_post_request(&uri)?;
         Ok(self.client.execute_traced(req).await?.map(|_| ()))
+    }
+
+    /// Suspend that waits on the server for up to `wait`. Returns `true` when
+    /// the server answers that the sandbox is suspended (HTTP 200) and
+    /// `false` when the wait ran out first (HTTP 202, the suspend continues).
+    /// A failed or superseded suspend is an HTTP 409 error. A server without
+    /// the wait answers 202 at once.
+    pub async fn suspend_and_wait(
+        &self,
+        sandbox_id: &str,
+        wait: Duration,
+    ) -> Result<Traced<bool>, SdkError> {
+        self.lifecycle_and_wait(sandbox_id, "suspend", wait).await
+    }
+
+    /// Resume that waits on the server for up to `wait`. Returns `true` when
+    /// the server answers that the sandbox is running (HTTP 200) and `false`
+    /// when the wait ran out first (HTTP 202, the resume continues). A failed
+    /// or superseded resume is an HTTP 409 error. A server without the wait
+    /// answers 202 at once.
+    pub async fn resume_and_wait(
+        &self,
+        sandbox_id: &str,
+        wait: Duration,
+    ) -> Result<Traced<bool>, SdkError> {
+        self.lifecycle_and_wait(sandbox_id, "resume", wait).await
+    }
+
+    async fn lifecycle_and_wait(
+        &self,
+        sandbox_id: &str,
+        action: &str,
+        wait: Duration,
+    ) -> Result<Traced<bool>, SdkError> {
+        let uri = self.endpoint(&format!("sandboxes/{sandbox_id}/{action}"));
+        let wait_ms = self.lifecycle_wait(wait).as_millis().to_string();
+        let req = build_empty_post_request_from_builder(
+            self.client
+                .request(Method::POST, &uri)
+                .query(&[("wait_ms", wait_ms)]),
+        )?;
+        Ok(self
+            .client
+            .execute_traced(req)
+            .await?
+            .map(|response| response.status() == StatusCode::OK))
+    }
+
+    /// The server-side wait for a lifecycle request: at most `wait`, the
+    /// server's own cap, and the request timeout less a response grace.
+    fn lifecycle_wait(&self, wait: Duration) -> Duration {
+        let wait = wait.min(LIFECYCLE_WAIT_CAP);
+        match self.client.request_timeout() {
+            Some(timeout) => wait.min(timeout.saturating_sub(WAIT_RESPONSE_GRACE.min(timeout / 4))),
+            None => wait,
+        }
     }
 
     /// Attach a registered file system to a running sandbox at `mount_path`.

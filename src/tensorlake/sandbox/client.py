@@ -6,6 +6,7 @@ import json
 import os
 import time
 import warnings
+from collections.abc import Callable
 from typing import Any, Literal, NoReturn, overload
 from urllib.parse import urlparse
 
@@ -1381,11 +1382,16 @@ class SandboxClient:
         sandboxes cannot. By default blocks until the sandbox is fully
         ``Suspended``; pass ``wait=False`` for fire-and-return.
 
+        The server answers as soon as the suspend completes. When its wait
+        runs out first, or the server does not support waiting, the rest of
+        ``timeout`` is spent polling every ``poll_interval`` seconds.
+
         Args:
             sandbox_id: ID or name of the sandbox to suspend
-            wait: If True (default), poll until Suspended; False returns immediately.
+            wait: If True (default), wait until Suspended; False returns immediately.
             timeout: Max seconds to wait when wait=True (default 300)
-            poll_interval: Seconds between polls when wait=True (default 1.0)
+            poll_interval: Seconds between polls once the server's own wait
+                has run out (default 1.0)
 
         Raises:
             SandboxNotFoundError: If sandbox doesn't exist
@@ -1393,25 +1399,18 @@ class SandboxClient:
             RemoteAPIError: If the API request fails
             SandboxConnectionError: If the server is unreachable
         """
-        try:
-            trace_id = self._rust_client.suspend_sandbox(sandbox_id=sandbox_id)
-        except Exception as e:
-            if _rust_status_code(e) == 404:
-                raise SandboxNotFoundError(sandbox_id) from None
-            _raise_as_sandbox_error(e)
-        if not wait:
-            return Traced(trace_id, None)
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            info = self.get(sandbox_id).value
-            if info.status == SandboxStatus.SUSPENDED:
-                return Traced(trace_id, None)
-            if info.status == SandboxStatus.TERMINATED:
-                raise SandboxError(
-                    f"Sandbox {sandbox_id!r} terminated while waiting for suspend"
-                )
-            time.sleep(poll_interval)
-        raise SandboxError(f"Sandbox {sandbox_id!r} did not suspend within {timeout}s")
+        return self._change_lifecycle(
+            sandbox_id,
+            "suspend",
+            SandboxStatus.SUSPENDED,
+            lambda: self._rust_client.suspend_sandbox(sandbox_id=sandbox_id),
+            lambda wait_sec: self._rust_client.suspend_sandbox_and_wait(
+                sandbox_id=sandbox_id, wait_sec=wait_sec
+            ),
+            wait,
+            timeout,
+            poll_interval,
+        )
 
     def resume(
         self,
@@ -1425,11 +1424,16 @@ class SandboxClient:
         By default blocks until the sandbox is ``Running``; pass
         ``wait=False`` for fire-and-return.
 
+        The server answers as soon as the sandbox runs. When its wait runs
+        out first, or the server does not support waiting, the rest of
+        ``timeout`` is spent polling every ``poll_interval`` seconds.
+
         Args:
             sandbox_id: ID or name of the sandbox to resume
-            wait: If True (default), poll until Running; False returns immediately.
+            wait: If True (default), wait until Running; False returns immediately.
             timeout: Max seconds to wait when wait=True (default 300)
-            poll_interval: Seconds between polls when wait=True (default 1.0)
+            poll_interval: Seconds between polls once the server's own wait
+                has run out (default 1.0)
 
         Raises:
             SandboxNotFoundError: If sandbox doesn't exist
@@ -1437,25 +1441,62 @@ class SandboxClient:
             RemoteAPIError: If the API request fails
             SandboxConnectionError: If the server is unreachable
         """
-        try:
-            trace_id = self._rust_client.resume_sandbox(sandbox_id=sandbox_id)
-        except Exception as e:
-            if _rust_status_code(e) == 404:
-                raise SandboxNotFoundError(sandbox_id) from None
-            _raise_as_sandbox_error(e)
-        if not wait:
-            return Traced(trace_id, None)
+        return self._change_lifecycle(
+            sandbox_id,
+            "resume",
+            SandboxStatus.RUNNING,
+            lambda: self._rust_client.resume_sandbox(sandbox_id=sandbox_id),
+            lambda wait_sec: self._rust_client.resume_sandbox_and_wait(
+                sandbox_id=sandbox_id, wait_sec=wait_sec
+            ),
+            wait,
+            timeout,
+            poll_interval,
+        )
+
+    def _change_lifecycle(
+        self,
+        sandbox_id: str,
+        action: str,
+        target: SandboxStatus,
+        send: Callable[[], str],
+        send_and_wait: Callable[[float], tuple[str, bool]],
+        wait: bool,
+        timeout: float,
+        poll_interval: float,
+    ) -> Traced[None]:
+        """Send a suspend or resume. With ``wait``, the server waits for
+        ``target`` and answers whether it was reached; when its wait runs out
+        first, the rest of ``timeout`` is spent polling."""
         deadline = time.time() + timeout
+        try:
+            if not wait:
+                return Traced(send(), None)
+            trace_id, settled = send_and_wait(timeout)
+        except Exception as e:
+            status_code = _rust_status_code(e)
+            if status_code == 404:
+                raise SandboxNotFoundError(sandbox_id) from None
+            if status_code != 409:
+                _raise_as_sandbox_error(e)
+            # The request failed or another one superseded it. A concurrent
+            # request may still have reached the target.
+            info = self.get(sandbox_id)
+            if info.value.status == target:
+                return Traced(info.trace_id, None)
+            _raise_as_sandbox_error(e)
+        if settled:
+            return Traced(trace_id, None)
         while time.time() < deadline:
             info = self.get(sandbox_id).value
-            if info.status == SandboxStatus.RUNNING:
+            if info.status == target:
                 return Traced(trace_id, None)
             if info.status == SandboxStatus.TERMINATED:
                 raise SandboxError(
-                    f"Sandbox {sandbox_id!r} terminated while waiting for resume"
+                    f"Sandbox {sandbox_id!r} terminated while waiting for {action}"
                 )
             time.sleep(poll_interval)
-        raise SandboxError(f"Sandbox {sandbox_id!r} did not resume within {timeout}s")
+        raise SandboxError(f"Sandbox {sandbox_id!r} did not {action} within {timeout}s")
 
     # --- File system operations ---
 
