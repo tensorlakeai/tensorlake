@@ -520,6 +520,12 @@ export class SandboxClient {
     if (options?.timeoutSecs != null) body.timeout_secs = options.timeoutSecs;
     if (options?.entrypoint != null) body.entrypoint = options.entrypoint;
     if (options?.snapshotId != null) body.snapshot_id = options.snapshotId;
+    if (options?.allowUnauthenticatedAccess != null) {
+      body.allow_unauthenticated_access = options.allowUnauthenticatedAccess;
+    }
+    if (options?.exposedPorts != null) {
+      body.exposed_ports = normalizeUserPorts(options.exposedPorts);
+    }
     if (options?.name != null) body.name = options.name;
     if (options?.fileSystems != null && options.fileSystems.length > 0) {
       body.file_systems = options.fileSystems.map(fileSystemMountToWire);

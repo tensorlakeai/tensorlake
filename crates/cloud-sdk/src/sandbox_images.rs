@@ -846,6 +846,8 @@ where
             entrypoint: None,
             network: None,
             snapshot_id: None,
+            allow_unauthenticated_access: None,
+            exposed_ports: None,
             name: None,
             file_systems: Vec::new(),
             // The builder waits on the server as before; image builds keep

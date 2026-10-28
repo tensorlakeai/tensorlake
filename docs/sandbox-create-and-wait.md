@@ -114,6 +114,10 @@ the constants `TERMINATION_REASON_NO_CAPACITY` / `TERMINATION_REASON_CANCELLED`.
 
 ## TypeScript
 
+Creation options include `exposedPorts` and `allowUnauthenticatedAccess` for
+configuring sandbox proxy access in the initial request, with either wait mode.
+See the [TypeScript port exposure example](../typescript/README.md#expose-ports-when-creating-a-sandbox).
+
 ```typescript
 import { Sandbox, SandboxPending, SandboxError } from "@tensorlakeai/tensorlake";
 

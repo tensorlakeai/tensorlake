@@ -352,6 +352,14 @@ pub struct CreateSandboxRequest {
     pub network: Option<NetworkConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snapshot_id: Option<String>,
+    /// Whether exposed user ports are reachable without authentication.
+    /// Fresh creates default to false; snapshot restores inherit when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_unauthenticated_access: Option<bool>,
+    /// User ports routable through the sandbox proxy. Snapshot restores inherit
+    /// when omitted; an empty list clears them. Does not enable unauthenticated access.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exposed_ports: Option<Vec<u16>>,
     /// Optional name for the sandbox. Named sandboxes support suspend/resume.
     /// When absent the sandbox is ephemeral.
     #[serde(skip_serializing_if = "Option::is_none")]
