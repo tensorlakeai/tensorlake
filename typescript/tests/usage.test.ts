@@ -1,122 +1,106 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { clearCloudStub, installCloudStub } from "./cloud-stub.js";
+import {
+  __setNativeSandboxBindingForTest,
+  type NativeSandboxBinding,
+} from "../src/native-sandbox.js";
 import { UsageClient } from "../src/usage.js";
 
-const WINDOW_START = "2026-10-01T00:00:00.000Z";
-const WINDOW_END = "2026-10-28T12:00:00.000Z";
+type Call = { method: string; last: string | null };
 
-function sandbox(sandboxId: string) {
-  const resource = (unit: string) => ({
-    quantity: "1.5",
-    unit,
-    attributedAmountMinor: "100",
-    usageValueAmountMinor: null,
-  });
-  return {
-    sandboxId,
-    project: { projectId: "proj-1", projectName: "Default" },
-    attributedAmountMinor: "500",
-    usageValueAmountMinor: null,
-    resources: {
-      cpu: resource("vCPU-hour"),
-      memory: resource("GiB-hour"),
-      sandboxStorage: resource("GiB-hour"),
-      snapshotStorage: resource("GiB-hour"),
-      networkEgress: resource("GiB"),
+/** Stand in for the napi NativeUsageClient; the Rust client owns the wire. */
+function installUsageStub(responses: { summary?: unknown; sandboxes?: unknown; error?: Error }) {
+  const calls: Call[] = [];
+  let constructed: unknown[] = [];
+  __setNativeSandboxBindingForTest({
+    NativeUsageClient: class {
+      constructor(...args: unknown[]) {
+        constructed = args;
+      }
+      async summary(last: string | null) {
+        calls.push({ method: "summary", last });
+        if (responses.error) throw responses.error;
+        return { traceId: "trace", json: JSON.stringify(responses.summary) };
+      }
+      async sandboxes(last: string | null) {
+        calls.push({ method: "sandboxes", last });
+        if (responses.error) throw responses.error;
+        return { traceId: "trace", json: JSON.stringify(responses.sandboxes) };
+      }
     },
-  };
+  } as unknown as NativeSandboxBinding);
+  return { calls, constructed: () => constructed };
 }
 
-function exportBody(sandboxIds: string[], end = true): string {
-  const records: unknown[] = [
-    {
-      type: "window",
-      windowStart: WINDOW_START,
-      windowEnd: WINDOW_END,
-      attributedUsageCharge: { currency: "usd", amountMinor: "1000", basis: "invoice" },
-      includedUsage: null,
-      attributedUsageValue: null,
-    },
-    ...sandboxIds.map((id) => ({ type: "sandbox", ...sandbox(id) })),
-  ];
-  if (end) records.push({ type: "end", count: sandboxIds.length });
-  return records.map((record) => `${JSON.stringify(record)}\n`).join("");
-}
+const EXPORT = {
+  windowStart: "2026-10-01T00:00:00.000Z",
+  windowEnd: "2026-10-28T12:00:00.000Z",
+  attributedUsageCharge: { currency: "usd", amountMinor: "1000", basis: "invoice" },
+  includedUsage: null,
+  attributedUsageValue: null,
+  sandboxes: [{ sandboxId: "sb-1" }, { sandboxId: "sb-2" }],
+};
 
 describe("UsageClient", () => {
   afterEach(() => {
-    clearCloudStub();
+    __setNativeSandboxBindingForTest(undefined);
   });
 
-  it("reads every sandbox from one export request", async () => {
-    const urls: URL[] = [];
-    installCloudStub((url) => {
-      urls.push(new URL(url));
-      return new Response(exportBody(["sb-1", "sb-2"]), { status: 200 });
+  it("reads sandboxes through the native client", async () => {
+    const stub = installUsageStub({ sandboxes: EXPORT });
+
+    const client = new UsageClient({
+      apiUrl: "http://localhost:8900",
+      apiKey: "key",
+      organizationId: "org-1",
     });
+    const usage = await client.sandboxes({ last: "30d" });
 
-    const client = new UsageClient({ apiUrl: "http://localhost:8900", organizationId: "org-1" });
-    const usage = await client.sandboxes();
-    client.close();
-
+    expect(stub.constructed().slice(0, 3)).toEqual(["http://localhost:8900", "key", "org-1"]);
+    expect(stub.calls).toEqual([{ method: "sandboxes", last: "30d" }]);
     expect(usage.sandboxes.map((s) => s.sandboxId)).toEqual(["sb-1", "sb-2"]);
-    expect(usage.windowStart).toBe(WINDOW_START);
     expect(usage.attributedUsageCharge?.basis).toBe("invoice");
-    expect(urls).toHaveLength(1);
-    expect(urls[0].pathname).toBe("/platform/v1/organizations/org-1/sandbox-usage/sandboxes/export");
-    expect(urls[0].search).toBe("");
   });
 
-  it("rejects a truncated export", async () => {
-    installCloudStub(() => new Response(exportBody(["sb-1"], false), { status: 200 }));
-
-    const client = new UsageClient({ apiUrl: "http://localhost:8900", organizationId: "org-1" });
-    await expect(client.sandboxes({ last: "30d" })).rejects.toThrow(/missing end record/);
-    client.close();
-  });
-
-  it("reads a lookback summary as an exact range", async () => {
-    let requested: URL | undefined;
-    installCloudStub((url) => {
-      requested = new URL(url);
-      return new Response(
-        JSON.stringify({
-          windowStart: WINDOW_START,
-          windowEnd: WINDOW_END,
-          computeUnits: "42.5",
-          usageCharge: null,
-          includedUsage: null,
-          usageValue: null,
-          runningSandboxes: 3,
-          projects: [],
-        }),
-        { status: 200 },
-      );
+  it("reads the current period summary without a lookback", async () => {
+    const stub = installUsageStub({
+      summary: { computeUnits: "42.5", runningSandboxes: 3, includedUsage: null },
     });
 
-    const client = new UsageClient({ apiUrl: "http://localhost:8900", organizationId: "org-1" });
-    const summary = await client.summary({ last: "7d" });
-    client.close();
+    const client = new UsageClient({ apiKey: "key", organizationId: "org-1" });
+    const summary = await client.summary();
 
-    expect(requested?.pathname).toBe("/platform/v1/organizations/org-1/sandbox-usage/breakdown");
-    expect(requested?.searchParams.get("granularity")).toBe("day");
-    expect(requested?.searchParams.has("fromDate")).toBe(true);
-    expect(requested?.searchParams.has("toDate")).toBe(true);
+    expect(stub.calls).toEqual([{ method: "summary", last: null }]);
     expect(summary.computeUnits).toBe("42.5");
-    expect(summary.runningSandboxes).toBe(3);
+    expect(summary.includedUsage).toBeNull();
   });
 
-  it("rejects an unsupported lookback before any request", async () => {
-    const client = new UsageClient({ apiUrl: "http://localhost:8900", organizationId: "org-1" });
-    await expect(client.sandboxes({ last: "2d" as never })).rejects.toThrow(/1d, 7d, 30d/);
-    client.close();
+  it("surfaces native errors", async () => {
+    installUsageStub({
+      error: new Error(
+        JSON.stringify({
+          category: "sdk_usage",
+          message: "incomplete sandbox usage export: missing end record",
+        }),
+      ),
+    });
+
+    const client = new UsageClient({ apiKey: "key", organizationId: "org-1" });
+    await expect(client.sandboxes()).rejects.toThrow(/missing end record/);
+  });
+
+  it("requires an API key", () => {
+    installUsageStub({});
+    expect(() => new UsageClient({ apiKey: "", organizationId: "org-1" })).toThrow(
+      /TENSORLAKE_API_KEY/,
+    );
   });
 
   it("requires an organization", () => {
+    installUsageStub({});
     const previous = process.env.TENSORLAKE_ORGANIZATION_ID;
     delete process.env.TENSORLAKE_ORGANIZATION_ID;
     try {
-      expect(() => new UsageClient({ apiUrl: "http://localhost:8900" })).toThrow(/organization ID/);
+      expect(() => new UsageClient({ apiKey: "key" })).toThrow(/organization ID/);
     } finally {
       if (previous !== undefined) process.env.TENSORLAKE_ORGANIZATION_ID = previous;
     }

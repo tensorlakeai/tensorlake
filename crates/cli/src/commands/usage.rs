@@ -1,5 +1,4 @@
 use comfy_table::Cell;
-use serde::Deserialize;
 use tensorlake::ClientBuilder;
 use tensorlake::error::SdkError;
 use tensorlake::usage::models::{
@@ -8,7 +7,7 @@ use tensorlake::usage::models::{
 use tensorlake::usage::{UsageClient, UsageWindow};
 
 use crate::auth::context::CliContext;
-use crate::error::{CliError, Result};
+use crate::error::{CliError, Result, remote_message};
 use crate::output::table::new_table;
 
 /// How far back `--last` reads, instead of the current billing period.
@@ -148,7 +147,8 @@ fn print_sandboxes(sandboxes: &[SandboxUsage], charge: Option<&AttributedUsageCh
         Some(charge) => {
             let basis = match charge.basis {
                 UsageChargeBasis::Invoice => "invoiced",
-                _ => "estimated",
+                UsageChargeBasis::CurrentPriceEstimate => "estimated",
+                UsageChargeBasis::Unknown => "unknown basis",
             };
             println!(
                 "{count} {noun}, {} total ({basis})",
@@ -171,9 +171,9 @@ fn format_minor(amount_minor: &str, currency: &str) -> String {
 }
 
 fn usage_client(ctx: &CliContext) -> Result<UsageClient> {
-    let organization_id = ctx
-        .effective_organization_id()
-        .ok_or_else(|| CliError::auth("missing organization ID; run `tl init`"))?;
+    let organization_id = ctx.effective_organization_id().ok_or_else(|| {
+        CliError::auth("missing organization ID; pass --organization or run `tl init`")
+    })?;
     let token = ctx.bearer_token()?;
     let client = ClientBuilder::new(&ctx.api_url)
         .bearer_token(&token)
@@ -194,17 +194,6 @@ fn map_sdk_error(error: SdkError) -> CliError {
         ),
         other => CliError::from(other),
     }
-}
-
-#[derive(Deserialize)]
-struct ErrorBody {
-    message: String,
-}
-
-fn remote_message(raw: &str) -> String {
-    serde_json::from_str::<ErrorBody>(raw)
-        .map(|body| body.message)
-        .unwrap_or_else(|_| raw.to_string())
 }
 
 #[cfg(test)]

@@ -2536,7 +2536,12 @@ async fn run_command(
         }
         Commands::Applications(app_args) => run_applications_command(ctx, app_args).await,
         Commands::Usage(args) => {
-            ensure_auth_and_project(ctx).await?;
+            // Usage is organization-scoped: no project is needed. An API key
+            // names its organization through introspection.
+            ensure_auth(ctx).await?;
+            if ctx.api_key.is_some() {
+                ctx.introspect().await?;
+            }
             let json = matches!(args.output, OutputFormat::Json);
             match args.command {
                 None => commands::usage::summary(ctx, args.last, json).await,

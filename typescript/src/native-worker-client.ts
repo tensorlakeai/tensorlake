@@ -229,6 +229,11 @@ export function createWorkerBinding(
         return runtime.handle("NativeRepositoryClient", args);
       }
     },
+    NativeUsageClient: class {
+      constructor(...args: unknown[]) {
+        return runtime.handle("NativeUsageClient", args);
+      }
+    },
     NativeTcpTunnel: class {
       constructor() {
         return runtime.handle("NativeTcpTunnel", []);

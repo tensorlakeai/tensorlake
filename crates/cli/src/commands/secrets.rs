@@ -8,7 +8,7 @@ use tensorlake::secrets::models::{
 use tensorlake::{Client, ClientBuilder};
 
 use crate::auth::context::CliContext;
-use crate::error::{CliError, Result};
+use crate::error::{CliError, Result, remote_message};
 use crate::output::table::new_table;
 
 pub async fn list(ctx: &CliContext) -> Result<()> {
@@ -239,17 +239,6 @@ fn secrets_http_client(ctx: &CliContext) -> Result<Client> {
     builder.build().map_err(Into::into)
 }
 
-fn parse_remote_message(raw: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(raw)
-        .ok()
-        .and_then(|body| {
-            body.get("message")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        })
-        .unwrap_or_else(|| raw.to_string())
-}
-
 fn map_list_sdk_error(error: SdkError) -> CliError {
     match error {
         SdkError::Authentication(_) => {
@@ -278,7 +267,7 @@ fn map_set_sdk_error(error: SdkError) -> CliError {
             if (400..500).contains(&code) {
                 CliError::usage(format!(
                     "could not set secrets: {}",
-                    parse_remote_message(&message)
+                    remote_message(&message)
                 ))
             } else {
                 CliError::Other(anyhow::anyhow!(

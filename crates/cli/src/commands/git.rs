@@ -21,7 +21,7 @@ use tensorlake::artifact_storage::workspaces::WorkspaceInfo;
 use tensorlake::{ClientBuilder, Sdk};
 
 use crate::auth::context::CliContext;
-use crate::error::{CliError, Result};
+use crate::error::{CliError, Result, remote_message};
 use crate::output::table::new_table;
 
 /// Parse a human cache-size argument (`512MB`, `2GiB`, `1073741824`, ...). Lives here — not in
@@ -834,24 +834,13 @@ pub(crate) fn map_sdk_error(error: tensorlake::error::SdkError) -> CliError {
                 status,
                 reqwest::StatusCode::CONFLICT | reqwest::StatusCode::NOT_FOUND
             ) {
-                CliError::usage(parse_remote_message(&message))
+                CliError::usage(remote_message(&message))
             } else {
                 CliError::from(tensorlake::error::SdkError::ServerError { status, message })
             }
         }
         other => CliError::from(other),
     }
-}
-
-fn parse_remote_message(raw: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(raw)
-        .ok()
-        .and_then(|body| {
-            body.get("message")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        })
-        .unwrap_or_else(|| raw.to_string())
 }
 
 /// `tl git push` — resumable chunked push of the current Git worktree as one commit.

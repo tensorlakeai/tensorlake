@@ -5,10 +5,12 @@ pin the first page's window, and amounts must parse without precision loss.
 """
 
 import json
+import os
 import threading
 import unittest
 from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from unittest import mock
 from urllib.parse import parse_qs, urlparse
 
 from tensorlake import UsageClient
@@ -176,8 +178,10 @@ class TestUsageClient(unittest.TestCase):
         self.assertEqual(self.server.requests, [])
 
     def test_requires_organization(self):
-        with self.assertRaises(UsageError):
-            UsageClient(api_key="test-key", organization_id="")
+        env = {k: v for k, v in os.environ.items() if k != "TENSORLAKE_ORGANIZATION_ID"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            with self.assertRaises(UsageError):
+                UsageClient(api_key="test-key")
 
 
 if __name__ == "__main__":
