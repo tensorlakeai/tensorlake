@@ -13,12 +13,13 @@ const server = createServer(async (request, response) => {
   for await (const chunk of request) chunks.push(chunk);
   const text = Buffer.concat(chunks).toString();
   const body = text ? JSON.parse(text) : {};
-  requests.push({ method: request.method, url: request.url, body });
+  const path = new URL(request.url, "http://localhost").pathname;
+  requests.push({ method: request.method, url: path, body });
   response.setHeader("Content-Type", "application/json");
   let payload = {};
-  if (request.url.endsWith("/resume")) status = "running";
-  else if (request.url.endsWith("/suspend")) status = "suspended";
-  else if (request.url.startsWith("/api/v1/files")) {
+  if (path.endsWith("/resume")) status = "running";
+  else if (path.endsWith("/suspend")) status = "suspended";
+  else if (path.startsWith("/api/v1/files")) {
     response.statusCode = 409;
     payload = { error: "Automatic resume disabled", code: "SANDBOX_AUTO_RESUME_DISABLED" };
   } else if (request.method === "POST") {
@@ -31,7 +32,7 @@ const server = createServer(async (request, response) => {
       resources: { cpus: 1, memory_mb: 512, disk_mb: 1024 }, sandbox_url: url,
       ...(!legacy && { auto_resume: autoResume }),
     };
-    if (request.url.endsWith("/sandboxes")) payload = { sandboxes: [payload] };
+    if (path.endsWith("/sandboxes")) payload = { sandboxes: [payload] };
   }
   response.end(JSON.stringify(payload));
 });

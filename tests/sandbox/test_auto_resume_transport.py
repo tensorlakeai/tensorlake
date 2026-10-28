@@ -8,6 +8,7 @@ import json
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlsplit
 
 from tensorlake.sandbox import AsyncSandbox, Sandbox
 from tensorlake.sandbox.exceptions import RemoteAPIError
@@ -28,14 +29,15 @@ class TestAutoResumeTransport(unittest.TestCase):
             def handle_request(self):
                 length = int(self.headers.get("content-length", 0))
                 body = json.loads(self.rfile.read(length)) if length else {}
-                test.requests.append((self.command, self.path, body))
+                path = urlsplit(self.path).path
+                test.requests.append((self.command, path, body))
                 code = 200
                 payload = {}
-                if self.path.endswith("/resume"):
+                if path.endswith("/resume"):
                     test.status = "running"
-                elif self.path.endswith("/suspend"):
+                elif path.endswith("/suspend"):
                     test.status = "suspended"
-                elif self.path.startswith("/api/v1/files"):
+                elif path.startswith("/api/v1/files"):
                     code = 409
                     payload = {
                         "error": "Automatic resume disabled",
