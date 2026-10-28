@@ -163,6 +163,7 @@ impl SandboxesClient {
             if request.name.is_some()
                 || request.allow_unauthenticated_access.is_some()
                 || request.exposed_ports.is_some()
+                || request.auto_resume.is_some()
                 || !request.network.is_keep()
             {
                 return Err(SdkError::ClientError(

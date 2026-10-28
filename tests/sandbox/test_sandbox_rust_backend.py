@@ -443,6 +443,7 @@ class TestSandboxRustBackend(unittest.TestCase):
             name="renamed",
             allow_unauthenticated_access=True,
             exposed_ports=[8080],
+            auto_resume=None,
             network=None,
         )
         self.assertEqual(traced.name, "renamed")
@@ -465,6 +466,7 @@ class TestSandboxRustBackend(unittest.TestCase):
             name="new-name",
             allow_unauthenticated_access=None,
             exposed_ports=None,
+            auto_resume=None,
             network=None,
         )
 
@@ -488,6 +490,7 @@ class TestSandboxRustBackend(unittest.TestCase):
             name="new-env",
             allow_unauthenticated_access=None,
             exposed_ports=None,
+            auto_resume=None,
             network=None,
         )
         self.assertEqual(sandbox.name, "new-env")

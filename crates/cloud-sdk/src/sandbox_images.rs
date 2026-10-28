@@ -839,6 +839,7 @@ where
     )));
     let created = sandboxes
         .create(&CreateSandboxRequest {
+            auto_resume: None,
             image: Some(prepared.builder.image.clone()),
             resources,
             timeout_secs: Some(BUILDER_SANDBOX_TIMEOUT_SECS),

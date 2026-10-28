@@ -211,6 +211,8 @@ export class RemoteAPIError extends SandboxError {
   readonly statusCode: number;
   /** Original response body, retained for compatibility and diagnostics. */
   readonly responseMessage: string;
+  /** Machine-readable API error code, including proxy policy failures. */
+  readonly code?: string;
   declare readonly sandboxId?: string;
   /** Server reason, including unknown future reasons. */
   declare readonly reason?: string;
@@ -218,10 +220,12 @@ export class RemoteAPIError extends SandboxError {
 
   constructor(statusCode: number, message: string) {
     let failure: Record<string, unknown> | undefined;
+    let code: string | undefined;
     try {
       const payload: unknown = JSON.parse(message);
       if (payload && typeof payload === "object" && !Array.isArray(payload)) {
         const record = payload as Record<string, unknown>;
+        if (typeof record.code === "string") code = record.code;
         if (
           typeof record.sandbox_id === "string" &&
           record.sandbox_id.trim() &&
@@ -252,6 +256,7 @@ export class RemoteAPIError extends SandboxError {
     this.name = "RemoteAPIError";
     this.statusCode = statusCode;
     this.responseMessage = message;
+    this.code = code;
   }
 }
 

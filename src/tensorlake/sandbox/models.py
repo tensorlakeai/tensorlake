@@ -444,6 +444,8 @@ class FileSystem(BaseModel):
 class CreateSandboxRequest(BaseModel):
     """Request payload for creating a sandbox."""
 
+    auto_resume: bool | None = None
+
     image: str | None = None
     resources: CreateSandboxResources | None = None
     timeout_secs: int | None = None
@@ -515,6 +517,8 @@ class UpdateSandboxRequest(BaseModel):
     or sending an explicit ``null``; the client builds those from the
     :data:`CLEAR_NETWORK_POLICY` sentinel rather than this model.
     """
+
+    auto_resume: bool | None = None
 
     resources: ResizeSandboxResources | None = None
     name: str | None = None
@@ -731,6 +735,8 @@ class CopySandboxResponse(BaseModel):
 
 class SandboxInfo(BaseModel):
     """Full sandbox information."""
+
+    auto_resume: bool = True
 
     sandbox_id: str = Field(alias="id")
     namespace: str

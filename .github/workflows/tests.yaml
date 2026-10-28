@@ -269,6 +269,8 @@ jobs:
             tests.sandbox.test_pool_gpu \
             tests.sandbox.test_ready_timeout \
             tests.sandbox.test_resource_resize \
+            tests.sandbox.test_auto_resume_rust_backend \
+            tests.sandbox.test_auto_resume_transport \
             tests.image.test_sandbox_builder \
             tests.image.test_builds \
             tests.image.test_builds_native \

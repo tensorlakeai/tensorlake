@@ -196,6 +196,8 @@ export interface ClaimSandboxOptions {
 // --- Sandbox lifecycle ---
 
 export interface CreateSandboxOptions {
+  /** Allow proxy traffic to wake a suspended sandbox (default true). False requires a named sandbox. */
+  autoResume?: boolean;
   /** Optional sandbox image name. GPU sandboxes require a CAS image; when omitted with a GPU request, Tensorlake uses the server's configured GPU default. */
   image?: string;
   /** CPU count. Defaults to 1 for fresh creates; snapshot restores inherit it when omitted. */
@@ -270,6 +272,8 @@ export interface SandboxResourceResizeInfo {
 
 /** Wait options apply only to resource updates and are ignored for other properties. */
 export interface UpdateSandboxOptions extends ResourceResizeWaitOptions {
+  /** Change wake-on-traffic policy without waking or suspending the sandbox. Omit to keep it unchanged; false requires a named sandbox. Cannot be combined with resource resizing. */
+  autoResume?: boolean;
   /** Whole live vCPU target; omitted retains the current allocation. */
   cpus?: number;
   /** Memory target in MiB, with the same units as create; never rounded by the SDK. */
@@ -372,6 +376,8 @@ export interface CopySandboxResponse {
 }
 
 export interface SandboxInfo {
+  /** Whether proxy traffic may wake this sandbox; defaults to true on older servers. */
+  autoResume: boolean;
   /**
    * The runtime the server chose for this sandbox: `firecracker`,
    * `cloud-hypervisor` or `gvisor`. Informational only; it is never sent and
