@@ -1,6 +1,6 @@
 [project]
 name = "tensorlake"
-version = "0.5.158"
+version = "0.5.159"
 description = "Tensorlake SDK for agent sandboxes and sandbox-native orchestration"
 readme = "README.md"
 authors = [{ name = "Tensorlake Inc.", email = "support@tensorlake.ai" }]

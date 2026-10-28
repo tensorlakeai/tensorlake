@@ -17,7 +17,7 @@
 
 use std::future::Future;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tensorlake::sandboxes::resize::ResizeOptions;
 use tokio::sync::OnceCell;
 
@@ -694,6 +694,46 @@ impl NativeSandboxClient {
         with_retry(self.client().await?, 5, move |c| {
             let sandbox_id = sandbox_id.clone();
             async move { c.resume(&sandbox_id).await.map(|t| t.trace_id) }
+        })
+        .await
+    }
+
+    /// Suspend that waits on the server for up to `wait_sec`. Resolves `true`
+    /// when the server answered that the sandbox is suspended and `false`
+    /// when the wait ran out first.
+    #[napi]
+    pub async fn suspend_sandbox_and_wait(
+        &self,
+        sandbox_id: String,
+        wait_sec: f64,
+    ) -> napi::Result<bool> {
+        let wait = duration_from_non_negative_seconds("wait_sec", wait_sec)?;
+        // Retries share one budget, so a retried wait never runs past it.
+        let deadline = Instant::now() + wait;
+        with_retry(self.client().await?, 5, move |c| {
+            let sandbox_id = sandbox_id.clone();
+            let wait = deadline.saturating_duration_since(Instant::now());
+            async move { c.suspend_and_wait(&sandbox_id, wait).await.map(|t| *t) }
+        })
+        .await
+    }
+
+    /// Resume that waits on the server for up to `wait_sec`. Resolves `true`
+    /// when the server answered that the sandbox is running and `false` when
+    /// the wait ran out first.
+    #[napi]
+    pub async fn resume_sandbox_and_wait(
+        &self,
+        sandbox_id: String,
+        wait_sec: f64,
+    ) -> napi::Result<bool> {
+        let wait = duration_from_non_negative_seconds("wait_sec", wait_sec)?;
+        // Retries share one budget, so a retried wait never runs past it.
+        let deadline = Instant::now() + wait;
+        with_retry(self.client().await?, 5, move |c| {
+            let sandbox_id = sandbox_id.clone();
+            let wait = deadline.saturating_duration_since(Instant::now());
+            async move { c.resume_and_wait(&sandbox_id, wait).await.map(|t| *t) }
         })
         .await
     }
