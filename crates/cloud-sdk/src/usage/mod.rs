@@ -27,9 +27,18 @@ pub enum UsageWindow {
     LastDay,
     /// The last 7 days.
     LastWeek,
-    /// The last 30 days, the oldest usage the API serves.
+    /// The last 30 days, the oldest usage the API serves. The window starts
+    /// [`HISTORY_LIMIT_MARGIN`] later so it stays inside that limit.
     Last30Days,
 }
+
+/// How far inside the API's 30-day history limit a 30-day window starts.
+///
+/// The server moves any start older than its own `now - 30d` up to that
+/// limit, and rejects it once it is more than 5 minutes older. Starting a
+/// little later keeps every page of a long read on the same window for this
+/// long.
+pub const HISTORY_LIMIT_MARGIN: Duration = Duration::hours(1);
 
 impl UsageWindow {
     fn lookback_days(self) -> Option<i64> {
@@ -48,11 +57,12 @@ impl UsageWindow {
         let Some(days) = self.lookback_days() else {
             return Vec::new();
         };
+        let mut start = now - Duration::days(days);
+        if self == Self::Last30Days {
+            start += HISTORY_LIMIT_MARGIN;
+        }
         let format = |at: DateTime<Utc>| at.to_rfc3339_opts(SecondsFormat::Millis, true);
-        vec![
-            ("fromDate", format(now - Duration::days(days))),
-            ("toDate", format(now)),
-        ]
+        vec![("fromDate", format(start)), ("toDate", format(now))]
     }
 }
 
@@ -196,6 +206,10 @@ mod tests {
                 ("fromDate", "2026-10-21T12:00:00.000Z".to_string()),
                 ("toDate", "2026-10-28T12:00:00.000Z".to_string()),
             ]
+        );
+        assert_eq!(
+            UsageWindow::Last30Days.range_query(now)[0],
+            ("fromDate", "2026-09-28T13:00:00.000Z".to_string())
         );
     }
 }

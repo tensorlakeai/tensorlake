@@ -6,6 +6,11 @@ export type UsageLookback = "1d" | "7d" | "30d";
 
 const LOOKBACK_DAYS: Record<UsageLookback, number> = { "1d": 1, "7d": 7, "30d": 30 };
 const PAGE_SIZE = 100;
+const DAY_MS = 24 * 60 * 60 * 1000;
+// The server moves any start older than its own `now - 30d` up to that limit
+// and rejects it once it is more than 5 minutes older. A 30-day window starts
+// this much later so every page of a long read stays on the same window.
+const HISTORY_LIMIT_MARGIN_MS = 60 * 60 * 1000;
 
 export interface UsageClientOptions {
   /** Tensorlake API key. Defaults to `TENSORLAKE_API_KEY`. */
@@ -175,8 +180,9 @@ function rangeQuery(last: UsageLookback | undefined): Record<string, string> {
     throw new Error(`last must be one of 1d, 7d, 30d; got ${JSON.stringify(last)}`);
   }
   const now = Date.now();
+  const margin = last === "30d" ? HISTORY_LIMIT_MARGIN_MS : 0;
   return {
-    fromDate: new Date(now - days * 24 * 60 * 60 * 1000).toISOString(),
+    fromDate: new Date(now - days * DAY_MS + margin).toISOString(),
     toDate: new Date(now).toISOString(),
   };
 }
