@@ -18,7 +18,7 @@ async fn rm_cas_name_also_deletes_a_same_named_legacy_image() {
         &["image", "rm", "app"],
         vec![
             introspection(),
-            reply("DELETE", "/images/v4/images/name/app", 204, json!(null)),
+            reply("DELETE", "/images/v4/names/app", 204, json!(null)),
             reply(
                 "GET",
                 "/platform/v1/sandbox-templates/by-name/app",
@@ -39,7 +39,7 @@ async fn rm_cas_name_also_deletes_a_same_named_legacy_image() {
     assert_eq!(
         run.lines(),
         vec![
-            "DELETE /images/v4/images/name/app HTTP/1.1",
+            "DELETE /images/v4/names/app HTTP/1.1",
             "GET /platform/v1/sandbox-templates/by-name/app HTTP/1.1",
             "DELETE /platform/v1/sandbox-templates/sandbox_template_1 HTTP/1.1",
         ]
@@ -61,7 +61,7 @@ async fn rm_cas_name_reports_a_failed_legacy_delete() {
         &["image", "rm", "app"],
         vec![
             introspection(),
-            reply("DELETE", "/images/v4/images/name/app", 204, json!(null)),
+            reply("DELETE", "/images/v4/names/app", 204, json!(null)),
             reply(
                 "GET",
                 "/platform/v1/sandbox-templates/by-name/app",
@@ -100,7 +100,7 @@ async fn rm_cas_name_reports_a_failed_legacy_lookup() {
         &["image", "rm", "app"],
         vec![
             introspection(),
-            reply("DELETE", "/images/v4/images/name/app", 204, json!(null)),
+            reply("DELETE", "/images/v4/names/app", 204, json!(null)),
             reply(
                 "GET",
                 "/platform/v1/sandbox-templates/by-name/app",
@@ -136,11 +136,11 @@ async fn rm_cas_id_warns_about_a_same_named_legacy_image() {
             introspection(),
             reply(
                 "GET",
-                "/images/v4/images/image_abc",
+                "/images/v4/id/image_abc",
                 200,
                 image_record("image_abc", "app"),
             ),
-            reply("DELETE", "/images/v4/images/image_abc", 204, json!(null)),
+            reply("DELETE", "/images/v4/id/image_abc", 204, json!(null)),
             reply(
                 "GET",
                 "/platform/v1/sandbox-templates/by-name/app",
@@ -155,8 +155,8 @@ async fn rm_cas_id_warns_about_a_same_named_legacy_image() {
     assert_eq!(
         run.lines(),
         vec![
-            "GET /images/v4/images/image_abc HTTP/1.1",
-            "DELETE /images/v4/images/image_abc HTTP/1.1",
+            "GET /images/v4/id/image_abc HTTP/1.1",
+            "DELETE /images/v4/id/image_abc HTTP/1.1",
             "GET /platform/v1/sandbox-templates/by-name/app HTTP/1.1",
         ]
     );
@@ -180,7 +180,7 @@ async fn rm_legacy_name_makes_no_extra_request() {
             introspection(),
             reply(
                 "DELETE",
-                "/images/v4/images/name/app",
+                "/images/v4/names/app",
                 404,
                 json!({"error": "name not found"}),
             ),
@@ -198,7 +198,7 @@ async fn rm_legacy_name_makes_no_extra_request() {
     assert_eq!(
         run.lines(),
         vec![
-            "DELETE /images/v4/images/name/app HTTP/1.1",
+            "DELETE /images/v4/names/app HTTP/1.1",
             "DELETE /platform/v1/sandbox-templates/by-name/app HTTP/1.1",
         ]
     );
@@ -218,7 +218,7 @@ async fn rm_mixed_case_name_deletes_the_cas_image_by_its_canonical_name() {
             introspection(),
             reply(
                 "DELETE",
-                "/images/v4/images/name/myproject",
+                "/images/v4/names/myproject",
                 204,
                 json!(null),
             ),
@@ -242,7 +242,7 @@ async fn rm_mixed_case_name_deletes_the_cas_image_by_its_canonical_name() {
     assert_eq!(
         run.lines(),
         vec![
-            "DELETE /images/v4/images/name/myproject HTTP/1.1",
+            "DELETE /images/v4/names/myproject HTTP/1.1",
             "GET /platform/v1/sandbox-templates/by-name/myproject HTTP/1.1",
             "DELETE /platform/v1/sandbox-templates/sandbox_template_1 HTTP/1.1",
         ]
@@ -265,7 +265,7 @@ async fn rm_mixed_case_name_falls_back_to_the_exact_legacy_spelling() {
             introspection(),
             reply(
                 "DELETE",
-                "/images/v4/images/name/myproject",
+                "/images/v4/names/myproject",
                 404,
                 json!({"error": "name not found"}),
             ),
@@ -283,7 +283,7 @@ async fn rm_mixed_case_name_falls_back_to_the_exact_legacy_spelling() {
     assert_eq!(
         run.lines(),
         vec![
-            "DELETE /images/v4/images/name/myproject HTTP/1.1",
+            "DELETE /images/v4/names/myproject HTTP/1.1",
             "DELETE /platform/v1/sandbox-templates/by-name/MyProject HTTP/1.1",
         ]
     );
@@ -299,7 +299,7 @@ async fn describe_mixed_case_name_finds_the_cas_image_then_the_exact_legacy_spel
             introspection(),
             reply(
                 "GET",
-                "/images/v4/images/name/myproject",
+                "/images/v4/names/myproject",
                 200,
                 image_record("image_abc", "myproject"),
             ),
@@ -310,7 +310,7 @@ async fn describe_mixed_case_name_finds_the_cas_image_then_the_exact_legacy_spel
     assert!(cas.output.status.success(), "{}", cas.stderr());
     assert_eq!(
         cas.lines(),
-        vec!["GET /images/v4/images/name/myproject HTTP/1.1"]
+        vec!["GET /images/v4/names/myproject HTTP/1.1"]
     );
     assert!(cas.stdout().contains("image_abc"), "{}", cas.stdout());
 
@@ -320,7 +320,7 @@ async fn describe_mixed_case_name_finds_the_cas_image_then_the_exact_legacy_spel
             introspection(),
             reply(
                 "GET",
-                "/images/v4/images/name/myproject",
+                "/images/v4/names/myproject",
                 404,
                 json!({"error": "name not found"}),
             ),
@@ -338,7 +338,7 @@ async fn describe_mixed_case_name_finds_the_cas_image_then_the_exact_legacy_spel
     assert_eq!(
         legacy.lines(),
         vec![
-            "GET /images/v4/images/name/myproject HTTP/1.1",
+            "GET /images/v4/names/myproject HTTP/1.1",
             "GET /platform/v1/sandbox-templates/by-name/MyProject HTTP/1.1",
         ]
     );
