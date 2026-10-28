@@ -1252,6 +1252,15 @@ export class SandboxClient {
    * claim that is still starting is then waited on the same way.
    */
   async createAndConnect(options?: CreateAndConnectOptions): Promise<Sandbox> {
+    if (
+      options?.poolId != null &&
+      (options.allowUnauthenticatedAccess != null || options.exposedPorts != null)
+    ) {
+      throw new SandboxError(
+        "allowUnauthenticatedAccess and exposedPorts cannot be combined with poolId: " +
+          "pool claims inherit access settings from the pool.",
+      );
+    }
     const opStart = nowMs();
     const requestTimeout =
       options?.requestTimeout ??

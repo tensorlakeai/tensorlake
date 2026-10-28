@@ -1438,6 +1438,32 @@ describe("SandboxClient", () => {
   });
 
   describe("createAndConnect", () => {
+    for (const operation of ["createAndConnect", "Sandbox.create"] as const) {
+      it.each([
+        { allowUnauthenticatedAccess: false },
+        { allowUnauthenticatedAccess: true },
+        { exposedPorts: [] },
+        { exposedPorts: [3000] },
+        { allowUnauthenticatedAccess: false, exposedPorts: [] },
+      ])(`${operation} rejects access overrides before claiming from a pool`, async (access) => {
+        const stub = installNativeStub();
+        const client = SandboxClient.forLocalhost();
+        const options = { poolId: "pool-1", ...access };
+        try {
+          await expect(
+            operation === "Sandbox.create"
+              ? Sandbox.create({ ...options, apiKey: "test-key" })
+              : client.createAndConnect(options),
+          ).rejects.toThrow("cannot be combined with poolId");
+          expect(stub.client.claimSandbox).not.toHaveBeenCalled();
+          expect(stub.client.createSandbox).not.toHaveBeenCalled();
+          expect(stub.client.updateSandbox).not.toHaveBeenCalled();
+        } finally {
+          client.close();
+        }
+      });
+    }
+
     it("threads file systems through a warm-pool claim", async () => {
       const claimSandbox = vi.fn(async () => ({
         traceId: "t",
