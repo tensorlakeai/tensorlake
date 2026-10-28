@@ -1739,7 +1739,9 @@ class Sandbox:
             args: Command arguments
             env: Environment variables
             working_dir: Working directory
-            timeout: Maximum seconds to wait (enforced server-side; None = no limit)
+            timeout: Maximum seconds to wait (enforced server-side; None = no limit).
+                When it expires the daemon SIGKILLs the command's whole process
+                tree, not only the first process.
             user: Process user. Defaults to ``None``, which runs as the image's
                 configured user (the image ``USER`` directive, falling back to
                 root). Pass a username such as ``"root"``, a Docker-style id
@@ -1876,11 +1878,17 @@ class Sandbox:
         *,
         pid: int | str = _PROCESS_ARG_UNSET,
     ) -> Traced[None]:
-        """Kill a process.
+        """Kill a process and everything it started.
+
+        The daemon tears the process down as one unit. An unmanaged process's
+        whole process group is SIGKILLed at once, including children that
+        detached with ``setsid``. For a managed process this stops the whole
+        supervisor (it will not be restarted) gracefully: SIGTERM to the
+        process group, then SIGKILL once the process's ``stop_grace_ms``
+        (default 10 s) has elapsed.
 
         Args:
-            process: PID or process name given on creation. For a managed process this stops
-                the whole supervisor (it will not be restarted).
+            process: PID or process name given on creation.
         """
         seg = _resolve_process_arg(process, pid)
         try:
@@ -1914,7 +1922,12 @@ class Sandbox:
         *,
         pid: int | str = _PROCESS_ARG_UNSET,
     ) -> Traced[SendSignalResponse]:
-        """Send a signal to a process.
+        """Send a signal to a process and everything it started.
+
+        The signal is delivered to the process's whole process group, as a
+        terminal's job control would; SIGKILL also reaps children that
+        detached with ``setsid``. There is no escalation: a process that
+        ignores SIGTERM keeps running.
 
         Args:
             process: PID or process name given on creation.

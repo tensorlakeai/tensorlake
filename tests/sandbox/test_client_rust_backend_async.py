@@ -61,6 +61,8 @@ class _FakeAsyncRustClient:
         self.connect_proxy_calls: list[dict] = []
         self.wait_calls: list[dict] = []
         self.delete_calls: list[str] = []
+        # Whether a waiting suspend or resume answers that it completed.
+        self.lifecycle_settled = True
 
     def close(self):
         return None
@@ -126,6 +128,14 @@ class _FakeAsyncRustClient:
     async def resume_sandbox_async(self, *, sandbox_id):
         self.resume_calls.append(sandbox_id)
         return "trace-resume"
+
+    async def suspend_sandbox_and_wait_async(self, *, sandbox_id, wait_sec):
+        self.suspend_calls.append(sandbox_id)
+        return "trace-suspend", self.lifecycle_settled
+
+    async def resume_sandbox_and_wait_async(self, *, sandbox_id, wait_sec):
+        self.resume_calls.append(sandbox_id)
+        return "trace-resume", self.lifecycle_settled
 
     async def create_snapshot_async(self, *, sandbox_id, snapshot_type=None):
         self.create_snapshot_calls.append((sandbox_id, snapshot_type))
@@ -1592,8 +1602,29 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sandbox._proxy_url, "https://old.sandbox.tensorlake.ai")
         self.assertEqual(sandbox._base_url, "https://old.sandbox.tensorlake.ai")
 
+    async def test_suspend_waits_on_the_server(self):
+        fake = _StatusSequenceRustClient(["running"])
+        client = _make_client(fake)
+
+        result = await client.suspend("sbx-1", wait=True, timeout=2.0)
+
+        self.assertEqual(result.trace_id, "trace-suspend")
+        self.assertEqual(fake.suspend_calls, ["sbx-1"])
+        self.assertEqual(fake.get_calls, 0)
+
+    async def test_resume_waits_on_the_server(self):
+        fake = _StatusSequenceRustClient(["suspended"])
+        client = _make_client(fake)
+
+        result = await client.resume("sbx-1", wait=True, timeout=2.0)
+
+        self.assertEqual(result.trace_id, "trace-resume")
+        self.assertEqual(fake.resume_calls, ["sbx-1"])
+        self.assertEqual(fake.get_calls, 0)
+
     async def test_suspend_polls_until_suspended(self):
         fake = _StatusSequenceRustClient(["running", "suspended"])
+        fake.lifecycle_settled = False
         client = _make_client(fake)
 
         await client.suspend("sbx-1", wait=True, timeout=2.0, poll_interval=0.01)
@@ -1603,12 +1634,40 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
 
     async def test_resume_polls_until_running(self):
         fake = _StatusSequenceRustClient(["suspended", "running"])
+        fake.lifecycle_settled = False
         client = _make_client(fake)
 
         await client.resume("sbx-1", wait=True, timeout=2.0, poll_interval=0.01)
 
         self.assertEqual(fake.resume_calls, ["sbx-1"])
         self.assertGreaterEqual(fake.get_calls, 2)
+
+    async def test_resume_conflict_returns_when_already_running(self):
+        class FakeRustError(Exception):
+            pass
+
+        class _ConflictRustClient(_StatusSequenceRustClient):
+            async def resume_sandbox_and_wait_async(self, *, sandbox_id, wait_sec):
+                raise FakeRustError(("remote_api", 409, "superseded"))
+
+        import tensorlake.sandbox.client as sandbox_client_module
+
+        previous = sandbox_client_module.RustCloudSandboxClientError
+        try:
+            sandbox_client_module.RustCloudSandboxClientError = FakeRustError
+            # Another request resumed the sandbox: the resume succeeded.
+            fake = _ConflictRustClient(["running"])
+            await _make_client(fake).resume("sbx-1", timeout=2.0)
+            self.assertEqual(fake.get_calls, 1)
+
+            # The resume failed: the server's answer is raised.
+            fake = _ConflictRustClient(["suspended"])
+            with self.assertRaises(RemoteAPIError) as raised:
+                await _make_client(fake).resume("sbx-1", timeout=2.0)
+            self.assertEqual(raised.exception.status_code, 409)
+            self.assertEqual(fake.get_calls, 1)
+        finally:
+            sandbox_client_module.RustCloudSandboxClientError = previous
 
     async def test_suspend_maps_404_to_sandbox_not_found(self):
         class FakeRustError(Exception):
@@ -1618,7 +1677,7 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
             def close(self):
                 return None
 
-            async def suspend_sandbox_async(self, *, sandbox_id):
+            async def suspend_sandbox_and_wait_async(self, *, sandbox_id, wait_sec):
                 raise FakeRustError(
                     ("remote_api", 404, f"sandbox {sandbox_id} not found")
                 )
@@ -1643,7 +1702,7 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
             def close(self):
                 return None
 
-            async def resume_sandbox_async(self, *, sandbox_id):
+            async def resume_sandbox_and_wait_async(self, *, sandbox_id, wait_sec):
                 raise FakeRustError(
                     ("remote_api", 404, f"sandbox {sandbox_id} not found")
                 )

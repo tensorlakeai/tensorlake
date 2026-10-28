@@ -105,6 +105,14 @@ class _FakeRustClient:
     def resume_sandbox(self, sandbox_id):
         self.resume_calls.append(sandbox_id)
 
+    def suspend_sandbox_and_wait(self, *, sandbox_id, wait_sec):
+        self.suspend_calls.append(sandbox_id)
+        return "trace-suspend", True
+
+    def resume_sandbox_and_wait(self, *, sandbox_id, wait_sec):
+        self.resume_calls.append(sandbox_id)
+        return "trace-resume", True
+
     def connect_proxy(
         self, *, proxy_url, sandbox_id, routing_hint=None, request_timeout_sec=None
     ):
@@ -1659,6 +1667,51 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         self.assertEqual(fake.resume_calls, ["my-env"])
         self.assertEqual(fake.suspend_calls, [])
 
+    def test_suspend_and_resume_wait_on_the_server(self):
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        fake = _FakeRustClient()
+        # The server's answer settles the wait; nothing polls.
+        fake.get_sandbox_json = lambda *args, **kwargs: self.fail("polled")
+        client._rust_client = fake
+
+        self.assertEqual(client.suspend("my-env").trace_id, "trace-suspend")
+        self.assertEqual(client.resume("my-env").trace_id, "trace-resume")
+
+        self.assertEqual(fake.suspend_calls, ["my-env"])
+        self.assertEqual(fake.resume_calls, ["my-env"])
+
+    def test_suspend_polls_when_the_server_wait_runs_out(self):
+        class _PendingRustClient(_FakeRustClient):
+            def __init__(self):
+                super().__init__()
+                self.statuses = ["suspending", "suspended"]
+                self.wait_secs = []
+
+            def suspend_sandbox_and_wait(self, *, sandbox_id, wait_sec):
+                self.wait_secs.append(wait_sec)
+                return "trace-suspend", False
+
+            def get_sandbox_json(self, sandbox_id):
+                return (
+                    "trace-get-sandbox",
+                    json.dumps(
+                        {
+                            **json.loads(_sandbox_info_json(sandbox_id)),
+                            "status": self.statuses.pop(0),
+                        }
+                    ),
+                )
+
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        fake = _PendingRustClient()
+        client._rust_client = fake
+
+        result = client.suspend("my-env", timeout=2.0, poll_interval=0.01)
+
+        self.assertEqual(result.trace_id, "trace-suspend")
+        self.assertEqual(fake.wait_secs, [2.0])
+        self.assertEqual(fake.statuses, [])
+
     def test_handle_resume_wait_rebinds_proxy_from_fresh_info(self):
         class _ResumeRoutingRustClient(_FakeRustClient):
             def __init__(self):
@@ -1820,7 +1873,7 @@ class TestSandboxClientRustBackend(unittest.TestCase):
             def close(self):
                 return None
 
-            def suspend_sandbox(self, sandbox_id):
+            def suspend_sandbox_and_wait(self, *, sandbox_id, wait_sec):
                 raise FakeRustError(
                     ("remote_api", 404, f"sandbox {sandbox_id} not found")
                 )
@@ -1846,7 +1899,7 @@ class TestSandboxClientRustBackend(unittest.TestCase):
             def close(self):
                 return None
 
-            def resume_sandbox(self, sandbox_id):
+            def resume_sandbox_and_wait(self, *, sandbox_id, wait_sec):
                 raise FakeRustError(
                     ("remote_api", 404, f"sandbox {sandbox_id} not found")
                 )

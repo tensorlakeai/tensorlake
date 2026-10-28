@@ -963,6 +963,80 @@ async fn create_and_wait_caps_the_response_grace() {
 }
 
 #[tokio::test]
+async fn suspend_and_resume_wait_on_the_server() {
+    let (url, server) = scripted_server(vec![(200, ""), (202, ""), (200, ""), (409, "")]).await;
+    let client = ClientBuilder::new(&url)
+        .timeout(Duration::from_secs(300))
+        .build()
+        .expect("build client");
+    let sandboxes = SandboxesClient::new(client, "default", true);
+
+    let suspended = sandboxes
+        .suspend_and_wait("sbx-1", Duration::from_secs(10))
+        .await
+        .expect("suspended");
+    assert!(*suspended, "200 means the sandbox is suspended");
+    let pending = sandboxes
+        .suspend_and_wait("sbx-1", Duration::from_secs(300))
+        .await
+        .expect("still suspending");
+    assert!(!*pending, "202 means the wait ran out first");
+    let resumed = sandboxes
+        .resume_and_wait("sbx-1", Duration::from_millis(1500))
+        .await
+        .expect("resumed");
+    assert!(*resumed);
+    let error = sandboxes
+        .resume_and_wait("sbx-1", Duration::from_secs(10))
+        .await
+        .expect_err("a failed resume is an error");
+    assert!(
+        matches!(error, SdkError::ServerError { status, .. } if status == reqwest::StatusCode::CONFLICT),
+        "{error:?}"
+    );
+
+    let requests = server.await.expect("server join");
+    let lines: Vec<&str> = requests.iter().map(|r| request_line(r)).collect();
+    assert!(
+        lines[0].contains("/sandboxes/sbx-1/suspend?wait_ms=10000 "),
+        "{}",
+        lines[0]
+    );
+    // The server holds a lifecycle request open for at most 30 s.
+    assert!(
+        lines[1].contains("/sandboxes/sbx-1/suspend?wait_ms=30000 "),
+        "{}",
+        lines[1]
+    );
+    assert!(
+        lines[2].contains("/sandboxes/sbx-1/resume?wait_ms=1500 "),
+        "{}",
+        lines[2]
+    );
+}
+
+#[tokio::test]
+async fn lifecycle_wait_leaves_a_response_grace_before_the_request_timeout() {
+    let (url, server) = scripted_server(vec![(200, "")]).await;
+    let client = ClientBuilder::new(&url)
+        .timeout(Duration::from_secs(8))
+        .build()
+        .expect("build client");
+    let sandboxes = SandboxesClient::new(client, "default", true);
+    sandboxes
+        .resume_and_wait("sbx-1", Duration::from_secs(300))
+        .await
+        .expect("resumed");
+    let requests = server.await.expect("server join");
+    // A quarter of the 8 s request timeout is left for the answer.
+    assert!(
+        request_line(&requests[0]).contains("/sandboxes/sbx-1/resume?wait_ms=6000 "),
+        "{}",
+        requests[0]
+    );
+}
+
+#[tokio::test]
 async fn create_no_wait_accepts_the_legacy_blocking_shape_from_older_servers() {
     // A server that predates `wait: false` ignores it and answers the
     // blocking create's shape, possibly already running or timed out.
