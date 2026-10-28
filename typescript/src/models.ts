@@ -218,6 +218,10 @@ export interface CreateSandboxOptions {
   allowOut?: string[];
   denyOut?: string[];
   snapshotId?: string;
+  /** Whether exposed user ports are reachable without Tensorlake auth. Defaults to false for fresh creates; snapshot restores inherit it when omitted. */
+  allowUnauthenticatedAccess?: boolean;
+  /** User ports routable through the sandbox proxy. Port 9501 is reserved. Snapshot restores inherit ports when omitted; [] clears them. Does not enable unauthenticated access. */
+  exposedPorts?: number[];
   /** Optional name for the sandbox. Named sandboxes support suspend/resume. When absent the sandbox is ephemeral. */
   name?: string;
   /** File systems to mount on fresh creation or warm-pool claim, each at its own absolute, unique guest mount path. */

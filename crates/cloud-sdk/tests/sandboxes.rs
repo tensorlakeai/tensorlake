@@ -830,6 +830,8 @@ fn create_request() -> CreateSandboxRequest {
         entrypoint: None,
         network: None,
         snapshot_id: None,
+        allow_unauthenticated_access: None,
+        exposed_ports: None,
         name: Some("coreauto-run-17".to_string()),
         file_systems: Vec::new(),
         wait: None,
@@ -889,6 +891,58 @@ async fn blocking_create_omits_wait_and_an_unset_bound() {
     let body = request_body(&requests[0]);
     assert!(!body.contains("\"wait\""), "{body}");
     assert!(!body.contains("max_pending_secs"), "{body}");
+    assert!(!body.contains("allow_unauthenticated_access"), "{body}");
+    assert!(!body.contains("exposed_ports"), "{body}");
+}
+
+#[tokio::test]
+async fn create_forwards_proxy_access_settings_from_native_payloads() {
+    for no_wait in [false, true] {
+        for (payload, public, ports) in [
+            (
+                r#"{"exposed_ports":[3000,8080],"allow_unauthenticated_access":true}"#,
+                Some(true),
+                vec![3000, 8080],
+            ),
+            (
+                r#"{"snapshot_id":"snap-1","exposed_ports":[],"allow_unauthenticated_access":false}"#,
+                Some(false),
+                vec![],
+            ),
+            (r#"{"exposed_ports":[8080]}"#, None, vec![8080]),
+        ] {
+            let (url, server) =
+                scripted_server(vec![(200, r#"{"sandbox_id":"sbx-1","status":"running"}"#)]).await;
+            let client = ClientBuilder::new(&url).build().expect("build client");
+            let sandboxes = SandboxesClient::new(client, "default", false);
+            // Node deserializes the TypeScript payload before the shared Rust
+            // client serializes it again for HTTP. Exercise both boundaries.
+            let request: CreateSandboxRequest =
+                serde_json::from_str(payload).expect("native payload");
+            if no_wait {
+                sandboxes
+                    .create_no_wait(&request)
+                    .await
+                    .expect("queued create");
+            } else {
+                sandboxes.create(&request).await.expect("blocking create");
+            }
+            let requests = server.await.expect("server join");
+            assert_eq!(requests.len(), 1);
+            assert_eq!(request_line(&requests[0]), "POST /sandboxes HTTP/1.1");
+            let body: serde_json::Value =
+                serde_json::from_str(request_body(&requests[0])).expect("HTTP body");
+            assert_eq!(
+                body.get("allow_unauthenticated_access")
+                    .and_then(|value| value.as_bool()),
+                public
+            );
+            assert_eq!(body["exposed_ports"], serde_json::to_value(ports).unwrap());
+            if public.is_none() {
+                assert!(body.get("allow_unauthenticated_access").is_none());
+            }
+        }
+    }
 }
 
 #[tokio::test]

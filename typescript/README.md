@@ -29,6 +29,31 @@ without generating diagnostic reports. For a nonstandard or statically linked No
 executable, set `TENSORLAKE_NODE_LIBC=gnu` or `TENSORLAKE_NODE_LIBC=musl` before using
 the SDK.
 
+## Expose ports when creating a sandbox
+
+Set `exposedPorts` in the creation options to configure HTTP access through the
+sandbox proxy in the initial request:
+
+```ts
+import { Sandbox } from "@tensorlakeai/tensorlake";
+
+const sandbox = await Sandbox.create({
+  exposedPorts: [3000, 8080],
+  allowUnauthenticatedAccess: true,
+});
+```
+
+Set `allowUnauthenticatedAccess: true` only when the ports should be publicly
+accessible. Omitting it keeps authentication required for a fresh sandbox.
+Ports must be integers from 1 to 65535, excluding management port 9501;
+duplicates are removed. These options also work with `SandboxClient.create()`,
+`createAndConnect()`, and `wait: false`, without a follow-up update request.
+Snapshot restores inherit both settings when omitted. Pass `exposedPorts: []`
+to clear inherited ports, or `allowUnauthenticatedAccess: false` to require
+authentication.
+
+## Applications
+
 ```ts
 import { registerApplication, registerFunction } from "@tensorlakeai/tensorlake/applications";
 

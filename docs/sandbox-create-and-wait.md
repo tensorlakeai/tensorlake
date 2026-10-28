@@ -44,6 +44,26 @@ an HTTP 409) and resolve it with `get_or_create`.
 
 ## Python
 
+Set proxy access when creating a sandbox with either wait mode:
+
+```python
+from tensorlake.sandbox import Sandbox
+
+sandbox = Sandbox.create(
+    exposed_ports=[3000, 8080],
+    allow_unauthenticated_access=False,
+)
+```
+
+These options also work with `AsyncSandbox.create`, both clients' `create`
+and `create_and_connect` methods, and `get_or_create` when it creates a new
+sandbox. Omitted values (or `None`) use server defaults for fresh sandboxes
+and inherit snapshot settings on restore. Explicit `False` requires
+authentication, and `[]` exposes no user ports. Ports must be integers from
+1 to 65535, excluding reserved port 9501; the SDK sorts and deduplicates them.
+Neither option can be combined with `pool_id`: pool claims inherit access
+settings from the pool.
+
 ```python
 from tensorlake.sandbox import Sandbox, SandboxPending, SandboxError
 
@@ -113,6 +133,10 @@ the constants `TERMINATION_REASON_NO_CAPACITY` / `TERMINATION_REASON_CANCELLED`.
 `SandboxInfo` and `CreateSandboxResponse` gained `pending_reason`.
 
 ## TypeScript
+
+Creation options include `exposedPorts` and `allowUnauthenticatedAccess` for
+configuring sandbox proxy access in the initial request, with either wait mode.
+See the [TypeScript port exposure example](../typescript/README.md#expose-ports-when-creating-a-sandbox).
 
 ```typescript
 import { Sandbox, SandboxPending, SandboxError } from "@tensorlakeai/tensorlake";

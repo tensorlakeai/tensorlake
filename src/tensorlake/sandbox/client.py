@@ -293,6 +293,8 @@ def _build_create_request(
     max_pending_secs: int | None,
     wait: bool | None = None,
     auto_resume: bool | None = None,
+    allow_unauthenticated_access: bool | None = None,
+    exposed_ports: list[int] | None = None,
 ) -> CreateSandboxRequest:
     """Validate create arguments and build the wire request. Shared by the
     sync and async clients so both send byte-identical bodies. ``wait`` is
@@ -335,6 +337,10 @@ def _build_create_request(
         entrypoint=entrypoint,
         network=network,
         snapshot_id=snapshot_id,
+        allow_unauthenticated_access=allow_unauthenticated_access,
+        exposed_ports=(
+            _normalize_user_ports(exposed_ports) if exposed_ports is not None else None
+        ),
         name=name,
         file_systems=file_systems,
         wait=False if wait is False else None,
@@ -550,6 +556,9 @@ class SandboxClient:
         max_pending_secs: int | None = None,
         wait: Literal[True] = True,
         auto_resume: bool | None = None,
+        *,
+        allow_unauthenticated_access: bool | None = None,
+        exposed_ports: list[int] | None = None,
     ) -> Traced[CreateSandboxResponse]: ...
 
     @overload
@@ -574,6 +583,8 @@ class SandboxClient:
         *,
         wait: Literal[False],
         auto_resume: bool | None = None,
+        allow_unauthenticated_access: bool | None = None,
+        exposed_ports: list[int] | None = None,
     ) -> PendingSandbox: ...
 
     def create(
@@ -596,6 +607,9 @@ class SandboxClient:
         max_pending_secs: int | None = None,
         wait: bool = True,
         auto_resume: bool | None = None,
+        *,
+        allow_unauthenticated_access: bool | None = None,
+        exposed_ports: list[int] | None = None,
     ) -> "Traced[CreateSandboxResponse] | PendingSandbox":
         """Create a new standalone sandbox.
 
@@ -663,6 +677,14 @@ class SandboxClient:
                 more is recommended for capacity waits.
             wait: ``True`` (default) for the blocking create; ``False`` to
                 return a :class:`PendingSandbox` at once.
+            allow_unauthenticated_access: Allow proxy access without
+                authentication when True; require authentication when False.
+                None uses server defaults or inherits the snapshot setting.
+            exposed_ports: User ports to expose through the sandbox proxy.
+                Integers from 1 to 65535, excluding reserved port 9501;
+                duplicates are removed and ports sorted. None uses server
+                defaults or inherits the snapshot setting; [] exposes no
+                user ports.
 
         Returns:
             Traced[CreateSandboxResponse] with ``wait=True``;
@@ -689,6 +711,8 @@ class SandboxClient:
                 allow_out=allow_out,
                 deny_out=deny_out,
                 snapshot_id=snapshot_id,
+                allow_unauthenticated_access=allow_unauthenticated_access,
+                exposed_ports=exposed_ports,
                 name=name,
                 file_systems=file_systems,
                 gpu=gpu,
@@ -708,6 +732,8 @@ class SandboxClient:
             allow_out=allow_out,
             deny_out=deny_out,
             snapshot_id=snapshot_id,
+            allow_unauthenticated_access=allow_unauthenticated_access,
+            exposed_ports=exposed_ports,
             name=name,
             file_systems=file_systems,
             gpu=gpu,
@@ -766,6 +792,9 @@ class SandboxClient:
         request_timeout: float | None = None,
         owns_sandbox: bool = False,
         auto_resume: bool | None = None,
+        *,
+        allow_unauthenticated_access: bool | None = None,
+        exposed_ports: list[int] | None = None,
     ) -> PendingSandbox:
         """Send the create with ``wait=False`` and return the pending handle,
         bound to this client so ``ready()`` / ``status()`` work."""
@@ -782,6 +811,8 @@ class SandboxClient:
             allow_out=allow_out,
             deny_out=deny_out,
             snapshot_id=snapshot_id,
+            allow_unauthenticated_access=allow_unauthenticated_access,
+            exposed_ports=exposed_ports,
             name=name,
             file_systems=file_systems,
             gpu=gpu,
@@ -2165,6 +2196,9 @@ class SandboxClient:
         cancel_on_timeout: bool = False,
         poll_interval: float = DEFAULT_WAIT_POLL_INTERVAL_SEC,
         auto_resume: bool | None = None,
+        *,
+        allow_unauthenticated_access: bool | None = None,
+        exposed_ports: list[int] | None = None,
     ) -> "Sandbox":
         """Create a sandbox, wait for it to start, and return a connected Sandbox.
 
@@ -2238,6 +2272,11 @@ class SandboxClient:
                 leave the sandbox queued.
             poll_interval: Seconds between readiness polls once the
                 server's own wait has run out (default 2).
+            allow_unauthenticated_access: Proxy authentication setting; see
+                :meth:`create`. Cannot be combined with ``pool_id`` because
+                pool claims inherit access settings from the pool.
+            exposed_ports: User ports to expose; see :meth:`create`.
+                Cannot be combined with ``pool_id``, including an empty list.
 
         Returns:
             Connected Sandbox instance (auto-terminates in context manager)
@@ -2246,9 +2285,17 @@ class SandboxClient:
             SandboxPending: The wait ran out while the sandbox was still
                 pending (and ``cancel_on_timeout`` is False).
             SandboxError: If the sandbox fails to start; ``reason`` carries
-                the server's reason, such as ``no_capacity``.
+                the server's reason, such as ``no_capacity``. Also raised
+                when access overrides are combined with ``pool_id``.
             SandboxConnectionError: If the server is unreachable
         """
+        if pool_id is not None and (
+            allow_unauthenticated_access is not None or exposed_ports is not None
+        ):
+            raise SandboxError(
+                "allow_unauthenticated_access and exposed_ports cannot be combined "
+                "with pool_id: pool claims inherit access settings from the pool."
+            )
         wait_timeout = (
             request_timeout
             if request_timeout is not None
@@ -2285,6 +2332,8 @@ class SandboxClient:
                 allow_out=allow_out,
                 deny_out=deny_out,
                 snapshot_id=snapshot_id,
+                allow_unauthenticated_access=allow_unauthenticated_access,
+                exposed_ports=exposed_ports,
                 name=name,
                 file_systems=file_systems,
                 gpu=gpu,
