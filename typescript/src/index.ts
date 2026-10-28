@@ -8,6 +8,17 @@ export { TcpTunnel } from "./tunnel.js";
 export { CloudClient } from "./cloud-client.js";
 export { APIClient } from "./api-client.js";
 export { RepositoryClient } from "./repositories.js";
+export { UsageClient } from "./usage.js";
+export type {
+  IncludedUsage,
+  ResourceUsage,
+  SandboxUsage,
+  UsageCharge,
+  UsageClientOptions,
+  UsageLookback,
+  UsageReadOptions,
+  UsageSummary,
+} from "./usage.js";
 export { RepositoryMount } from "./repository-mount.js";
 export type {
   RepositoryMountOptions,

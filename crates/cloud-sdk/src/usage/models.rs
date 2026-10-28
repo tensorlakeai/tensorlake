@@ -1,0 +1,164 @@
+//! Sandbox usage responses.
+//!
+//! Money amounts are integer minor currency units (for example cents), and
+//! quantities and compute units are decimal strings. Both stay strings so
+//! callers never lose precision to floating point.
+
+use serde::{Deserialize, Serialize};
+
+/// An amount of money in minor currency units.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageAmount {
+    pub currency: String,
+    pub amount_minor: String,
+}
+
+/// The metered usage charge split across resources.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageChargeResources {
+    pub cpu_amount_minor: String,
+    pub memory_amount_minor: String,
+    pub sandbox_storage_amount_minor: String,
+    pub snapshot_storage_amount_minor: String,
+}
+
+/// Metered usage for the window, excluding subscription fees and tax.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageCharge {
+    pub currency: String,
+    pub amount_minor: String,
+    pub resources: UsageChargeResources,
+}
+
+/// Plan allowance consumption, valued at the overage rate.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IncludedUsage {
+    pub currency: String,
+    pub included_amount_minor: String,
+    pub period_used_amount_minor: String,
+    pub range_usage_amount_minor: String,
+    pub period_start: String,
+    pub period_end: String,
+}
+
+/// Compute units used by one project.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectComputeUnits {
+    pub project_id: String,
+    pub project_name: String,
+    pub compute_units: String,
+}
+
+/// Organization usage totals for a window.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageSummary {
+    pub window_start: String,
+    pub window_end: String,
+    pub compute_units: String,
+    /// Null when the organization has no metered price.
+    pub usage_charge: Option<UsageCharge>,
+    #[serde(default)]
+    pub included_usage: Option<IncludedUsage>,
+    /// Usage valued at the overage rate before the plan allowance.
+    #[serde(default)]
+    pub usage_value: Option<UsageCharge>,
+    pub running_sandboxes: u64,
+    pub projects: Vec<ProjectComputeUnits>,
+}
+
+/// Whether an attributed charge comes from a finalized invoice or from the
+/// current price.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageChargeBasis {
+    Invoice,
+    CurrentPriceEstimate,
+    #[serde(other)]
+    Unknown,
+}
+
+/// A share of the organization's pooled usage charge.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttributedUsageCharge {
+    pub currency: String,
+    pub amount_minor: String,
+    pub basis: UsageChargeBasis,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageProjectRef {
+    pub project_id: String,
+    pub project_name: String,
+}
+
+/// Sandbox usage totals for one project.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectSandboxUsage {
+    /// Null for usage whose project no longer exists.
+    pub project: Option<UsageProjectRef>,
+    pub sandbox_count: u64,
+    pub attributed_amount_minor: Option<String>,
+    #[serde(default)]
+    pub usage_value_amount_minor: Option<String>,
+}
+
+/// Usage of one resource by a sandbox.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttributedResourceUsage {
+    pub quantity: String,
+    /// `vCPU-hour`, `GiB-hour` or `GiB`.
+    pub unit: String,
+    pub attributed_amount_minor: Option<String>,
+    #[serde(default)]
+    pub usage_value_amount_minor: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxResourceUsage {
+    pub cpu: AttributedResourceUsage,
+    pub memory: AttributedResourceUsage,
+    pub sandbox_storage: AttributedResourceUsage,
+    pub snapshot_storage: AttributedResourceUsage,
+    pub network_egress: AttributedResourceUsage,
+}
+
+/// Usage and attributed charge of one sandbox.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxUsage {
+    pub sandbox_id: String,
+    pub project: Option<UsageProjectRef>,
+    pub attributed_amount_minor: Option<String>,
+    #[serde(default)]
+    pub usage_value_amount_minor: Option<String>,
+    pub resources: SandboxResourceUsage,
+}
+
+/// One page of per-sandbox usage.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxUsagePage {
+    pub window_start: String,
+    pub window_end: String,
+    /// Total for every matching sandbox, not only this page.
+    pub attributed_usage_charge: Option<AttributedUsageCharge>,
+    #[serde(default)]
+    pub included_usage: Option<IncludedUsage>,
+    #[serde(default)]
+    pub attributed_usage_value: Option<UsageAmount>,
+    pub projects: Vec<ProjectSandboxUsage>,
+    pub sandboxes: Vec<SandboxUsage>,
+    pub total: u64,
+    pub next_cursor: Option<u64>,
+}

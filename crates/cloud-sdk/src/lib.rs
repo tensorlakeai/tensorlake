@@ -81,6 +81,7 @@ pub mod sandbox_templates;
 pub mod sandboxes;
 pub mod secrets;
 pub mod sse;
+pub mod usage;
 use applications::*;
 use artifact_storage::*;
 use cron::*;
@@ -88,6 +89,7 @@ use images::*;
 use sandbox_templates::*;
 use sandboxes::*;
 use secrets::*;
+use usage::UsageClient;
 
 mod client;
 pub use client::{Client, ClientBuilder, ReadRetryConfig, Traced};
@@ -437,6 +439,11 @@ impl Sdk {
     /// Platform API routes and does not need organization/project discovery.
     pub fn sandbox_templates_for_api_key(&self) -> SandboxTemplatesClient {
         SandboxTemplatesClient::new_api_key_scoped(self.client.clone())
+    }
+
+    /// Get a client for an organization's sandbox usage and attributed cost.
+    pub fn usage(&self, organization_id: &str) -> UsageClient {
+        UsageClient::new(self.client.clone(), organization_id)
     }
 
     /// Get a client for managing sandbox lifecycle, pools, and snapshots.
