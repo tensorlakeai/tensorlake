@@ -334,6 +334,10 @@ pub struct FileSystemMount {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CreateSandboxRequest {
+    /// Whether proxy traffic may wake a suspended sandbox. False requires a name.
+    /// Omitted on create defaults to true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_resume: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
     /// Resource overrides for the new sandbox. Snapshot restores may leave
@@ -418,6 +422,11 @@ pub struct SandboxResourceResizeInfo {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UpdateSandboxRequest {
+    /// Whether proxy traffic may wake a suspended sandbox. False requires a name.
+    /// Omitted leaves it unchanged. May be patched while suspended without waking
+    /// the sandbox, but cannot be combined with resources.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_resume: Option<bool>,
     /// Standalone live resize; omitted dimensions retain their confirmed allocation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<ResizeSandboxResources>,
@@ -721,8 +730,15 @@ pub struct SandboxAccepted {
     pub error_details: Option<serde_json::Value>,
 }
 
+fn default_auto_resume() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SandboxInfo {
+    /// Whether proxy traffic may wake this sandbox. Older servers default to true.
+    #[serde(default = "default_auto_resume")]
+    pub auto_resume: bool,
     /// The runtime the server chose for this sandbox: `firecracker`,
     /// `cloud-hypervisor` or `gvisor`. Informational only; it is never sent
     /// and is `firecracker` when the server recorded none.

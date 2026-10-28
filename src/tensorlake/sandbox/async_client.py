@@ -261,6 +261,7 @@ class AsyncSandboxClient:
         gpu: GpuRequest | None = None,
         max_pending_secs: int | None = None,
         wait: Literal[True] = True,
+        auto_resume: bool | None = None,
     ) -> Traced[CreateSandboxResponse]: ...
 
     @overload
@@ -284,6 +285,7 @@ class AsyncSandboxClient:
         max_pending_secs: int | None = None,
         *,
         wait: Literal[False],
+        auto_resume: bool | None = None,
     ) -> AsyncPendingSandbox: ...
 
     async def create(
@@ -305,6 +307,7 @@ class AsyncSandboxClient:
         gpu: GpuRequest | None = None,
         max_pending_secs: int | None = None,
         wait: bool = True,
+        auto_resume: bool | None = None,
     ) -> "Traced[CreateSandboxResponse] | AsyncPendingSandbox":
         """Create a new standalone sandbox.
 
@@ -334,6 +337,7 @@ class AsyncSandboxClient:
                 file_systems=file_systems,
                 gpu=gpu,
                 max_pending_secs=max_pending_secs,
+                auto_resume=auto_resume,
             )
         request_model = _build_create_request(
             image=image,
@@ -352,6 +356,7 @@ class AsyncSandboxClient:
             file_systems=file_systems,
             gpu=gpu,
             max_pending_secs=max_pending_secs,
+            auto_resume=auto_resume,
         )
         try:
             trace_id, response_json = await self._rust_client.create_sandbox_async(
@@ -405,6 +410,7 @@ class AsyncSandboxClient:
         proxy_url: str | None = None,
         request_timeout: float | None = None,
         owns_sandbox: bool = False,
+        auto_resume: bool | None = None,
     ) -> AsyncPendingSandbox:
         """Send the create with ``wait=False`` and return the pending handle,
         bound to this client so ``ready()`` / ``status()`` work."""
@@ -425,6 +431,7 @@ class AsyncSandboxClient:
             file_systems=file_systems,
             gpu=gpu,
             max_pending_secs=max_pending_secs,
+            auto_resume=auto_resume,
             wait=False,
         )
         try:
@@ -667,9 +674,10 @@ class AsyncSandboxClient:
         poll_interval: float = 1.0,
         allow_unauthenticated_access: bool | None = None,
         exposed_ports: list[int] | None = None,
+        auto_resume: bool | None = None,
         network: NetworkConfig | ClearNetworkPolicy | None = None,
     ) -> Traced[SandboxInfo]:
-        """Update a running sandbox's properties.
+        """Update sandbox properties, including auto_resume while suspended.
 
         Resource names and units match create. Which runtimes and dimensions
         support a live resize is decided by the server, whose policy error is
@@ -701,6 +709,9 @@ class AsyncSandboxClient:
                 be positive. Ignored when wait is False.
             allow_unauthenticated_access: Whether exposed user ports should be
                 reachable without Tensorlake auth.
+            auto_resume: Omit to keep the current flag. False requires a named
+                sandbox. May be changed while suspended without waking it;
+                cannot be combined with resource resizing.
             exposed_ports: User ports routable through the sandbox proxy.
                 Port 9501 is reserved for sandbox management.
             network: Egress network policy. Omit to leave it unchanged, pass a
@@ -728,6 +739,7 @@ class AsyncSandboxClient:
                 name is not None
                 or allow_unauthenticated_access is not None
                 or exposed_ports is not None
+                or auto_resume is not None
                 or network is not None
             ):
                 raise SandboxError(
@@ -742,6 +754,7 @@ class AsyncSandboxClient:
             name is None
             and allow_unauthenticated_access is None
             and normalized_ports is None
+            and auto_resume is None
             and network_config is None
             and not clearing_network
             and resources is None
@@ -752,6 +765,7 @@ class AsyncSandboxClient:
             name=name,
             allow_unauthenticated_access=allow_unauthenticated_access,
             exposed_ports=normalized_ports,
+            auto_resume=auto_resume,
             network=network_config,
         )
         # exclude_none omits an unset policy (keep); CLEAR must reach the wire
@@ -1462,6 +1476,7 @@ class AsyncSandboxClient:
         max_pending_secs: int | None = None,
         cancel_on_timeout: bool = False,
         poll_interval: float = DEFAULT_WAIT_POLL_INTERVAL_SEC,
+        auto_resume: bool | None = None,
     ) -> "AsyncSandbox":
         """Create a sandbox, wait for it to start, and return a connection.
 
@@ -1485,6 +1500,8 @@ class AsyncSandboxClient:
         request_client = self._with_request_timeout(wait_timeout)
         deadline = asyncio.get_running_loop().time() + wait_timeout
 
+        if pool_id is not None and auto_resume is not None:
+            raise SandboxError("auto_resume cannot be set when claiming from a pool")
         requested_name = None if pool_id is not None else name
         if pool_id is not None:
             result = await request_client.claim(pool_id, file_systems=file_systems)
@@ -1509,6 +1526,7 @@ class AsyncSandboxClient:
                 file_systems=file_systems,
                 gpu=gpu,
                 max_pending_secs=max_pending_secs,
+                auto_resume=auto_resume,
             )
         if result.status == SandboxStatus.RUNNING:
             sandbox = await request_client.connect(

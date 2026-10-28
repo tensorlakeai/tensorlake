@@ -292,6 +292,7 @@ def _build_create_request(
     gpu: GpuRequest | None,
     max_pending_secs: int | None,
     wait: bool | None = None,
+    auto_resume: bool | None = None,
 ) -> CreateSandboxRequest:
     """Validate create arguments and build the wire request. Shared by the
     sync and async clients so both send byte-identical bodies. ``wait`` is
@@ -338,6 +339,7 @@ def _build_create_request(
         file_systems=file_systems,
         wait=False if wait is False else None,
         max_pending_secs=max_pending_secs,
+        auto_resume=auto_resume,
     )
 
 
@@ -547,6 +549,7 @@ class SandboxClient:
         gpu: GpuRequest | None = None,
         max_pending_secs: int | None = None,
         wait: Literal[True] = True,
+        auto_resume: bool | None = None,
     ) -> Traced[CreateSandboxResponse]: ...
 
     @overload
@@ -570,6 +573,7 @@ class SandboxClient:
         max_pending_secs: int | None = None,
         *,
         wait: Literal[False],
+        auto_resume: bool | None = None,
     ) -> PendingSandbox: ...
 
     def create(
@@ -591,6 +595,7 @@ class SandboxClient:
         gpu: GpuRequest | None = None,
         max_pending_secs: int | None = None,
         wait: bool = True,
+        auto_resume: bool | None = None,
     ) -> "Traced[CreateSandboxResponse] | PendingSandbox":
         """Create a new standalone sandbox.
 
@@ -647,6 +652,8 @@ class SandboxClient:
                 suspend/resume. When absent the sandbox is ephemeral.
             file_systems: File systems to mount into the sandbox
                 at boot, each at its own absolute, unique guest mount path.
+            auto_resume: Whether proxy traffic can wake a suspended sandbox.
+                None defaults to True on create. False requires a named sandbox.
             max_pending_secs: Longest the sandbox may wait for capacity
                 before the server fails it with reason ``no_capacity``.
                 ``0`` fails at once when it cannot be placed; ``None`` (the
@@ -686,6 +693,7 @@ class SandboxClient:
                 file_systems=file_systems,
                 gpu=gpu,
                 max_pending_secs=max_pending_secs,
+                auto_resume=auto_resume,
             )
         request_model = _build_create_request(
             image=image,
@@ -704,6 +712,7 @@ class SandboxClient:
             file_systems=file_systems,
             gpu=gpu,
             max_pending_secs=max_pending_secs,
+            auto_resume=auto_resume,
         )
         try:
             trace_id, response_json = self._rust_client.create_sandbox(
@@ -756,6 +765,7 @@ class SandboxClient:
         proxy_url: str | None = None,
         request_timeout: float | None = None,
         owns_sandbox: bool = False,
+        auto_resume: bool | None = None,
     ) -> PendingSandbox:
         """Send the create with ``wait=False`` and return the pending handle,
         bound to this client so ``ready()`` / ``status()`` work."""
@@ -776,6 +786,7 @@ class SandboxClient:
             file_systems=file_systems,
             gpu=gpu,
             max_pending_secs=max_pending_secs,
+            auto_resume=auto_resume,
             wait=False,
         )
         try:
@@ -1094,9 +1105,10 @@ class SandboxClient:
         poll_interval: float = 1.0,
         allow_unauthenticated_access: bool | None = None,
         exposed_ports: list[int] | None = None,
+        auto_resume: bool | None = None,
         network: NetworkConfig | ClearNetworkPolicy | None = None,
     ) -> Traced[SandboxInfo]:
-        """Update a running sandbox's properties.
+        """Update sandbox properties, including auto_resume while suspended.
 
         Resource names and units match create. Which runtimes and dimensions
         support a live resize is decided by the server, whose policy error is
@@ -1128,6 +1140,9 @@ class SandboxClient:
                 be positive. Ignored when wait is False.
             allow_unauthenticated_access: Whether exposed user ports should be
                 reachable without Tensorlake auth.
+            auto_resume: Omit to keep the current flag. False requires a named
+                sandbox. May be changed while suspended without waking it;
+                cannot be combined with resource resizing.
             exposed_ports: User ports routable through the sandbox proxy.
                 Port 9501 is reserved for sandbox management.
             network: Egress network policy. Omit to leave it unchanged, pass a
@@ -1155,6 +1170,7 @@ class SandboxClient:
                 name is not None
                 or allow_unauthenticated_access is not None
                 or exposed_ports is not None
+                or auto_resume is not None
                 or network is not None
             ):
                 raise SandboxError(
@@ -1169,6 +1185,7 @@ class SandboxClient:
             name is None
             and allow_unauthenticated_access is None
             and normalized_ports is None
+            and auto_resume is None
             and network_config is None
             and not clearing_network
             and resources is None
@@ -1180,6 +1197,7 @@ class SandboxClient:
             name=name,
             allow_unauthenticated_access=allow_unauthenticated_access,
             exposed_ports=normalized_ports,
+            auto_resume=auto_resume,
             network=network_config,
         )
         # exclude_none omits an unset policy (keep); CLEAR must reach the wire
@@ -2146,6 +2164,7 @@ class SandboxClient:
         max_pending_secs: int | None = None,
         cancel_on_timeout: bool = False,
         poll_interval: float = DEFAULT_WAIT_POLL_INTERVAL_SEC,
+        auto_resume: bool | None = None,
     ) -> "Sandbox":
         """Create a sandbox, wait for it to start, and return a connected Sandbox.
 
@@ -2209,6 +2228,8 @@ class SandboxClient:
             file_systems: File systems to mount into the sandbox
                 at boot or warm-pool claim, each at its own absolute, unique
                 guest mount path.
+            auto_resume: Whether proxy traffic can wake a suspended sandbox.
+                None defaults to True on create. False requires a named sandbox.
             max_pending_secs: Server-side bound on the capacity wait; see
                 :meth:`create`. Unset waits indefinitely.
             cancel_on_timeout: Delete the sandbox when ``request_timeout``
@@ -2242,6 +2263,8 @@ class SandboxClient:
 
         # claim() never sends `name` to the server, so only the create() path
         # may fall back to the requested name when caching info locally.
+        if pool_id is not None and auto_resume is not None:
+            raise SandboxError("auto_resume cannot be set when claiming from a pool")
         requested_name = None if pool_id is not None else name
         if pool_id is not None:
             result = request_client.claim(pool_id, file_systems=file_systems)
@@ -2266,6 +2289,7 @@ class SandboxClient:
                 file_systems=file_systems,
                 gpu=gpu,
                 max_pending_secs=max_pending_secs,
+                auto_resume=auto_resume,
             )
         if result.status == SandboxStatus.RUNNING:
             sandbox = request_client.connect(

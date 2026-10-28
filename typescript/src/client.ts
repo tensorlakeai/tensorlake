@@ -536,6 +536,7 @@ export class SandboxClient {
         deny_out: options?.denyOut ?? [],
       };
     }
+    if (options?.autoResume != null) body.auto_resume = options.autoResume;
     if (options?.maxPendingSecs != null) {
       if (
         !Number.isInteger(options.maxPendingSecs) ||
@@ -683,6 +684,7 @@ export class SandboxClient {
         options.name != null ||
         options.allowUnauthenticatedAccess != null ||
         options.exposedPorts != null ||
+        options.autoResume != null ||
         options.network !== undefined
       ) {
         throw new SandboxError(
@@ -691,6 +693,7 @@ export class SandboxClient {
       }
       body.resources = resources;
     }
+    if (options.autoResume != null) body.auto_resume = options.autoResume;
     if (options.name != null) body.name = options.name;
     if (options.allowUnauthenticatedAccess != null) {
       body.allow_unauthenticated_access = options.allowUnauthenticatedAccess;
@@ -1262,6 +1265,9 @@ export class SandboxClient {
       options?.poolId != null ? null : (options?.name ?? null);
     const createStart = nowMs();
     let result: Traced<CreateSandboxResponse>;
+    if (options?.poolId != null && options.autoResume != null) {
+      throw new SandboxError("autoResume cannot be set when claiming from a pool");
+    }
     if (options?.poolId != null) {
       result = await requestClient.claim(options.poolId, {
         fileSystems: options.fileSystems,

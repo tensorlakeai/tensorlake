@@ -264,6 +264,11 @@ class RemoteAPIError(SandboxError):
             payload = json.loads(message)
         except (ValueError, TypeError):
             payload = None
+        self._code = (
+            payload.get("code")
+            if isinstance(payload, dict) and isinstance(payload.get("code"), str)
+            else None
+        )
         # Only interpret sandbox lifecycle responses. Keep other API errors intact.
         if (
             isinstance(payload, dict)
@@ -288,6 +293,11 @@ class RemoteAPIError(SandboxError):
             reason=self._reason,
             sandbox_id=self._sandbox_id,
         )
+
+    @property
+    def code(self) -> str | None:
+        """Machine-readable API error code, including proxy policy failures."""
+        return self._code
 
     @property
     def sandbox_id(self) -> str | None:

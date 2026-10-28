@@ -48,6 +48,7 @@ pub async fn run(
             .map_err(|e| CliError::usage(e.to_string()))?;
         let client = resize::client(ctx)?;
         let request = UpdateSandboxRequest {
+            auto_resume: None,
             resources: Some(target),
             name: None,
             allow_unauthenticated_access: None,
@@ -143,6 +144,7 @@ fn build_update_request(args: UpdateNetworkArgs<'_>) -> Result<UpdateSandboxRequ
     };
 
     Ok(UpdateSandboxRequest {
+        auto_resume: None,
         resources: None,
         name: None,
         allow_unauthenticated_access: None,

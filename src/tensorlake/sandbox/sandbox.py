@@ -395,6 +395,7 @@ class Sandbox:
         max_pending_secs: int | None = None,
         cancel_on_timeout: bool = False,
         wait: Literal[True] = True,
+        auto_resume: bool | None = None,
     ) -> "Sandbox": ...
 
     @overload
@@ -429,6 +430,7 @@ class Sandbox:
         cancel_on_timeout: bool = False,
         *,
         wait: Literal[False],
+        auto_resume: bool | None = None,
     ) -> PendingSandbox: ...
 
     @classmethod
@@ -461,6 +463,7 @@ class Sandbox:
         max_pending_secs: int | None = None,
         cancel_on_timeout: bool = False,
         wait: bool = True,
+        auto_resume: bool | None = None,
     ) -> "Sandbox | PendingSandbox":
         """Create a new sandbox and return a connected, running handle.
 
@@ -528,6 +531,8 @@ class Sandbox:
             organization_id: Organization ID for multi-tenant access.
             project_id: Project ID for scoping resources.
             namespace: Namespace for local-server deployments.
+            auto_resume: Whether proxy traffic can wake a suspended sandbox.
+                None defaults to True on create. False requires a named sandbox.
             max_pending_secs: Longest the sandbox may wait for capacity
                 before the server fails it with reason ``no_capacity``.
                 Unset (the default) waits indefinitely; 30 minutes or more
@@ -594,6 +599,7 @@ class Sandbox:
                 file_systems=file_systems,
                 gpu=gpu,
                 max_pending_secs=max_pending_secs,
+                auto_resume=auto_resume,
                 proxy_url=proxy_url,
                 request_timeout=effective_request_timeout,
                 owns_sandbox=True,
@@ -618,6 +624,7 @@ class Sandbox:
             file_systems=file_systems,
             gpu=gpu,
             max_pending_secs=max_pending_secs,
+            auto_resume=auto_resume,
             cancel_on_timeout=cancel_on_timeout,
         )
 
@@ -704,6 +711,7 @@ class Sandbox:
         namespace: str | None = _defaults.NAMESPACE,
         gpu: GpuRequest | None = None,
         max_pending_secs: int | None = None,
+        auto_resume: bool | None = None,
     ) -> "Sandbox":
         """Return the one sandbox bound to ``name``. Create it on first use.
 
@@ -835,6 +843,7 @@ class Sandbox:
                         namespace=namespace,
                         gpu=gpu,
                         max_pending_secs=max_pending_secs,
+                        auto_resume=auto_resume,
                     )
                 except RemoteAPIError as e:
                     if e.status_code != 409:
@@ -1339,7 +1348,12 @@ class Sandbox:
         Raises:
             SandboxError: If no lifecycle client is available.
         """
-        return self._fetch_info()
+        self._require_lifecycle_client("info")
+        self._cached_info = self._lifecycle_client.get(
+            self._lifecycle_identifier()
+        ).value
+        self._sandbox_id = self._cached_info.sandbox_id
+        return self._cached_info
 
     def _lifecycle_identifier(self) -> str:
         """Best-effort stable identifier for lifecycle API calls.
@@ -1409,6 +1423,7 @@ class Sandbox:
         poll_interval: float = 1.0,
         allow_unauthenticated_access: bool | None = None,
         exposed_ports: list[int] | None = None,
+        auto_resume: bool | None = None,
         network: NetworkConfig | ClearNetworkPolicy | None = None,
     ) -> Traced[SandboxInfo]:
         """Update this sandbox's properties.
@@ -1442,6 +1457,9 @@ class Sandbox:
                 be positive. Ignored when wait is False.
             allow_unauthenticated_access: Whether exposed user ports should be
                 reachable without Tensorlake auth.
+            auto_resume: Omit to keep the current flag. False requires a named
+                sandbox. May be changed while suspended without waking it;
+                cannot be combined with resource resizing.
             exposed_ports: User ports routable through the sandbox proxy.
                 Port 9501 is reserved for sandbox management.
             network: Egress network policy. Omit to leave it unchanged, pass a
@@ -1481,6 +1499,7 @@ class Sandbox:
             name=name,
             allow_unauthenticated_access=allow_unauthenticated_access,
             exposed_ports=exposed_ports,
+            auto_resume=auto_resume,
             network=network,
         )
         self._sandbox_id = traced.sandbox_id
