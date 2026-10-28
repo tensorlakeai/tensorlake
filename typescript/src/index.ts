@@ -10,9 +10,11 @@ export { APIClient } from "./api-client.js";
 export { RepositoryClient } from "./repositories.js";
 export { UsageClient } from "./usage.js";
 export type {
+  AttributedUsageCharge,
   IncludedUsage,
   ResourceUsage,
   SandboxUsage,
+  SandboxUsageExport,
   UsageCharge,
   UsageClientOptions,
   UsageLookback,

@@ -5,12 +5,7 @@ import { NativeCloudTransport } from "./native-cloud.js";
 export type UsageLookback = "1d" | "7d" | "30d";
 
 const LOOKBACK_DAYS: Record<UsageLookback, number> = { "1d": 1, "7d": 7, "30d": 30 };
-const PAGE_SIZE = 100;
 const DAY_MS = 24 * 60 * 60 * 1000;
-// The server moves any start older than its own `now - 30d` up to that limit
-// and rejects it once it is more than 5 minutes older. A 30-day window starts
-// this much later so every page of a long read stays on the same window.
-const HISTORY_LIMIT_MARGIN_MS = 60 * 60 * 1000;
 
 export interface UsageClientOptions {
   /** Tensorlake API key. Defaults to `TENSORLAKE_API_KEY`. */
@@ -89,12 +84,32 @@ export interface SandboxUsage {
   };
 }
 
-interface SandboxUsagePage {
+/** A share of the organization's pooled usage charge. */
+export interface AttributedUsageCharge {
+  currency: string;
+  amountMinor: string;
+  /** `invoice` for a finalized invoice, `current_price_estimate` otherwise. */
+  basis: string;
+}
+
+/** Every sandbox of a window with its usage and attributed charge. */
+export interface SandboxUsageExport {
   windowStart: string;
   windowEnd: string;
+  /**
+   * The organization's usage charge; the sandboxes' attributed amounts add up
+   * to it exactly. `null` when the organization has no metered price.
+   */
+  attributedUsageCharge: AttributedUsageCharge | null;
+  includedUsage: IncludedUsage | null;
+  attributedUsageValue: { currency: string; amountMinor: string } | null;
   sandboxes: SandboxUsage[];
-  nextCursor: number | null;
 }
+
+type ExportRecord =
+  | ({ type: "window" } & Omit<SandboxUsageExport, "sandboxes">)
+  | ({ type: "sandbox" } & SandboxUsage)
+  | { type: "end"; count: number };
 
 /**
  * Read an organization's sandbox usage and cost.
@@ -141,27 +156,18 @@ export class UsageClient {
   /**
    * Usage and attributed cost of every sandbox that ran in the window.
    *
-   * Pages are fetched as the iterator advances. All pages read the same window.
+   * The server computes the attribution once and returns every sandbox in one
+   * response.
    */
-  sandboxes(options?: UsageReadOptions): AsyncIterable<SandboxUsage> {
-    return this.sandboxPages(rangeQuery(options?.last));
-  }
-
-  private async *sandboxPages(range: Record<string, string>): AsyncGenerator<SandboxUsage> {
-    const query = new URLSearchParams({ limit: String(PAGE_SIZE), ...range });
-    for (;;) {
-      const page = await this.transport.requestJson<SandboxUsagePage>(
-        "GET",
-        `${this.basePath()}/sandboxes?${query}`,
-      );
-      yield* page.sandboxes;
-      if (page.nextCursor == null) return;
-      // Later pages read the first page's exact window, so a window that
-      // ends at "now" does not move between pages.
-      query.set("fromDate", page.windowStart);
-      query.set("toDate", page.windowEnd);
-      query.set("cursor", String(page.nextCursor));
-    }
+  async sandboxes(options?: UsageReadOptions): Promise<SandboxUsageExport> {
+    const query = new URLSearchParams(rangeQuery(options?.last)).toString();
+    const suffix = query ? `?${query}` : "";
+    const response = await this.transport.requestResponse(
+      "GET",
+      `${this.basePath()}/sandboxes/export${suffix}`,
+      { headers: { Accept: "application/x-ndjson" } },
+    );
+    return parseExport(await response.text());
   }
 
   private basePath(): string {
@@ -180,9 +186,42 @@ function rangeQuery(last: UsageLookback | undefined): Record<string, string> {
     throw new Error(`last must be one of 1d, 7d, 30d; got ${JSON.stringify(last)}`);
   }
   const now = Date.now();
-  const margin = last === "30d" ? HISTORY_LIMIT_MARGIN_MS : 0;
   return {
-    fromDate: new Date(now - days * DAY_MS + margin).toISOString(),
+    fromDate: new Date(now - days * DAY_MS).toISOString(),
     toDate: new Date(now).toISOString(),
   };
+}
+
+/**
+ * Collect an export body, rejecting one that lacks its window header or its
+ * end record, or whose count disagrees: a stream cut short after the response
+ * started looks otherwise like a smaller, valid export.
+ */
+export function parseExport(body: string): SandboxUsageExport {
+  const records = body
+    .split("\n")
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line) as ExportRecord);
+  const [header, ...rest] = records;
+  if (header?.type !== "window") {
+    throw new Error("incomplete sandbox usage export: missing window header");
+  }
+  const { type: _header, ...window } = header;
+  const sandboxes: SandboxUsage[] = [];
+  for (const record of rest) {
+    if (record.type === "sandbox") {
+      const { type: _sandbox, ...sandbox } = record;
+      sandboxes.push(sandbox);
+    } else if (record.type === "end") {
+      if (record.count !== sandboxes.length) {
+        throw new Error(
+          `incomplete sandbox usage export: expected ${record.count} sandboxes, received ${sandboxes.length}`,
+        );
+      }
+      return { ...window, sandboxes };
+    } else {
+      throw new Error("incomplete sandbox usage export: repeated window header");
+    }
+  }
+  throw new Error("incomplete sandbox usage export: missing end record");
 }

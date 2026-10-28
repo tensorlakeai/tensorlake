@@ -6,7 +6,8 @@
 use std::str::FromStr;
 
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
-use serde::{Deserialize, Serialize};
+use reqwest::header::ACCEPT;
+use serde::Deserialize;
 
 use crate::{
     client::{Client, Traced},
@@ -15,7 +16,7 @@ use crate::{
 
 pub mod models;
 
-use models::{SandboxUsagePage, UsageSummary};
+use models::{SandboxUsage, SandboxUsageExport, SandboxUsageExportWindow, UsageSummary};
 
 /// The time window a usage read covers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -27,18 +28,9 @@ pub enum UsageWindow {
     LastDay,
     /// The last 7 days.
     LastWeek,
-    /// The last 30 days, the oldest usage the API serves. The window starts
-    /// [`HISTORY_LIMIT_MARGIN`] later so it stays inside that limit.
+    /// The last 30 days, the oldest usage the API serves.
     Last30Days,
 }
-
-/// How far inside the API's 30-day history limit a 30-day window starts.
-///
-/// The server moves any start older than its own `now - 30d` up to that
-/// limit, and rejects it once it is more than 5 minutes older. Starting a
-/// little later keeps every page of a long read on the same window for this
-/// long.
-pub const HISTORY_LIMIT_MARGIN: Duration = Duration::hours(1);
 
 impl UsageWindow {
     fn lookback_days(self) -> Option<i64> {
@@ -57,12 +49,11 @@ impl UsageWindow {
         let Some(days) = self.lookback_days() else {
             return Vec::new();
         };
-        let mut start = now - Duration::days(days);
-        if self == Self::Last30Days {
-            start += HISTORY_LIMIT_MARGIN;
-        }
         let format = |at: DateTime<Utc>| at.to_rfc3339_opts(SecondsFormat::Millis, true);
-        vec![("fromDate", format(start)), ("toDate", format(now))]
+        vec![
+            ("fromDate", format(now - Duration::days(days))),
+            ("toDate", format(now)),
+        ]
     }
 }
 
@@ -82,38 +73,44 @@ impl FromStr for UsageWindow {
     }
 }
 
-/// Where the next page of per-sandbox usage starts.
-///
-/// It carries the window the first page resolved, so every page reads the
-/// same window even when the window ends at "now". Callers treat it as an
-/// opaque value and pass it back unchanged.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SandboxUsageCursor {
-    window_start: String,
-    window_end: String,
-    cursor: u64,
+/// One line of the export's newline-delimited JSON.
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+enum ExportRecord {
+    Window(Box<SandboxUsageExportWindow>),
+    Sandbox(Box<SandboxUsage>),
+    End { count: u64 },
 }
 
-impl SandboxUsagePage {
-    /// The cursor for the following page, or `None` on the last page.
-    pub fn next_page_cursor(&self) -> Option<SandboxUsageCursor> {
-        self.next_cursor.map(|cursor| SandboxUsageCursor {
-            window_start: self.window_start.clone(),
-            window_end: self.window_end.clone(),
-            cursor,
-        })
+/// Collect an export body, rejecting one that lacks its window header or its
+/// end record, or whose count disagrees: a stream cut short after the
+/// response started looks otherwise like a smaller, valid export.
+fn parse_export(body: &str) -> Result<SandboxUsageExport, SdkError> {
+    let incomplete =
+        |detail: &str| SdkError::ClientError(format!("incomplete sandbox usage export: {detail}"));
+    let mut lines = body.lines().filter(|line| !line.trim().is_empty());
+    let window = match lines.next().map(serde_json::from_str::<ExportRecord>) {
+        Some(Ok(ExportRecord::Window(window))) => *window,
+        Some(Err(err)) => return Err(err.into()),
+        _ => return Err(incomplete("missing window header")),
+    };
+    let mut sandboxes = Vec::new();
+    for line in lines {
+        match serde_json::from_str::<ExportRecord>(line)? {
+            ExportRecord::Sandbox(sandbox) => sandboxes.push(*sandbox),
+            ExportRecord::End { count } if count == sandboxes.len() as u64 => {
+                return Ok(SandboxUsageExport { window, sandboxes });
+            }
+            ExportRecord::End { count } => {
+                return Err(incomplete(&format!(
+                    "expected {count} sandboxes, received {}",
+                    sandboxes.len()
+                )));
+            }
+            ExportRecord::Window(_) => return Err(incomplete("repeated window header")),
+        }
     }
-}
-
-/// A request for one page of per-sandbox usage.
-#[derive(Clone, Debug, Default)]
-pub struct SandboxUsageRequest {
-    /// Ignored when `cursor` is set; the cursor keeps the first page's window.
-    pub window: UsageWindow,
-    /// Page size, 1 to 100. The server defaults to 50.
-    pub limit: Option<u32>,
-    pub cursor: Option<SandboxUsageCursor>,
+    Err(incomplete("missing end record"))
 }
 
 #[derive(Clone)]
@@ -152,30 +149,25 @@ impl UsageClient {
         self.client.execute_json(req).await
     }
 
-    /// One page of per-sandbox usage, ordered as the dashboard shows it.
-    ///
-    /// Pass [`SandboxUsagePage::next_page_cursor`] back in
-    /// [`SandboxUsageRequest::cursor`] to read the next page.
+    /// Usage and attributed cost of every sandbox in the window, in one
+    /// request. The server computes the attribution once and streams it.
     pub async fn sandboxes(
         &self,
-        request: &SandboxUsageRequest,
-    ) -> Result<Traced<SandboxUsagePage>, SdkError> {
-        let path = self.endpoint("/sandboxes")?;
-        let mut query: Vec<(&str, String)> = Vec::new();
-        match &request.cursor {
-            Some(cursor) => {
-                query.push(("fromDate", cursor.window_start.clone()));
-                query.push(("toDate", cursor.window_end.clone()));
-                query.push(("cursor", cursor.cursor.to_string()));
-            }
-            None => query.extend(request.window.range_query(Utc::now())),
-        }
-        if let Some(limit) = request.limit {
-            query.push(("limit", limit.to_string()));
-        }
+        window: UsageWindow,
+    ) -> Result<Traced<SandboxUsageExport>, SdkError> {
+        let path = self.endpoint("/sandboxes/export")?;
+        let query = window.range_query(Utc::now());
         let query: Vec<(&str, &str)> = query.iter().map(|(k, v)| (*k, v.as_str())).collect();
-        let req = self.client.build_get_json_request(&path, Some(&query))?;
-        self.client.execute_json(req).await
+        let req = self
+            .client
+            .request(reqwest::Method::GET, &path)
+            .query(&query)
+            .header(ACCEPT, "application/x-ndjson")
+            .build()?;
+        let traced = self.client.execute_traced(req).await?;
+        let trace_id = traced.trace_id.clone();
+        let body = traced.into_inner().text().await?;
+        Ok(Traced::new(trace_id, parse_export(&body)?))
     }
 }
 
@@ -207,9 +199,24 @@ mod tests {
                 ("toDate", "2026-10-28T12:00:00.000Z".to_string()),
             ]
         );
-        assert_eq!(
-            UsageWindow::Last30Days.range_query(now)[0],
-            ("fromDate", "2026-09-28T13:00:00.000Z".to_string())
-        );
+    }
+
+    const WINDOW: &str = r#"{"type":"window","windowStart":"2026-10-01T00:00:00.000Z","windowEnd":"2026-10-28T12:00:00.000Z","attributedUsageCharge":null,"includedUsage":null,"attributedUsageValue":null}"#;
+
+    #[test]
+    fn export_requires_the_end_record_and_matching_count() {
+        let complete = format!("{WINDOW}\n{{\"type\":\"end\",\"count\":0}}\n");
+        assert!(parse_export(&complete).unwrap().sandboxes.is_empty());
+
+        let truncated = format!("{WINDOW}\n");
+        let err = parse_export(&truncated).unwrap_err().to_string();
+        assert!(err.contains("missing end record"), "{err}");
+
+        let short = format!("{WINDOW}\n{{\"type\":\"end\",\"count\":2}}\n");
+        let err = parse_export(&short).unwrap_err().to_string();
+        assert!(err.contains("expected 2 sandboxes"), "{err}");
+
+        let err = parse_export("").unwrap_err().to_string();
+        assert!(err.contains("missing window header"), "{err}");
     }
 }

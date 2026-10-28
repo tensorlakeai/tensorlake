@@ -99,18 +99,6 @@ pub struct UsageProjectRef {
     pub project_name: String,
 }
 
-/// Sandbox usage totals for one project.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProjectSandboxUsage {
-    /// Null for usage whose project no longer exists.
-    pub project: Option<UsageProjectRef>,
-    pub sandbox_count: u64,
-    pub attributed_amount_minor: Option<String>,
-    #[serde(default)]
-    pub usage_value_amount_minor: Option<String>,
-}
-
 /// Usage of one resource by a sandbox.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -145,20 +133,24 @@ pub struct SandboxUsage {
     pub resources: SandboxResourceUsage,
 }
 
-/// One page of per-sandbox usage.
+/// The window and pooled amounts an export's sandboxes share.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SandboxUsagePage {
+pub struct SandboxUsageExportWindow {
     pub window_start: String,
     pub window_end: String,
-    /// Total for every matching sandbox, not only this page.
+    /// The organization's usage charge; the sandboxes' attributed amounts add
+    /// up to it exactly. Null when the organization has no metered price.
     pub attributed_usage_charge: Option<AttributedUsageCharge>,
-    #[serde(default)]
     pub included_usage: Option<IncludedUsage>,
-    #[serde(default)]
     pub attributed_usage_value: Option<UsageAmount>,
-    pub projects: Vec<ProjectSandboxUsage>,
+}
+
+/// Every sandbox of a window with its usage and attributed charge.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxUsageExport {
+    #[serde(flatten)]
+    pub window: SandboxUsageExportWindow,
     pub sandboxes: Vec<SandboxUsage>,
-    pub total: u64,
-    pub next_cursor: Option<u64>,
 }

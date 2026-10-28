@@ -27,18 +27,20 @@ function sandbox(sandboxId: string) {
   };
 }
 
-function page(sandboxId: string, nextCursor: number | null) {
-  return {
-    windowStart: WINDOW_START,
-    windowEnd: WINDOW_END,
-    attributedUsageCharge: null,
-    includedUsage: null,
-    attributedUsageValue: null,
-    projects: [],
-    sandboxes: [sandbox(sandboxId)],
-    total: 2,
-    nextCursor,
-  };
+function exportBody(sandboxIds: string[], end = true): string {
+  const records: unknown[] = [
+    {
+      type: "window",
+      windowStart: WINDOW_START,
+      windowEnd: WINDOW_END,
+      attributedUsageCharge: { currency: "usd", amountMinor: "1000", basis: "invoice" },
+      includedUsage: null,
+      attributedUsageValue: null,
+    },
+    ...sandboxIds.map((id) => ({ type: "sandbox", ...sandbox(id) })),
+  ];
+  if (end) records.push({ type: "end", count: sandboxIds.length });
+  return records.map((record) => `${JSON.stringify(record)}\n`).join("");
 }
 
 describe("UsageClient", () => {
@@ -46,26 +48,31 @@ describe("UsageClient", () => {
     clearCloudStub();
   });
 
-  it("pages sandboxes through the first page's window", async () => {
+  it("reads every sandbox from one export request", async () => {
     const urls: URL[] = [];
     installCloudStub((url) => {
-      const parsed = new URL(url);
-      urls.push(parsed);
-      const body = parsed.searchParams.has("cursor") ? page("sb-2", null) : page("sb-1", 1);
-      return new Response(JSON.stringify(body), { status: 200 });
+      urls.push(new URL(url));
+      return new Response(exportBody(["sb-1", "sb-2"]), { status: 200 });
     });
 
     const client = new UsageClient({ apiUrl: "http://localhost:8900", organizationId: "org-1" });
-    const ids: string[] = [];
-    for await (const usage of client.sandboxes()) ids.push(usage.sandboxId);
+    const usage = await client.sandboxes();
     client.close();
 
-    expect(ids).toEqual(["sb-1", "sb-2"]);
-    expect(urls[0].pathname).toBe("/platform/v1/organizations/org-1/sandbox-usage/sandboxes");
-    expect(urls[0].searchParams.has("fromDate")).toBe(false);
-    expect(urls[1].searchParams.get("fromDate")).toBe(WINDOW_START);
-    expect(urls[1].searchParams.get("toDate")).toBe(WINDOW_END);
-    expect(urls[1].searchParams.get("cursor")).toBe("1");
+    expect(usage.sandboxes.map((s) => s.sandboxId)).toEqual(["sb-1", "sb-2"]);
+    expect(usage.windowStart).toBe(WINDOW_START);
+    expect(usage.attributedUsageCharge?.basis).toBe("invoice");
+    expect(urls).toHaveLength(1);
+    expect(urls[0].pathname).toBe("/platform/v1/organizations/org-1/sandbox-usage/sandboxes/export");
+    expect(urls[0].search).toBe("");
+  });
+
+  it("rejects a truncated export", async () => {
+    installCloudStub(() => new Response(exportBody(["sb-1"], false), { status: 200 }));
+
+    const client = new UsageClient({ apiUrl: "http://localhost:8900", organizationId: "org-1" });
+    await expect(client.sandboxes({ last: "30d" })).rejects.toThrow(/missing end record/);
+    client.close();
   });
 
   it("reads a lookback summary as an exact range", async () => {
@@ -99,9 +106,9 @@ describe("UsageClient", () => {
     expect(summary.runningSandboxes).toBe(3);
   });
 
-  it("rejects an unsupported lookback before any request", () => {
+  it("rejects an unsupported lookback before any request", async () => {
     const client = new UsageClient({ apiUrl: "http://localhost:8900", organizationId: "org-1" });
-    expect(() => client.sandboxes({ last: "2d" as never })).toThrow(/1d, 7d, 30d/);
+    await expect(client.sandboxes({ last: "2d" as never })).rejects.toThrow(/1d, 7d, 30d/);
     client.close();
   });
 

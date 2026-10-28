@@ -5,7 +5,7 @@ use tensorlake::error::SdkError;
 use tensorlake::usage::models::{
     AttributedUsageCharge, SandboxUsage, UsageChargeBasis, UsageSummary,
 };
-use tensorlake::usage::{SandboxUsageRequest, UsageClient, UsageWindow};
+use tensorlake::usage::{UsageClient, UsageWindow};
 
 use crate::auth::context::CliContext;
 use crate::error::{CliError, Result};
@@ -31,8 +31,6 @@ fn window(last: Option<Lookback>) -> UsageWindow {
     }
 }
 
-const SANDBOX_PAGE_SIZE: u32 = 100;
-
 pub async fn summary(ctx: &CliContext, last: Option<Lookback>, json: bool) -> Result<()> {
     let summary = usage_client(ctx)?
         .summary(window(last))
@@ -49,48 +47,24 @@ pub async fn summary(ctx: &CliContext, last: Option<Lookback>, json: bool) -> Re
 }
 
 pub async fn sandboxes(ctx: &CliContext, last: Option<Lookback>, json: bool) -> Result<()> {
-    let client = usage_client(ctx)?;
-    let mut request = SandboxUsageRequest {
-        window: window(last),
-        limit: Some(SANDBOX_PAGE_SIZE),
-        cursor: None,
-    };
-    let mut first = None;
-    let mut sandboxes = Vec::new();
-    loop {
-        let page = client
-            .sandboxes(&request)
-            .await
-            .map_err(map_sdk_error)?
-            .into_inner();
-        request.cursor = page.next_page_cursor();
-        sandboxes.extend(page.sandboxes.iter().cloned());
-        first.get_or_insert(page);
-        if request.cursor.is_none() {
-            break;
-        }
-    }
-    let Some(first) = first else {
-        return Ok(());
-    };
+    let export = usage_client(ctx)?
+        .sandboxes(window(last))
+        .await
+        .map_err(map_sdk_error)?
+        .into_inner();
 
     if json {
-        let body = serde_json::json!({
-            "windowStart": first.window_start,
-            "windowEnd": first.window_end,
-            "attributedUsageCharge": first.attributed_usage_charge,
-            "sandboxes": sandboxes,
-        });
-        println!("{}", serde_json::to_string_pretty(&body)?);
+        println!("{}", serde_json::to_string_pretty(&export)?);
         return Ok(());
     }
 
-    println!("Window: {} to {}", first.window_start, first.window_end);
-    if sandboxes.is_empty() {
+    let window = &export.window;
+    println!("Window: {} to {}", window.window_start, window.window_end);
+    if export.sandboxes.is_empty() {
         println!("no sandbox usage found");
         return Ok(());
     }
-    print_sandboxes(&sandboxes, first.attributed_usage_charge.as_ref());
+    print_sandboxes(&export.sandboxes, window.attributed_usage_charge.as_ref());
     Ok(())
 }
 

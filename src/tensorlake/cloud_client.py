@@ -274,19 +274,12 @@ class CloudClient:
         except Exception as e:
             _raise_as_tensorlake_error(e)
 
-    def sandbox_usage_page_json(
-        self,
-        organization_id: str,
-        last: str | None = None,
-        page_token: str | None = None,
-        limit: int = 100,
-    ) -> tuple[str, str | None]:
+    def sandbox_usage_export_json(
+        self, organization_id: str, last: str | None = None
+    ) -> str:
         try:
-            return self._client.sandbox_usage_page_json(
-                organization_id=organization_id,
-                last=last,
-                page_token=page_token,
-                limit=limit,
+            return self._client.sandbox_usage_export_json(
+                organization_id=organization_id, last=last
             )
         except Exception as e:
             _raise_as_tensorlake_error(e)

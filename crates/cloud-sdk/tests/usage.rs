@@ -1,40 +1,24 @@
 use tensorlake::{
     ClientBuilder,
-    usage::{SandboxUsageRequest, UsageClient, UsageWindow, models::UsageChargeBasis},
+    usage::{UsageClient, UsageWindow, models::UsageChargeBasis},
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-const PAGE_ONE: &str = r#"{
-  "windowStart": "2026-10-01T00:00:00.000Z",
-  "windowEnd": "2026-10-28T12:00:00.000Z",
-  "attributedUsageCharge": {"currency": "usd", "amountMinor": "1234", "basis": "current_price_estimate"},
-  "includedUsage": null,
-  "attributedUsageValue": null,
-  "projects": [
-    {"project": {"projectId": "proj-1", "projectName": "Default"}, "sandboxCount": 2, "attributedAmountMinor": "1234", "usageValueAmountMinor": null}
-  ],
-  "sandboxes": [
-    {
-      "sandboxId": "sb-1",
-      "project": {"projectId": "proj-1", "projectName": "Default"},
-      "attributedAmountMinor": "1000",
-      "usageValueAmountMinor": null,
-      "resources": {
-        "cpu": {"quantity": "1.5", "unit": "vCPU-hour", "attributedAmountMinor": "900", "usageValueAmountMinor": null},
-        "memory": {"quantity": "3", "unit": "GiB-hour", "attributedAmountMinor": "100", "usageValueAmountMinor": null},
-        "sandboxStorage": {"quantity": "0", "unit": "GiB-hour", "attributedAmountMinor": "0", "usageValueAmountMinor": null},
-        "snapshotStorage": {"quantity": "0", "unit": "GiB-hour", "attributedAmountMinor": "0", "usageValueAmountMinor": null},
-        "networkEgress": {"quantity": "0", "unit": "GiB", "attributedAmountMinor": "0", "usageValueAmountMinor": null}
-      }
-    }
-  ],
-  "total": 2,
-  "nextCursor": 1
-}"#;
+const EXPORT: &str = concat!(
+    r#"{"type":"window","windowStart":"2026-10-01T00:00:00.000Z","windowEnd":"2026-10-28T12:00:00.000Z","attributedUsageCharge":{"currency":"usd","amountMinor":"1000","basis":"current_price_estimate"},"includedUsage":null,"attributedUsageValue":null}"#,
+    "\n",
+    r#"{"type":"sandbox","sandboxId":"sb-1","project":{"projectId":"proj-1","projectName":"Default"},"attributedAmountMinor":"1000","usageValueAmountMinor":null,"resources":{"cpu":{"quantity":"1.5","unit":"vCPU-hour","attributedAmountMinor":"900","usageValueAmountMinor":null},"memory":{"quantity":"3","unit":"GiB-hour","attributedAmountMinor":"100","usageValueAmountMinor":null},"sandboxStorage":{"quantity":"0","unit":"GiB-hour","attributedAmountMinor":"0","usageValueAmountMinor":null},"snapshotStorage":{"quantity":"0","unit":"GiB-hour","attributedAmountMinor":"0","usageValueAmountMinor":null},"networkEgress":{"quantity":"0","unit":"GiB","attributedAmountMinor":"0","usageValueAmountMinor":null}}}"#,
+    "\n",
+    r#"{"type":"end","count":1}"#,
+    "\n",
+);
 
-/// Serve one JSON response and return the request line the client sent.
-async fn serve_once(body: &'static str) -> (String, tokio::task::JoinHandle<String>) {
+/// Serve one response and return the request line the client sent.
+async fn serve_once(
+    content_type: &'static str,
+    body: &'static str,
+) -> (String, tokio::task::JoinHandle<String>) {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind test listener");
@@ -43,9 +27,8 @@ async fn serve_once(body: &'static str) -> (String, tokio::task::JoinHandle<Stri
         let (mut socket, _) = listener.accept().await.expect("accept request");
         let request_bytes = read_http_request(&mut socket).await;
         let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len(),
-            body
         );
         socket
             .write_all(response.as_bytes())
@@ -63,47 +46,51 @@ fn usage_client(base_url: &str) -> UsageClient {
 }
 
 #[tokio::test]
-async fn current_period_sandboxes_send_no_dates_and_next_page_pins_the_window() {
-    let (base_url, server) = serve_once(PAGE_ONE).await;
-    let usage = usage_client(&base_url);
+async fn current_period_export_sends_no_dates() {
+    let (base_url, server) = serve_once("application/x-ndjson", EXPORT).await;
 
-    let page = usage
-        .sandboxes(&SandboxUsageRequest {
-            limit: Some(1),
-            ..Default::default()
-        })
+    let export = usage_client(&base_url)
+        .sandboxes(UsageWindow::CurrentPeriod)
         .await
-        .expect("first page")
+        .expect("export")
         .into_inner();
 
     assert_eq!(
         server.await.expect("server join"),
-        "GET /platform/v1/organizations/org-1/sandbox-usage/sandboxes?limit=1 HTTP/1.1"
+        "GET /platform/v1/organizations/org-1/sandbox-usage/sandboxes/export HTTP/1.1"
     );
-    assert_eq!(page.sandboxes[0].sandbox_id, "sb-1");
-    assert_eq!(page.sandboxes[0].resources.cpu.quantity, "1.5");
+    assert_eq!(export.window.window_start, "2026-10-01T00:00:00.000Z");
     assert_eq!(
-        page.attributed_usage_charge.as_ref().map(|c| &c.basis),
+        export
+            .window
+            .attributed_usage_charge
+            .as_ref()
+            .map(|c| &c.basis),
         Some(&UsageChargeBasis::CurrentPriceEstimate)
     );
+    assert_eq!(export.sandboxes.len(), 1);
+    assert_eq!(export.sandboxes[0].sandbox_id, "sb-1");
+    assert_eq!(export.sandboxes[0].resources.cpu.quantity, "1.5");
+}
 
-    // The next page asks for the first page's exact window, even though the
-    // first request had no dates.
-    let (base_url, server) = serve_once(PAGE_ONE).await;
-    let usage = usage_client(&base_url);
-    usage
-        .sandboxes(&SandboxUsageRequest {
-            window: UsageWindow::LastWeek,
-            limit: Some(1),
-            cursor: page.next_page_cursor(),
-        })
+#[tokio::test]
+async fn truncated_export_is_an_error() {
+    const TRUNCATED: &str = r#"{"type":"window","windowStart":"2026-10-01T00:00:00.000Z","windowEnd":"2026-10-28T12:00:00.000Z","attributedUsageCharge":null,"includedUsage":null,"attributedUsageValue":null}
+"#;
+    let (base_url, server) = serve_once("application/x-ndjson", TRUNCATED).await;
+
+    let err = usage_client(&base_url)
+        .sandboxes(UsageWindow::LastWeek)
         .await
-        .expect("second page");
+        .expect_err("a stream without its end record must fail");
 
-    assert_eq!(
-        server.await.expect("server join"),
-        "GET /platform/v1/organizations/org-1/sandbox-usage/sandboxes?fromDate=2026-10-01T00%3A00%3A00.000Z&toDate=2026-10-28T12%3A00%3A00.000Z&cursor=1&limit=1 HTTP/1.1"
+    let request_line = server.await.expect("server join");
+    assert!(
+        request_line.contains("/sandbox-usage/sandboxes/export?fromDate=")
+            && request_line.contains("&toDate="),
+        "{request_line}"
     );
+    assert!(err.to_string().contains("missing end record"), "{err}");
 }
 
 #[tokio::test]
@@ -122,10 +109,9 @@ async fn lookback_summary_sends_an_exact_range() {
       "series": [],
       "projects": [{"projectId": "proj-1", "projectName": "Default", "computeUnits": "42.5"}]
     }"#;
-    let (base_url, server) = serve_once(SUMMARY).await;
-    let usage = usage_client(&base_url);
+    let (base_url, server) = serve_once("application/json", SUMMARY).await;
 
-    let summary = usage
+    let summary = usage_client(&base_url)
         .summary(UsageWindow::LastWeek)
         .await
         .expect("summary")

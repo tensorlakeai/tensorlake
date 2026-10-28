@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import os
 from decimal import Decimal
-from typing import Iterator, Literal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 from pydantic.alias_generators import to_camel
@@ -20,7 +20,6 @@ UsageLookback = Literal["1d", "7d", "30d"]
 """How far back to read instead of the current billing period."""
 
 _LOOKBACKS = ("1d", "7d", "30d")
-_PAGE_SIZE = 100
 
 
 class UsageError(RuntimeError):
@@ -110,7 +109,28 @@ class SandboxUsage(_Model):
     resources: SandboxResourceUsage
 
 
-class _SandboxUsagePage(_Model):
+class UsageAmount(_Model):
+    currency: str
+    amount_minor: int
+
+
+class AttributedUsageCharge(_Model):
+    currency: str
+    amount_minor: int
+    basis: str
+    """``invoice`` for a finalized invoice, ``current_price_estimate`` otherwise."""
+
+
+class SandboxUsageExport(_Model):
+    """Every sandbox of a window with its usage and attributed charge."""
+
+    window_start: str
+    window_end: str
+    attributed_usage_charge: AttributedUsageCharge | None = None
+    """The organization's usage charge; the sandboxes' attributed amounts add
+    up to it exactly. ``None`` when the organization has no metered price."""
+    included_usage: IncludedUsage | None = None
+    attributed_usage_value: UsageAmount | None = None
     sandboxes: list[SandboxUsage]
 
 
@@ -174,26 +194,16 @@ class UsageClient:
         )
         return UsageSummary.model_validate(json.loads(raw))
 
-    def sandboxes(self, last: UsageLookback | None = None) -> Iterator[SandboxUsage]:
+    def sandboxes(self, last: UsageLookback | None = None) -> SandboxUsageExport:
         """Usage and attributed cost of every sandbox that ran in the window.
 
-        Pages are fetched as the iterator advances. All pages read the same
-        window.
+        The server computes the attribution once and returns every sandbox in
+        one response.
         """
-        return self._sandbox_pages(_check_lookback(last))
-
-    def _sandbox_pages(self, last: str | None) -> Iterator[SandboxUsage]:
-        page_token: str | None = None
-        while True:
-            raw, page_token = self._client.sandbox_usage_page_json(
-                self._organization_id,
-                last=last,
-                page_token=page_token,
-                limit=_PAGE_SIZE,
-            )
-            yield from _SandboxUsagePage.model_validate(json.loads(raw)).sandboxes
-            if page_token is None:
-                return
+        raw = self._client.sandbox_usage_export_json(
+            self._organization_id, _check_lookback(last)
+        )
+        return SandboxUsageExport.model_validate(json.loads(raw))
 
 
 def _check_lookback(last: str | None) -> str | None:

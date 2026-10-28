@@ -43,22 +43,25 @@ def _sandbox(sandbox_id: str, amount: str) -> dict:
     }
 
 
-def _page(sandboxes: list[dict], next_cursor: int | None) -> dict:
-    return {
-        "windowStart": _WINDOW_START,
-        "windowEnd": _WINDOW_END,
-        "attributedUsageCharge": {
-            "currency": "usd",
-            "amountMinor": "300",
-            "basis": "current_price_estimate",
+def _export(sandboxes: list[dict], end: bool = True) -> bytes:
+    records = [
+        {
+            "type": "window",
+            "windowStart": _WINDOW_START,
+            "windowEnd": _WINDOW_END,
+            "attributedUsageCharge": {
+                "currency": "usd",
+                "amountMinor": "300",
+                "basis": "current_price_estimate",
+            },
+            "includedUsage": None,
+            "attributedUsageValue": None,
         },
-        "includedUsage": None,
-        "attributedUsageValue": None,
-        "projects": [],
-        "sandboxes": sandboxes,
-        "total": 2,
-        "nextCursor": next_cursor,
-    }
+        *({"type": "sandbox", **sandbox} for sandbox in sandboxes),
+    ]
+    if end:
+        records.append({"type": "end", "count": len(sandboxes)})
+    return "".join(json.dumps(record) + "\n" for record in records).encode()
 
 
 class _UsageHandler(BaseHTTPRequestHandler):
@@ -90,10 +93,17 @@ class _UsageHandler(BaseHTTPRequestHandler):
                     }
                 ],
             }
-        elif "cursor" in query:
-            payload = _page([_sandbox("sb-2", "100")], None)
         else:
-            payload = _page([_sandbox("sb-1", "200")], 1)
+            body = _export(
+                [_sandbox("sb-1", "200"), _sandbox("sb-2", "100")],
+                end=not self.server.truncate_export,
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         body = json.dumps(payload).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -106,6 +116,7 @@ class TestUsageClient(unittest.TestCase):
     def setUp(self):
         self.server = HTTPServer(("127.0.0.1", 0), _UsageHandler)
         self.server.requests = []
+        self.server.truncate_export = False
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.client = UsageClient(
@@ -138,21 +149,26 @@ class TestUsageClient(unittest.TestCase):
         self.assertIn("fromDate", query)
         self.assertIn("toDate", query)
 
-    def test_sandboxes_page_through_one_window(self):
-        sandboxes = list(self.client.sandboxes())
+    def test_sandboxes_read_the_export_once(self):
+        export = self.client.sandboxes()
 
-        self.assertEqual([s.sandbox_id for s in sandboxes], ["sb-1", "sb-2"])
-        self.assertEqual(sandboxes[0].attributed_amount_minor, 200)
-        self.assertEqual(sandboxes[0].resources.cpu.quantity, Decimal("1.5"))
-        first_path, first_query = self.server.requests[0]
+        self.assertEqual([s.sandbox_id for s in export.sandboxes], ["sb-1", "sb-2"])
+        self.assertEqual(export.sandboxes[0].attributed_amount_minor, 200)
+        self.assertEqual(export.sandboxes[0].resources.cpu.quantity, Decimal("1.5"))
+        self.assertEqual(export.window_start, _WINDOW_START)
+        self.assertEqual(export.attributed_usage_charge.amount_minor, 300)
+        self.assertEqual(export.attributed_usage_charge.basis, "current_price_estimate")
+        self.assertEqual(len(self.server.requests), 1)
+        path, query = self.server.requests[0]
         self.assertEqual(
-            first_path, "/platform/v1/organizations/org-1/sandbox-usage/sandboxes"
+            path, "/platform/v1/organizations/org-1/sandbox-usage/sandboxes/export"
         )
-        self.assertNotIn("fromDate", first_query)
-        _, second_query = self.server.requests[1]
-        self.assertEqual(second_query["fromDate"], [_WINDOW_START])
-        self.assertEqual(second_query["toDate"], [_WINDOW_END])
-        self.assertEqual(second_query["cursor"], ["1"])
+        self.assertEqual(query, {})
+
+    def test_truncated_export_raises(self):
+        self.server.truncate_export = True
+        with self.assertRaisesRegex(Exception, "missing end record"):
+            self.client.sandboxes(last="30d")
 
     def test_rejects_unsupported_lookback(self):
         with self.assertRaises(UsageError):
