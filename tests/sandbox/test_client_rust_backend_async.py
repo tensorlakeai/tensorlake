@@ -1,11 +1,13 @@
 import asyncio
 import json
 import unittest
+from functools import partial
 from unittest.mock import patch
 
 from tensorlake.sandbox import (
     CLEAR_NETWORK_POLICY,
     AsyncPendingSandbox,
+    AsyncSandbox,
     NetworkConfig,
     PoolInUseError,
     SandboxNotFoundError,
@@ -1094,6 +1096,139 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request_json["image"], "python:3.11")
         self.assertEqual(request_json["resources"]["cpus"], 2.0)
         self.assertEqual(request_json["resources"]["memory_mb"], 1024)
+
+    async def test_creation_access_settings_reach_rust(self):
+        class RunningClient(_FakeAsyncRustClient):
+            async def create_sandbox_async(self, *, request_json):
+                self.create_request_json = request_json
+                return (
+                    "trace-create",
+                    '{"sandbox_id":"sbx-1","status":"running",'
+                    '"sandbox_url":"https://sbx-1.example.test"}',
+                )
+
+        fake = RunningClient()
+        with (
+            patch(
+                "tensorlake.sandbox.async_client._RUST_SANDBOX_CLIENT_AVAILABLE", True
+            ),
+            patch(
+                "tensorlake.sandbox.async_client.RustCloudSandboxClient",
+                return_value=fake,
+            ),
+        ):
+            client = AsyncSandboxClient(api_key="k", api_url="http://localhost:8900")
+            create_calls = (
+                client.create,
+                partial(client.create, wait=False),
+                client.create_and_connect,
+                partial(
+                    AsyncSandbox.create, api_key="k", api_url="http://localhost:8900"
+                ),
+                partial(
+                    AsyncSandbox.create,
+                    api_key="k",
+                    api_url="http://localhost:8900",
+                    wait=False,
+                ),
+            )
+            access_cases = (
+                (
+                    {
+                        "allow_unauthenticated_access": True,
+                        "exposed_ports": [8080, 1, 3000, 8080, 65535],
+                    },
+                    {
+                        "allow_unauthenticated_access": True,
+                        "exposed_ports": [1, 3000, 8080, 65535],
+                    },
+                ),
+                (
+                    {"allow_unauthenticated_access": False, "exposed_ports": []},
+                    {"allow_unauthenticated_access": False, "exposed_ports": []},
+                ),
+                (
+                    {"allow_unauthenticated_access": False},
+                    {"allow_unauthenticated_access": False},
+                ),
+                ({"exposed_ports": []}, {"exposed_ports": []}),
+                ({}, {}),
+                ({"allow_unauthenticated_access": None, "exposed_ports": None}, {}),
+            )
+            for create in create_calls:
+                for snapshot_id in (None, "snap-1"):
+                    for options, expected in access_cases:
+                        with self.subTest(
+                            create=create, snapshot_id=snapshot_id, options=options
+                        ):
+                            original = json.dumps(options)
+                            fake.create_request_json = None
+                            await create(snapshot_id=snapshot_id, **options)
+                            request = json.loads(fake.create_request_json)
+                            actual = {
+                                field: request[field]
+                                for field in (
+                                    "allow_unauthenticated_access",
+                                    "exposed_ports",
+                                )
+                                if field in request
+                            }
+                            self.assertEqual(actual, expected)
+                            self.assertEqual(json.dumps(options), original)
+
+    async def test_create_rejects_invalid_exposed_ports_before_sending(self):
+        fake = _FakeAsyncRustClient()
+        with (
+            patch(
+                "tensorlake.sandbox.async_client._RUST_SANDBOX_CLIENT_AVAILABLE", True
+            ),
+            patch(
+                "tensorlake.sandbox.async_client.RustCloudSandboxClient",
+                return_value=fake,
+            ),
+        ):
+            client = AsyncSandboxClient(api_key="k", api_url="http://localhost:8900")
+            for wait in (True, False):
+                for port in (0, -1, 65536, 9501, True, False, 8080.5, "8080"):
+                    with self.subTest(wait=wait, port=port):
+                        with self.assertRaises(SandboxError):
+                            await client.create(wait=wait, exposed_ports=[port])
+            self.assertFalse(fake.create_request_json)
+
+    async def test_pool_creation_rejects_access_overrides_before_claiming(self):
+        fake = _FakeAsyncRustClient()
+        with (
+            patch(
+                "tensorlake.sandbox.async_client._RUST_SANDBOX_CLIENT_AVAILABLE", True
+            ),
+            patch(
+                "tensorlake.sandbox.async_client.RustCloudSandboxClient",
+                return_value=fake,
+            ),
+            patch.object(AsyncSandboxClient, "claim") as claim,
+        ):
+            client = AsyncSandboxClient(api_key="k", api_url="http://localhost:8900")
+            for create in (
+                client.create_and_connect,
+                partial(
+                    AsyncSandbox.create, api_key="k", api_url="http://localhost:8900"
+                ),
+            ):
+                for options in (
+                    {"allow_unauthenticated_access": False},
+                    {"allow_unauthenticated_access": True},
+                    {"exposed_ports": []},
+                    {"exposed_ports": [3000]},
+                    {"allow_unauthenticated_access": False, "exposed_ports": []},
+                ):
+                    with self.subTest(create=create, options=options):
+                        with self.assertRaisesRegex(
+                            SandboxError, "cannot be combined with pool_id"
+                        ):
+                            await create(pool_id="pool-1", **options)
+            claim.assert_not_called()
+            self.assertFalse(fake.create_request_json)
+            self.assertEqual(fake.connect_proxy_calls, [])
 
     async def test_create_snapshot_restore_inherits_resources_when_omitted(self):
         fake = _FakeAsyncRustClient()

@@ -41,7 +41,9 @@ class TestGetOrCreate(unittest.TestCase):
             patch.object(Sandbox, "connect", return_value=existing) as connect,
             patch.object(Sandbox, "create") as create,
         ):
-            result = Sandbox.get_or_create(_NAME)
+            result = Sandbox.get_or_create(
+                _NAME, allow_unauthenticated_access=False, exposed_ports=[]
+            )
         self.assertIs(result, existing)
         self.assertEqual(existing._bind_outcome, "attached")
         self.assertEqual(connect.call_count, 1)
@@ -114,13 +116,20 @@ class TestGetOrCreate(unittest.TestCase):
             ) as connect,
             patch.object(Sandbox, "create", return_value=created) as create,
         ):
-            result = Sandbox.get_or_create(_NAME, image="my-agent")
+            result = Sandbox.get_or_create(
+                _NAME,
+                image="my-agent",
+                allow_unauthenticated_access=False,
+                exposed_ports=[],
+            )
         self.assertIs(result, created)
         self.assertEqual(created._bind_outcome, "created")
         self.assertEqual(connect.call_count, 1)
         create.assert_called_once()
         self.assertEqual(create.call_args.kwargs["name"], _NAME)
         self.assertEqual(create.call_args.kwargs["image"], "my-agent")
+        self.assertIs(create.call_args.kwargs["allow_unauthenticated_access"], False)
+        self.assertEqual(create.call_args.kwargs["exposed_ports"], [])
         # A fresh create is already running; no info/resume round-trip.
         created.info.assert_not_called()
         created.resume.assert_not_called()
@@ -390,7 +399,9 @@ class TestAsyncGetOrCreate(unittest.IsolatedAsyncioTestCase):
             patch.object(AsyncSandbox, "connect", AsyncMock(return_value=existing)),
             patch.object(AsyncSandbox, "create", AsyncMock()) as create,
         ):
-            result = await AsyncSandbox.get_or_create(_NAME)
+            result = await AsyncSandbox.get_or_create(
+                _NAME, allow_unauthenticated_access=False, exposed_ports=[]
+            )
         self.assertIs(result, existing)
         self.assertEqual(existing._bind_outcome, "resumed")
         existing.resume.assert_awaited_once_with(timeout=300.0)
@@ -441,10 +452,17 @@ class TestAsyncGetOrCreate(unittest.IsolatedAsyncioTestCase):
                 AsyncSandbox, "create", AsyncMock(return_value=created)
             ) as create,
         ):
-            result = await AsyncSandbox.get_or_create(_NAME, image="my-agent")
+            result = await AsyncSandbox.get_or_create(
+                _NAME,
+                image="my-agent",
+                allow_unauthenticated_access=False,
+                exposed_ports=[],
+            )
         self.assertIs(result, created)
         self.assertEqual(created._bind_outcome, "created")
         self.assertEqual(create.await_args.kwargs["name"], _NAME)
+        self.assertIs(create.await_args.kwargs["allow_unauthenticated_access"], False)
+        self.assertEqual(create.await_args.kwargs["exposed_ports"], [])
 
     async def test_unverified_connect_handle_missing_sandbox_is_created(self):
         dead = MagicMock(spec=AsyncSandbox)

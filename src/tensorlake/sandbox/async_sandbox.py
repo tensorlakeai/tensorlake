@@ -296,6 +296,9 @@ class AsyncSandbox:
         cancel_on_timeout: bool = False,
         wait: Literal[True] = True,
         auto_resume: bool | None = None,
+        *,
+        allow_unauthenticated_access: bool | None = None,
+        exposed_ports: list[int] | None = None,
     ) -> "AsyncSandbox": ...
 
     @overload
@@ -331,6 +334,8 @@ class AsyncSandbox:
         *,
         wait: Literal[False],
         auto_resume: bool | None = None,
+        allow_unauthenticated_access: bool | None = None,
+        exposed_ports: list[int] | None = None,
     ) -> AsyncPendingSandbox: ...
 
     @classmethod
@@ -364,6 +369,9 @@ class AsyncSandbox:
         cancel_on_timeout: bool = False,
         wait: bool = True,
         auto_resume: bool | None = None,
+        *,
+        allow_unauthenticated_access: bool | None = None,
+        exposed_ports: list[int] | None = None,
     ) -> "AsyncSandbox | AsyncPendingSandbox":
         """Create a new sandbox and return a connected, running handle.
 
@@ -414,6 +422,8 @@ class AsyncSandbox:
                 allow_out=allow_out,
                 deny_out=deny_out,
                 snapshot_id=snapshot_id,
+                allow_unauthenticated_access=allow_unauthenticated_access,
+                exposed_ports=exposed_ports,
                 name=name,
                 file_systems=file_systems,
                 gpu=gpu,
@@ -437,6 +447,8 @@ class AsyncSandbox:
             deny_out=deny_out,
             pool_id=pool_id,
             snapshot_id=snapshot_id,
+            allow_unauthenticated_access=allow_unauthenticated_access,
+            exposed_ports=exposed_ports,
             proxy_url=proxy_url,
             request_timeout=effective_request_timeout,
             name=name,
@@ -512,6 +524,8 @@ class AsyncSandbox:
         gpu: GpuRequest | None = None,
         max_pending_secs: int | None = None,
         auto_resume: bool | None = None,
+        allow_unauthenticated_access: bool | None = None,
+        exposed_ports: list[int] | None = None,
     ) -> "AsyncSandbox":
         """Return the one sandbox bound to ``name``. Create it on first use.
 
@@ -578,6 +592,8 @@ class AsyncSandbox:
                         allow_out=allow_out,
                         deny_out=deny_out,
                         snapshot_id=snapshot_id,
+                        allow_unauthenticated_access=allow_unauthenticated_access,
+                        exposed_ports=exposed_ports,
                         proxy_url=proxy_url,
                         request_timeout=request_timeout,
                         name=name,

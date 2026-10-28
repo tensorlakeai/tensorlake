@@ -262,6 +262,9 @@ class AsyncSandboxClient:
         max_pending_secs: int | None = None,
         wait: Literal[True] = True,
         auto_resume: bool | None = None,
+        *,
+        allow_unauthenticated_access: bool | None = None,
+        exposed_ports: list[int] | None = None,
     ) -> Traced[CreateSandboxResponse]: ...
 
     @overload
@@ -286,6 +289,8 @@ class AsyncSandboxClient:
         *,
         wait: Literal[False],
         auto_resume: bool | None = None,
+        allow_unauthenticated_access: bool | None = None,
+        exposed_ports: list[int] | None = None,
     ) -> AsyncPendingSandbox: ...
 
     async def create(
@@ -308,6 +313,9 @@ class AsyncSandboxClient:
         max_pending_secs: int | None = None,
         wait: bool = True,
         auto_resume: bool | None = None,
+        *,
+        allow_unauthenticated_access: bool | None = None,
+        exposed_ports: list[int] | None = None,
     ) -> "Traced[CreateSandboxResponse] | AsyncPendingSandbox":
         """Create a new standalone sandbox.
 
@@ -333,6 +341,8 @@ class AsyncSandboxClient:
                 allow_out=allow_out,
                 deny_out=deny_out,
                 snapshot_id=snapshot_id,
+                allow_unauthenticated_access=allow_unauthenticated_access,
+                exposed_ports=exposed_ports,
                 name=name,
                 file_systems=file_systems,
                 gpu=gpu,
@@ -352,6 +362,8 @@ class AsyncSandboxClient:
             allow_out=allow_out,
             deny_out=deny_out,
             snapshot_id=snapshot_id,
+            allow_unauthenticated_access=allow_unauthenticated_access,
+            exposed_ports=exposed_ports,
             name=name,
             file_systems=file_systems,
             gpu=gpu,
@@ -411,6 +423,9 @@ class AsyncSandboxClient:
         request_timeout: float | None = None,
         owns_sandbox: bool = False,
         auto_resume: bool | None = None,
+        *,
+        allow_unauthenticated_access: bool | None = None,
+        exposed_ports: list[int] | None = None,
     ) -> AsyncPendingSandbox:
         """Send the create with ``wait=False`` and return the pending handle,
         bound to this client so ``ready()`` / ``status()`` work."""
@@ -427,6 +442,8 @@ class AsyncSandboxClient:
             allow_out=allow_out,
             deny_out=deny_out,
             snapshot_id=snapshot_id,
+            allow_unauthenticated_access=allow_unauthenticated_access,
+            exposed_ports=exposed_ports,
             name=name,
             file_systems=file_systems,
             gpu=gpu,
@@ -1477,6 +1494,9 @@ class AsyncSandboxClient:
         cancel_on_timeout: bool = False,
         poll_interval: float = DEFAULT_WAIT_POLL_INTERVAL_SEC,
         auto_resume: bool | None = None,
+        *,
+        allow_unauthenticated_access: bool | None = None,
+        exposed_ports: list[int] | None = None,
     ) -> "AsyncSandbox":
         """Create a sandbox, wait for it to start, and return a connection.
 
@@ -1488,6 +1508,13 @@ class AsyncSandboxClient:
         ``cancel_on_timeout=True`` for the previous delete-then-raise
         behaviour, or ``max_pending_secs`` for a server-side bound.
         """
+        if pool_id is not None and (
+            allow_unauthenticated_access is not None or exposed_ports is not None
+        ):
+            raise SandboxError(
+                "allow_unauthenticated_access and exposed_ports cannot be combined "
+                "with pool_id: pool claims inherit access settings from the pool."
+            )
         wait_timeout = (
             request_timeout
             if request_timeout is not None
@@ -1522,6 +1549,8 @@ class AsyncSandboxClient:
                 allow_out=allow_out,
                 deny_out=deny_out,
                 snapshot_id=snapshot_id,
+                allow_unauthenticated_access=allow_unauthenticated_access,
+                exposed_ports=exposed_ports,
                 name=name,
                 file_systems=file_systems,
                 gpu=gpu,

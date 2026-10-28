@@ -452,6 +452,8 @@ class CreateSandboxRequest(BaseModel):
     entrypoint: list[str] | None = None
     network: NetworkConfig | None = None
     snapshot_id: str | None = None
+    allow_unauthenticated_access: bool | None = None
+    exposed_ports: list[int] | None = None
     name: str | None = None
     file_systems: list[FileSystemMount] | None = None
     # ``False`` asks the server to answer as soon as the sandbox is durable

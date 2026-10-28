@@ -396,6 +396,9 @@ class Sandbox:
         cancel_on_timeout: bool = False,
         wait: Literal[True] = True,
         auto_resume: bool | None = None,
+        *,
+        allow_unauthenticated_access: bool | None = None,
+        exposed_ports: list[int] | None = None,
     ) -> "Sandbox": ...
 
     @overload
@@ -431,6 +434,8 @@ class Sandbox:
         *,
         wait: Literal[False],
         auto_resume: bool | None = None,
+        allow_unauthenticated_access: bool | None = None,
+        exposed_ports: list[int] | None = None,
     ) -> PendingSandbox: ...
 
     @classmethod
@@ -464,6 +469,9 @@ class Sandbox:
         cancel_on_timeout: bool = False,
         wait: bool = True,
         auto_resume: bool | None = None,
+        *,
+        allow_unauthenticated_access: bool | None = None,
+        exposed_ports: list[int] | None = None,
     ) -> "Sandbox | PendingSandbox":
         """Create a new sandbox and return a connected, running handle.
 
@@ -545,6 +553,16 @@ class Sandbox:
             wait: ``True`` (default) blocks until running; ``False``
                 returns a :class:`PendingSandbox` at once. Cannot be
                 combined with ``pool_id``.
+            allow_unauthenticated_access: Allow proxy access without
+                authentication when True; require authentication when False.
+                None uses server defaults or inherits the snapshot setting.
+                Cannot be combined with ``pool_id`` because pool claims
+                inherit access settings from the pool.
+            exposed_ports: User ports to expose through the sandbox proxy.
+                Integers from 1 to 65535, excluding reserved port 9501;
+                duplicates are removed and ports sorted. None uses server
+                defaults or inherits the snapshot setting; [] exposes no
+                user ports. Cannot be combined with ``pool_id``.
 
         Returns:
             Connected Sandbox handle (auto-terminates in context manager),
@@ -555,6 +573,7 @@ class Sandbox:
                 pending; it keeps its place in the queue.
             SandboxError: If the sandbox fails to start; ``reason`` carries
                 the server's reason (``no_capacity``, ``cancelled``, ...).
+                Also raised when access overrides are combined with ``pool_id``.
         """
         from .client import SandboxClient
 
@@ -595,6 +614,8 @@ class Sandbox:
                 allow_out=allow_out,
                 deny_out=deny_out,
                 snapshot_id=snapshot_id,
+                allow_unauthenticated_access=allow_unauthenticated_access,
+                exposed_ports=exposed_ports,
                 name=name,
                 file_systems=file_systems,
                 gpu=gpu,
@@ -618,6 +639,8 @@ class Sandbox:
             deny_out=deny_out,
             pool_id=pool_id,
             snapshot_id=snapshot_id,
+            allow_unauthenticated_access=allow_unauthenticated_access,
+            exposed_ports=exposed_ports,
             proxy_url=proxy_url,
             request_timeout=effective_request_timeout,
             name=name,
@@ -712,6 +735,8 @@ class Sandbox:
         gpu: GpuRequest | None = None,
         max_pending_secs: int | None = None,
         auto_resume: bool | None = None,
+        allow_unauthenticated_access: bool | None = None,
+        exposed_ports: list[int] | None = None,
     ) -> "Sandbox":
         """Return the one sandbox bound to ``name``. Create it on first use.
 
@@ -832,6 +857,8 @@ class Sandbox:
                         allow_out=allow_out,
                         deny_out=deny_out,
                         snapshot_id=snapshot_id,
+                        allow_unauthenticated_access=allow_unauthenticated_access,
+                        exposed_ports=exposed_ports,
                         proxy_url=proxy_url,
                         request_timeout=request_timeout,
                         name=name,
