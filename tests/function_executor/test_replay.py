@@ -508,6 +508,7 @@ class TestStrictReplayMode(unittest.TestCase):
                     finish.failure_reason,
                     ALLOCATION_FAILURE_REASON_REPLAY_EVENT_HISTORY_MISMATCH,
                 )
+                self.assertEqual(finish.allocation_event_clock, 1)
                 stub.delete_allocation(DeleteAllocationRequest(allocation_id=alloc_id))
 
     def test_strict_divergence_early_finish(self):
@@ -562,6 +563,7 @@ class TestStrictReplayMode(unittest.TestCase):
                     finish.failure_reason,
                     ALLOCATION_FAILURE_REASON_REPLAY_EVENT_HISTORY_MISMATCH,
                 )
+                self.assertEqual(finish.allocation_event_clock, 1)
                 stub.delete_allocation(DeleteAllocationRequest(allocation_id=alloc_id))
 
     def test_strict_divergence_reorder_function_calls(self):
