@@ -61,11 +61,14 @@ pub struct UsageSummary {
     pub window_start: String,
     pub window_end: String,
     pub compute_units: String,
-    /// Null when the organization has no metered price.
+    /// Null when the organization has no metered price, and on plans with
+    /// included usage (Pro, Enterprise) when the window is not inside the
+    /// current billing period. Use `usage_value` then.
     pub usage_charge: Option<UsageCharge>,
     #[serde(default)]
     pub included_usage: Option<IncludedUsage>,
-    /// Usage valued at the overage rate before the plan allowance.
+    /// Usage valued at the plan's overage rate, before included usage. Set
+    /// for every window on plans with included usage, null otherwise.
     #[serde(default)]
     pub usage_value: Option<UsageCharge>,
     pub running_sandboxes: u64,
@@ -140,9 +143,14 @@ pub struct SandboxUsageExportWindow {
     pub window_start: String,
     pub window_end: String,
     /// The organization's usage charge; the sandboxes' attributed amounts add
-    /// up to it exactly. Null when the organization has no metered price.
+    /// up to it exactly. Null when the organization has no metered price, and
+    /// on plans with included usage when the window is not inside the current
+    /// billing period.
     pub attributed_usage_charge: Option<AttributedUsageCharge>,
     pub included_usage: Option<IncludedUsage>,
+    /// The organization's usage at the plan's overage rate; the sandboxes'
+    /// usage values add up to it exactly. Set for every window on plans with
+    /// included usage.
     pub attributed_usage_value: Option<UsageAmount>,
 }
 

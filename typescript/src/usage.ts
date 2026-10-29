@@ -50,10 +50,17 @@ export interface UsageSummary {
   windowStart: string;
   windowEnd: string;
   computeUnits: string;
-  /** `null` when the organization has no metered price. */
+  /**
+   * `null` when the organization has no metered price, and on plans with
+   * included usage (Pro, Enterprise) when the window is not inside the current
+   * billing period. Use `usageValue` then.
+   */
   usageCharge: UsageCharge | null;
   includedUsage: IncludedUsage | null;
-  /** Usage valued at the overage rate before the plan allowance. */
+  /**
+   * Usage valued at the plan's overage rate, before included usage. Set for
+   * every window on plans with included usage, `null` otherwise.
+   */
   usageValue: UsageCharge | null;
   runningSandboxes: number;
   projects: Array<{ projectId: string; projectName: string; computeUnits: string }>;
@@ -97,10 +104,17 @@ export interface SandboxUsageExport {
   windowEnd: string;
   /**
    * The organization's usage charge; the sandboxes' attributed amounts add up
-   * to it exactly. `null` when the organization has no metered price.
+   * to it exactly. `null` when the organization has no metered price, and on
+   * plans with included usage when the window is not inside the current
+   * billing period.
    */
   attributedUsageCharge: AttributedUsageCharge | null;
   includedUsage: IncludedUsage | null;
+  /**
+   * The organization's usage at the plan's overage rate; the sandboxes' usage
+   * values add up to it exactly. Set for every window on plans with included
+   * usage.
+   */
   attributedUsageValue: { currency: string; amountMinor: string } | null;
   sandboxes: SandboxUsage[];
 }

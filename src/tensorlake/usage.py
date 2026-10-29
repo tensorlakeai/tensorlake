@@ -69,10 +69,13 @@ class UsageSummary(_Model):
     window_end: str
     compute_units: Decimal
     usage_charge: UsageCharge | None = None
-    """``None`` when the organization has no metered price."""
+    """``None`` when the organization has no metered price, and on plans with
+    included usage (Pro, Enterprise) when the window is not inside the current
+    billing period. Use ``usage_value`` then."""
     included_usage: IncludedUsage | None = None
     usage_value: UsageCharge | None = None
-    """Usage valued at the overage rate before the plan allowance."""
+    """Usage valued at the plan's overage rate, before included usage. Set for
+    every window on plans with included usage, ``None`` otherwise."""
     running_sandboxes: int
     projects: list[ProjectComputeUnits]
 
@@ -128,9 +131,14 @@ class SandboxUsageExport(_Model):
     window_end: str
     attributed_usage_charge: AttributedUsageCharge | None = None
     """The organization's usage charge; the sandboxes' attributed amounts add
-    up to it exactly. ``None`` when the organization has no metered price."""
+    up to it exactly. ``None`` when the organization has no metered price, and
+    on plans with included usage when the window is not inside the current
+    billing period."""
     included_usage: IncludedUsage | None = None
     attributed_usage_value: UsageAmount | None = None
+    """The organization's usage at the plan's overage rate; the sandboxes'
+    usage values add up to it exactly. Set for every window on plans with
+    included usage."""
     sandboxes: list[SandboxUsage]
 
 
