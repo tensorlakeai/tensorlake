@@ -50,6 +50,8 @@ class LocalFutureRun:
         # Future run waits on this event until it can exit.
         self._finish_event: Event = Event()
         self._finish_with_exception: bool = False
+        # Set when the user function returned. It can't handle failures of the calls it started after that.
+        self._user_function_returned: bool = False
         # Used to cancel the future run before entering the _run_future method.
         self._cancelled: bool = False
         # Starts the future run in thread pool. Must be the last operation in __init__.
@@ -69,9 +71,20 @@ class LocalFutureRun:
     def start(self) -> None:
         self._start_event.set()
 
+    @property
+    def is_started(self) -> bool:
+        return self._start_event.is_set()
+
+    @property
+    def user_function_returned(self) -> bool:
+        return self._user_function_returned
+
     def finish(self, is_exception: bool) -> None:
         self._finish_with_exception = is_exception
         self._finish_event.set()
+        # A future run that failed before starting (its input failed) never gets start(),
+        # so wake its thread up to let it exit.
+        self._start_event.set()
 
     def cancel(self) -> None:
         self._cancelled = True
@@ -90,9 +103,11 @@ class LocalFutureRun:
         if self._cancelled:
             return
 
-        context: contextvars.Context = contextvars.Context()
-        result: LocalFutureRunResult = context.run(self._run_future_in_context)
-        self._result_queue.put(result)
+        if not self._finish_event.is_set():
+            context: contextvars.Context = contextvars.Context()
+            result: LocalFutureRunResult = context.run(self._run_future_in_context)
+            self._user_function_returned = True
+            self._result_queue.put(result)
 
         # Wait until the user future is considered finished.
         while not self._finish_event.is_set():
