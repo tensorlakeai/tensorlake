@@ -275,7 +275,8 @@ jobs:
             tests.image.test_builds \
             tests.image.test_builds_native \
             tests.image.test_docker_config_native \
-            tests.function_agent.test_runner
+            tests.function_agent.test_runner \
+            tests.test_usage
 
   test_sandbox:
     name: Sandbox integration tests

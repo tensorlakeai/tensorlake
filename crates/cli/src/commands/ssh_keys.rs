@@ -5,7 +5,7 @@ use tensorlake::error::SdkError;
 use tensorlake::{Client, ClientBuilder};
 
 use crate::auth::context::CliContext;
-use crate::error::{CliError, Result};
+use crate::error::{CliError, Result, remote_message};
 use crate::output::table::new_table;
 
 const BASE_PATH: &str = "/platform/v1/users/me/ssh-keys";
@@ -192,7 +192,7 @@ fn map_sdk_error(error: SdkError) -> CliError {
             if (400..500).contains(&code) {
                 CliError::usage(format!(
                     "ssh-keys request rejected ({code}): {}",
-                    parse_remote_message(&message)
+                    remote_message(&message)
                 ))
             } else {
                 CliError::Other(anyhow::anyhow!(
@@ -210,21 +210,10 @@ fn map_create_sdk_error(error: SdkError) -> CliError {
     {
         return CliError::usage(format!(
             "this ssh key is already registered: {}",
-            parse_remote_message(message)
+            remote_message(message)
         ));
     }
     map_sdk_error(error)
-}
-
-fn parse_remote_message(raw: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(raw)
-        .ok()
-        .and_then(|body| {
-            body.get("message")
-                .and_then(|v| v.as_str())
-                .map(String::from)
-        })
-        .unwrap_or_else(|| raw.to_string())
 }
 
 #[cfg(test)]

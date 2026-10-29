@@ -15,6 +15,7 @@ pub mod new;
 pub mod sbx;
 pub mod secrets;
 pub mod ssh_keys;
+pub mod usage;
 pub mod whoami;
 
 use std::sync::Arc;

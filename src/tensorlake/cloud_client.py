@@ -262,6 +262,28 @@ class CloudClient:
         except Exception as e:
             _raise_as_tensorlake_error(e)
 
+    # -- Usage operations --
+
+    def sandbox_usage_summary_json(
+        self, organization_id: str, last: str | None = None
+    ) -> str:
+        try:
+            return self._client.sandbox_usage_summary_json(
+                organization_id=organization_id, last=last
+            )
+        except Exception as e:
+            _raise_as_tensorlake_error(e)
+
+    def sandbox_usage_export_json(
+        self, organization_id: str, last: str | None = None
+    ) -> str:
+        try:
+            return self._client.sandbox_usage_export_json(
+                organization_id=organization_id, last=last
+            )
+        except Exception as e:
+            _raise_as_tensorlake_error(e)
+
     # -- Git repository operations --
 
     def git_repo_url(self, project_id: str, repo: str) -> str:

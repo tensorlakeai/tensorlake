@@ -12,6 +12,7 @@ mod function_agent;
 mod repositories;
 mod sandbox;
 mod tunnel;
+mod usage;
 
 use std::{
     collections::HashMap,

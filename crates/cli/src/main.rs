@@ -237,6 +237,29 @@ enum Commands {
     /// Manage sandboxes
     #[command(subcommand)]
     Sbx(SbxCommands),
+
+    /// Show the organization's sandbox usage and cost
+    Usage(UsageArgs),
+}
+
+#[derive(Args)]
+struct UsageArgs {
+    #[command(subcommand)]
+    command: Option<UsageCommands>,
+
+    /// Read the last 1d, 7d or 30d instead of the current billing period
+    #[arg(long, global = true, value_enum)]
+    last: Option<commands::usage::Lookback>,
+
+    /// Output format
+    #[arg(short, long, global = true, default_value = "text", value_enum)]
+    output: OutputFormat,
+}
+
+#[derive(Subcommand)]
+enum UsageCommands {
+    /// List usage and attributed cost per sandbox
+    Sandboxes,
 }
 
 use std::path::PathBuf;
@@ -2512,6 +2535,21 @@ async fn run_command(
             run_git_command(ctx, subcmd).await
         }
         Commands::Applications(app_args) => run_applications_command(ctx, app_args).await,
+        Commands::Usage(args) => {
+            // Usage is organization-scoped: no project is needed. An API key
+            // names its organization through introspection.
+            ensure_auth(ctx).await?;
+            if ctx.api_key.is_some() {
+                ctx.introspect().await?;
+            }
+            let json = matches!(args.output, OutputFormat::Json);
+            match args.command {
+                None => commands::usage::summary(ctx, args.last, json).await,
+                Some(UsageCommands::Sandboxes) => {
+                    commands::usage::sandboxes(ctx, args.last, json).await
+                }
+            }
+        }
         Commands::Sbx(subcmd) => match subcmd {
             SbxCommands::Ssh(ssh_args)
                 if matches!(ssh_args.command, Some(SshCommands::Keys(_))) =>

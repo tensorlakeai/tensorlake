@@ -13,6 +13,7 @@ from tensorlake.sandbox import (
     delete_file_system,
     list_file_systems,
 )
+from tensorlake.usage import UsageClient
 
 __all__ = [
     "Image",
@@ -26,4 +27,5 @@ __all__ = [
     "list_file_systems",
     "delete_file_system",
     "RepositoryClient",
+    "UsageClient",
 ]

@@ -55,6 +55,19 @@ impl CliError {
 
 pub type Result<T> = std::result::Result<T, CliError>;
 
+#[derive(serde::Deserialize)]
+struct RemoteErrorBody {
+    message: String,
+}
+
+/// The `message` of a Platform API error body, or the raw body when it is
+/// not a JSON error.
+pub fn remote_message(raw: &str) -> String {
+    serde_json::from_str::<RemoteErrorBody>(raw)
+        .map(|body| body.message)
+        .unwrap_or_else(|_| raw.to_string())
+}
+
 #[cfg(feature = "mount")]
 impl From<gsvc_fs_client::CliError> for CliError {
     fn from(error: gsvc_fs_client::CliError) -> Self {
@@ -72,5 +85,20 @@ impl From<gsvc_fs_client::CliError> for CliError {
             gsvc_fs_client::CliError::Cancelled => Self::Cancelled,
             gsvc_fs_client::CliError::ExitCode(code) => Self::ExitCode(code),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::remote_message;
+
+    #[test]
+    fn remote_message_reads_json_errors_and_falls_back_to_the_body() {
+        assert_eq!(
+            remote_message(r#"{"code":"TL_VALIDATION_ERROR","message":"bad range"}"#),
+            "bad range"
+        );
+        assert_eq!(remote_message("upstream timeout"), "upstream timeout");
+        assert_eq!(remote_message(r#"{"message":42}"#), r#"{"message":42}"#);
     }
 }

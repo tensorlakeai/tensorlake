@@ -4,7 +4,8 @@ export type NativeClientKind =
   | "NativeSandboxClient"
   | "NativeSandboxProxyClient"
   | "NativeTcpTunnel"
-  | "NativeRepositoryClient";
+  | "NativeRepositoryClient"
+  | "NativeUsageClient";
 
 export interface NativeHandle {
   id: number;

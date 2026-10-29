@@ -46,6 +46,7 @@ use tensorlake::sandboxes::{
     DEFAULT_WAIT_POLL_INTERVAL, SandboxDesktopClient as RustSandboxDesktopClient,
     SandboxProxyClient, SandboxesClient, resolve_sandbox_proxy_target, select_sandbox_proxy_url,
 };
+use tensorlake::usage::{UsageClient, UsageWindow};
 use tensorlake::{
     Client, ClientBuilder,
     error::{SdkError, TransportFailure},
@@ -133,6 +134,41 @@ impl CloudApiClient {
 
     fn close(&self) {
         // reqwest clients are closed when dropped; this is a no-op for API parity.
+    }
+
+    /// Organization usage totals for the current billing period, or for the
+    /// last `1d`, `7d` or `30d`.
+    #[pyo3(signature = (organization_id, last=None))]
+    fn sandbox_usage_summary_json(
+        &self,
+        organization_id: String,
+        last: Option<String>,
+    ) -> PyResult<String> {
+        let window = usage_window(last.as_deref())?;
+        self.run_with_retry(5, move |client| {
+            let usage = UsageClient::new(client, organization_id.clone());
+            async move {
+                let traced = usage.summary(window).await?;
+                serde_json::to_string(&*traced).map_err(SdkError::from)
+            }
+        })
+    }
+
+    /// Every sandbox of the window with its usage and attributed charge.
+    #[pyo3(signature = (organization_id, last=None))]
+    fn sandbox_usage_export_json(
+        &self,
+        organization_id: String,
+        last: Option<String>,
+    ) -> PyResult<String> {
+        let window = usage_window(last.as_deref())?;
+        self.run_with_retry(5, move |client| {
+            let usage = UsageClient::new(client, organization_id.clone());
+            async move {
+                let traced = usage.sandboxes(window).await?;
+                serde_json::to_string(&*traced).map_err(SdkError::from)
+            }
+        })
     }
 
     /// Return the project selected by ingress for Artifact Storage operations.
@@ -3990,6 +4026,15 @@ where
     Fut: Future<Output = Result<T, SdkError>>,
 {
     retry(client, RetryPolicy::non_idempotent(), op).await
+}
+
+fn usage_window(last: Option<&str>) -> PyResult<UsageWindow> {
+    match last {
+        None => Ok(UsageWindow::CurrentPeriod),
+        Some(value) => value
+            .parse()
+            .map_err(|error: SdkError| pyo3::exceptions::PyValueError::new_err(error.to_string())),
+    }
 }
 
 fn into_py_error(error: SdkError) -> PyErr {
