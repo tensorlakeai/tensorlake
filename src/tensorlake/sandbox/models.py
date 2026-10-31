@@ -102,6 +102,7 @@ class SandboxStatus(str, Enum):
     SNAPSHOTTING = "snapshotting"
     SUSPENDING = "suspending"
     SUSPENDED = "suspended"
+    RESUME_FAILED = "resume_failed"
     TERMINATED = "terminated"
     TIMEOUT = "timeout"
     # Terminal status used by blocking create/claim responses.
@@ -763,6 +764,7 @@ class SandboxInfo(BaseModel):
     pool_id: str | None = None
     outcome: str | None = None
     termination_reason: str | None = None
+    snapshot_id: str | None = None
     error_details: Any | None = None
     pending_reason: str | None = None
     created_at: OptionalTimestamp = None

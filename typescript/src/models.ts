@@ -6,6 +6,7 @@ export enum SandboxStatus {
   SNAPSHOTTING = "snapshotting",
   SUSPENDING = "suspending",
   SUSPENDED = "suspended",
+  RESUME_FAILED = "resume_failed",
   TERMINATED = "terminated",
   TIMEOUT = "timeout",
   /** Terminal status used by blocking create/claim responses. */
@@ -402,6 +403,7 @@ export interface SandboxInfo {
   poolId?: string;
   outcome?: string;
   terminationReason?: string;
+  snapshotId?: string;
   errorDetails?: unknown;
   /** Why a pending sandbox is waiting, in snake_case. */
   pendingReason?: string;
@@ -992,8 +994,10 @@ export function fromSnakeKeys(obj: unknown, idField?: string): unknown {
         key = snakeToCamel(k);
       }
 
-      // Parse timestamp fields
-      if (
+      // Diagnosis is arbitrary server JSON, not an SDK model. Preserve its keys.
+      if (k === "error_details") {
+        result[key] = v === null ? undefined : v;
+      } else if (
         key.endsWith("At") ||
         key === "timestamp" ||
         key === "startedAt" ||
