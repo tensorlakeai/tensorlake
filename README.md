@@ -179,6 +179,10 @@ support live resize. Resource arguments match create, and updates wait for
 confirmed completion by default.
 See [sandbox resource resize](docs/sandbox-resize.md).
 
+A failed sandbox resume can retain its checkpoint in `resume_failed`. Readiness
+and resume waits expose `SandboxResumeError`; retry through an explicit resume.
+See [recoverable sandbox resume failures](docs/sandbox-resume-failure.md).
+
 ### CAS and legacy sandbox images
 
 `tl sbx image create`, `tl sbx image import` and the SDK build and import calls

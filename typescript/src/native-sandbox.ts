@@ -5,6 +5,7 @@ import {
   RemoteAPIError,
   SandboxConnectionError,
   SandboxError,
+  SandboxResumeError,
   SandboxResizeError,
   SandboxNotFoundError,
 } from "./errors.js";
@@ -392,6 +393,9 @@ export function translateNativeError(
 
   const { category, status, message } = payload;
 
+  if (category === "resume_failed") {
+    return new SandboxResumeError(fromSnakeKeys(JSON.parse(message), "sandboxId") as ConstructorParameters<typeof SandboxResumeError>[0]);
+  }
   if (category === "resize") {
     return new SandboxResizeError(
       fromSnakeKeys(JSON.parse(message), "sandboxId") as ConstructorParameters<typeof SandboxResizeError>[0],

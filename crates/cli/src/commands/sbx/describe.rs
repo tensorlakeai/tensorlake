@@ -14,6 +14,7 @@ struct SandboxDescription {
     namespace: Option<String>,
     status: Option<String>,
     runtime: Option<String>,
+    snapshot_id: Option<String>,
     #[serde(flatten)]
     failure: SandboxFailureDetails,
     resources: Option<SandboxResources>,
@@ -252,6 +253,23 @@ fn print_sandbox_details(item: &SandboxDescription) {
         .unwrap_or_default();
     println!("Deny out:        {}", deny_out);
 
+    if let Some(snapshot_id) = &item.snapshot_id {
+        println!("Snapshot:        {snapshot_id}");
+    }
+    if status == "resume_failed" {
+        if let Some(detail) = item
+            .failure
+            .error_details
+            .as_ref()
+            .and_then(error_details_message)
+        {
+            println!("Resume error:    {detail}");
+        }
+        println!(
+            "Recovery:        Sandbox and checkpoint retained; retry with tl sbx resume <sandbox-id>"
+        );
+    }
+
     // Termination group — only shown for terminated sandboxes
     if status.eq_ignore_ascii_case("terminated") {
         let terminated_at = item
@@ -280,11 +298,9 @@ fn print_sandbox_details(item: &SandboxDescription) {
 fn print_ssh_config_details(item: &SandboxDescription) -> Result<()> {
     // Terminated sandboxes have no routable guest. Their diagnosis must remain
     // inspectable even when the server has already removed sandbox_url.
-    if item
-        .status
-        .as_deref()
-        .is_some_and(|status| status.eq_ignore_ascii_case("terminated"))
-    {
+    if item.status.as_deref().is_some_and(|status| {
+        status.eq_ignore_ascii_case("terminated") || status.eq_ignore_ascii_case("resume_failed")
+    }) {
         return Ok(());
     }
     let id = item

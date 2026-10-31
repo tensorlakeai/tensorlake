@@ -147,6 +147,7 @@ export type {
 export {
   SandboxException,
   SandboxError,
+  SandboxResumeError,
   SandboxResizeError,
   SandboxPending,
   SandboxConnectionError,

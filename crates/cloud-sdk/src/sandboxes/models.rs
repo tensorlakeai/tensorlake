@@ -775,6 +775,8 @@ pub struct SandboxInfo {
     #[serde(default)]
     pub termination_reason: Option<String>,
     #[serde(default)]
+    pub snapshot_id: Option<String>,
+    #[serde(default)]
     pub error_details: Option<serde_json::Value>,
     /// Why a pending sandbox is waiting, in snake_case.
     #[serde(default)]

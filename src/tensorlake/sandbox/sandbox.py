@@ -22,6 +22,7 @@ from .exceptions import (
     SandboxNotFoundError,
     SandboxNotRoutableError,
     SandboxPending,
+    SandboxResumeError,
 )
 from .models import (
     CheckpointType,
@@ -342,6 +343,8 @@ class Sandbox:
                 info.sandbox_url is not None or self._explicit_proxy_url is not None
             ):
                 return info
+            if info.status == SandboxStatus.RESUME_FAILED:
+                raise SandboxResumeError.from_info(info)
             if info.status == SandboxStatus.TERMINATED:
                 raise SandboxError(
                     f"Sandbox {identifier!r} terminated while refreshing proxy routing",
