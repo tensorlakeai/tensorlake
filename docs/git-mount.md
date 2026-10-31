@@ -163,3 +163,39 @@ history.
 Deleting a filesystem snapshot removes that permanent retention point; it does not immediately
 delete content that another snapshot, autosave, or live filesystem head still references.
 Unreferenced bytes are reclaimed asynchronously.
+
+### Preparing a filesystem working set
+
+Use `tl fs prefetch /path/to/mount --metadata-only` before a metadata-heavy command such as
+`git status` when file contents can stay remote. It includes empty directories, names, modes,
+mtimes and symlinks without fetching file data objects. Tiny inline values embedded in directory
+metadata travel with that metadata. With a compatible server the daemon
+loads this metadata in bounded tree pages; older servers retain ordinary directory traversal.
+`tl fs prefetch /path/to/mount/subtree` also downloads and verifies that subtree's file contents.
+Different mounts can prefetch concurrently, subject to available host, network and service capacity.
+
+New complete files written through a compatible mount remain in its verified local cache after
+publication when disk capacity permits. Sparse edits remain incremental. These cached bytes are
+derived: eviction does not affect remotely published data, and a separate fork mount does not
+inherit another mount's local cache.
+
+`tl fs push DIR FILESYSTEM` includes tracked working-tree files even when they match `.gitignore`.
+It uses current file bytes, including populated Git LFS files. Ignored untracked files stay excluded.
+Git must be installed when pushing a Git working tree.
+
+### Batch durability and handoff
+
+Applications can batch writes when they do not require each individual operation to survive a
+crash. Finish application writes and flush application buffers, then request one
+`tl fs snapshot /path/to/mount -m 'build input'`. A successful snapshot supplies the retained remote
+boundary to use for subsequent forks. Keep the source until the fork succeeds.
+
+`accepted == durable` in `tl fs status --json` establishes daemon-local durability only. It does
+not prove remote publication, and status is not a kernel flush or a multi-file transaction barrier.
+A plain asynchronous `sync` plus a status sample is therefore not a substitute for a successful
+snapshot when the next step deletes a filesystem or starts a remote command. Keep per-file fsync
+where the application's crash-consistency protocol requires it; batching changes that guarantee.
+
+Forks own their selected snapshot independently. Deleting the seed or its permanent retention point
+does not remove content still referenced by a surviving fork's head or retained snapshots. Forks
+remain subject to project quotas and normal snapshot retention and billing.

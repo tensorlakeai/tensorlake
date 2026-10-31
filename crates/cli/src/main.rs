@@ -375,6 +375,10 @@ enum FsCommands {
     Prefetch {
         /// File or directory inside a mount (default: the current directory)
         path: Option<PathBuf>,
+
+        /// Load directory entries, file attributes and symlinks without downloading file content
+        #[arg(long)]
+        metadata_only: bool,
     },
 
     /// Mint the scoped credential a sandbox needs to attach one filesystem
@@ -3269,8 +3273,11 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
             return commands::fs::run_macos_kernel_refresh_helper(&state_dir, &through, batch)
                 .await;
         }
-        FsCommands::Prefetch { path } => {
-            return commands::fs::prefetch_filesystem(path).await;
+        FsCommands::Prefetch {
+            path,
+            metadata_only,
+        } => {
+            return commands::fs::prefetch_filesystem(path, metadata_only).await;
         }
         other => other,
     };
@@ -3368,7 +3375,7 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
             commands::fs::mount_filesystem(ctx, &target, &path, foreground, trace_ops, &log_level)
                 .await?;
             if prefetch {
-                commands::fs::prefetch_filesystem(Some(path)).await
+                commands::fs::prefetch_filesystem(Some(path), false).await
             } else {
                 Ok(())
             }
@@ -4502,15 +4509,29 @@ mod tests {
             _ => panic!("expected fs snapshot command"),
         }
         match parse_command(["tl", "fs", "prefetch", "./w/DerivedData"]) {
-            Commands::Fs(FsCommands::Prefetch { path }) => {
+            Commands::Fs(FsCommands::Prefetch {
+                path,
+                metadata_only: false,
+            }) => {
                 assert_eq!(path, Some(PathBuf::from("./w/DerivedData")));
             }
             _ => panic!("expected fs prefetch command"),
         }
         match parse_command(["tl", "fs", "prefetch"]) {
-            Commands::Fs(FsCommands::Prefetch { path: None }) => {}
+            Commands::Fs(FsCommands::Prefetch {
+                path: None,
+                metadata_only: false,
+            }) => {}
             _ => panic!("expected cwd-defaulting fs prefetch command"),
         }
+
+        assert!(matches!(
+            parse_command(["tl", "fs", "prefetch", "--metadata-only"]),
+            Commands::Fs(FsCommands::Prefetch {
+                path: None,
+                metadata_only: true
+            })
+        ));
 
         match parse_command(["tl", "fs", "snapshot", "./w", "-m", "wip"]) {
             Commands::Fs(FsCommands::Snapshot { path, message, .. }) => {
