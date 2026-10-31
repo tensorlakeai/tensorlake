@@ -202,6 +202,48 @@ class TestAsyncPty(unittest.IsolatedAsyncioTestCase):
 
             delete_mock.assert_called_once_with("sess-1", timeout=10.0)
 
+    async def test_create_pty_cleans_up_session_when_attach_is_cancelled(self):
+        import tensorlake.sandbox.pty as pty_module
+
+        sandbox, _ = _make_async_sandbox()
+        connecting = asyncio.Event()
+
+        async def connect(*args, **kwargs):
+            connecting.set()
+            await asyncio.Future()
+
+        fake_module = types.SimpleNamespace(connect=connect)
+        with (
+            patch.object(pty_module, "_async_ws_client", fake_module),
+            patch.object(
+                sandbox, "_delete_pty_session", new_callable=AsyncMock
+            ) as delete_mock,
+        ):
+            task = asyncio.create_task(
+                sandbox.create_pty(command="/bin/bash", connect_timeout=3.0)
+            )
+            await asyncio.wait_for(connecting.wait(), timeout=1.0)
+            task.cancel("caller cancelled the attach")
+            # Python 3.10's wait_for may discard the task's cancellation message.
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertTrue(task.cancelled())
+            delete_mock.assert_awaited_once_with("sess-1", timeout=3.0)
+
+    async def test_create_pty_preserves_cancellation_when_cleanup_fails(self):
+        sandbox, _ = _make_async_sandbox()
+        cancelled = asyncio.CancelledError("caller cancellation")
+        with (
+            patch.object(sandbox, "connect_pty", side_effect=cancelled),
+            patch.object(
+                sandbox, "_delete_pty_session", side_effect=OSError("cleanup failed")
+            ) as delete_mock,
+        ):
+            with self.assertRaises(asyncio.CancelledError) as raised:
+                await sandbox.create_pty(command="/bin/bash")
+            self.assertIs(raised.exception, cancelled)
+            delete_mock.assert_awaited_once_with("sess-1", timeout=10.0)
+
     async def test_wait_timeout_raises(self):
         import tensorlake.sandbox.pty as pty_module
 
