@@ -579,7 +579,10 @@ class AsyncSandbox:
                 # the existence check that routes a free name to the create
                 # step below. Otherwise connect already cached the info, so
                 # this adds no request.
-                status = (await sandbox.info()).status
+                info = await sandbox.info()
+                if info.status == SandboxStatus.RESUME_FAILED:
+                    raise SandboxResumeError.from_info(info)
+                status = info.status
             except SandboxNotFoundError:
                 try:
                     created = await cls.create(

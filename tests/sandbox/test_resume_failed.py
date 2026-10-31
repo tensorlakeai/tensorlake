@@ -12,8 +12,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
 from tensorlake.sandbox import (
+    AsyncSandbox,
     AsyncSandboxClient,
     RemoteAPIError,
+    Sandbox,
     SandboxClient,
     SandboxError,
     SandboxPending,
@@ -96,6 +98,41 @@ class TestResumeFailed(unittest.TestCase):
         self.assertEqual(error.status, SandboxStatus.RESUME_FAILED)
         self.assertEqual(error.snapshot_id, "snap-1")
         self.assertEqual(error.error_details, self.diagnosis)
+
+    def test_get_or_create_explicit_proxy_preserves_failure_sync(self):
+        for resume in (True, False):
+            with self.subTest(resume=resume):
+                self.requests.clear()
+                with self.assertRaises(SandboxResumeError) as caught:
+                    Sandbox.get_or_create(
+                        "agent",
+                        api_url=self.url,
+                        api_key="test",
+                        proxy_url=self.url,
+                        resume=resume,
+                    )
+                self.check_error(caught.exception)
+                self.assertEqual(len(self.requests), 1)
+                self.assertEqual(self.requests[0][0], "GET")
+
+    def test_get_or_create_explicit_proxy_preserves_failure_async(self):
+        async def run():
+            for resume in (True, False):
+                with self.subTest(resume=resume):
+                    self.requests.clear()
+                    with self.assertRaises(SandboxResumeError) as caught:
+                        await AsyncSandbox.get_or_create(
+                            "agent",
+                            api_url=self.url,
+                            api_key="test",
+                            proxy_url=self.url,
+                            resume=resume,
+                        )
+                    self.check_error(caught.exception)
+                    self.assertEqual(len(self.requests), 1)
+                    self.assertEqual(self.requests[0][0], "GET")
+
+        asyncio.run(run())
 
     def test_sync_get_list_readiness_connect_and_explicit_retry(self):
         with SandboxClient.for_localhost(api_url=self.url) as client:
