@@ -114,7 +114,7 @@ jobs:
             libc: musl
             build_tool: cargo-zigbuild
             features: mount,git-clone
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
             rust_target_base: aarch64-apple-darwin
             target_id: darwin-aarch64

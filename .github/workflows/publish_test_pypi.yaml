@@ -49,7 +49,7 @@ jobs:
             target: aarch64
             manylinux: '2014'
             manylinux_container: quay.io/pypa/manylinux2014_aarch64:latest
-          - os: macos-14
+          - os: macos-15
             target: aarch64
             rust_target: aarch64-apple-darwin
           - os: windows-latest

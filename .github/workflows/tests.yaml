@@ -129,7 +129,7 @@ jobs:
   macos_private_source_contract:
     name: macOS private client tests
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
