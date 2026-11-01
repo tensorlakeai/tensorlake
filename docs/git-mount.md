@@ -166,11 +166,11 @@ Unreferenced bytes are reclaimed asynchronously.
 
 ### Preparing a filesystem working set
 
-Use `tl fs prefetch /path/to/mount --metadata-only` before a metadata-heavy command such as
-`git status` when file contents can stay remote. It includes empty directories, names, modes,
-mtimes and symlinks without fetching file data objects. Tiny inline values embedded in directory
-metadata travel with that metadata. With a compatible server the daemon
-loads this metadata in bounded tree pages; older servers retain ordinary directory traversal.
+Cold directory access automatically warms nearby metadata in bounded batches. The mount daemon
+shares the metadata cache between concurrent requests and resumes read-ahead as applications
+access the filesystem. Mounting does not wait for the whole tree, and normal directory operations
+do not require a preparatory command. File contents remain demand-loaded.
+
 `tl fs prefetch /path/to/mount/subtree` also downloads and verifies that subtree's file contents.
 Different mounts can prefetch concurrently, subject to available host, network and service capacity.
 

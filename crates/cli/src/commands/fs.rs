@@ -263,12 +263,8 @@ pub async fn git_smartlog(
     map(gsvc_fs_client::git_smartlog(&private_context(ctx), subject, project, json).await)
 }
 
-pub async fn prefetch_filesystem(path: Option<PathBuf>, metadata_only: bool) -> Result<()> {
-    if metadata_only {
-        map(gsvc_fs_client::prefetch_filesystem_metadata(path).await)
-    } else {
-        map(gsvc_fs_client::prefetch_filesystem(path).await)
-    }
+pub async fn prefetch_filesystem(path: Option<PathBuf>) -> Result<()> {
+    map(gsvc_fs_client::prefetch_filesystem(path).await)
 }
 
 pub async fn prefetch_repository(path: Option<PathBuf>) -> Result<()> {
