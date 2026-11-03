@@ -1,0 +1,52 @@
+name: Set up Tensorlake Rust cache
+description: Configure sccache and the repository Cloud Volume for Rust jobs on Tensorlake runners.
+
+inputs:
+  cache-namespace:
+    description: Compatibility namespace shared only by equivalent Rust builds.
+    required: true
+  cache-version:
+    description: Manual cache namespace version used for invalidation.
+    required: false
+    default: v1
+  working-directory:
+    description: Rust workspace directory used to normalize sccache paths.
+    required: false
+    default: .
+  cache-target:
+    description: Persist CARGO_TARGET_DIR; use only when the namespace has one writer.
+    required: false
+    default: "false"
+  disable-incremental:
+    description: Disable incremental compilation so Rust compilations are eligible for sccache.
+    required: false
+    default: "true"
+  prefetch:
+    description: >-
+      Eagerly prefetch the Cloud Volume cache. Disabled by default because
+      runner-side prefetch can spend minutes polling an empty cache; TLFS lazy
+      reads remain enabled.
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Install sccache
+      uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      with:
+        version: v0.17.0
+        disable_annotations: true
+
+    - name: Configure Tensorlake Cloud Volume caches
+      uses: tensorlakeai/tensorlake-github-runners/actions/setup-rust-cache@main
+      with:
+        cache-namespace: ${{ inputs.cache-namespace }}
+        cache-version: ${{ inputs.cache-version }}
+        working-directory: ${{ inputs.working-directory }}
+        # Cargo unpacks registry sources in place. Keep that mutable tree on
+        # local disk and persist only cache-safe compiler artifacts.
+        cache-cargo-home: "false"
+        cache-target: ${{ inputs.cache-target }}
+        disable-incremental: ${{ inputs.disable-incremental }}
+        prefetch: ${{ inputs.prefetch }}
