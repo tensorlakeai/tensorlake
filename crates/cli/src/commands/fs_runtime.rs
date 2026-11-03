@@ -106,7 +106,10 @@ impl Connection {
         let body = json!({"operation":"snapshot_start", "mount_path":path, "mount_id":mount_id,
             "request_id":request_id, "message":message});
         let mut response = self.request(body).await?;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(310);
+        // The daemon bounds both stalled progress and the whole operation. A large
+        // snapshot can keep making durable progress beyond five minutes; leave room
+        // for its one-hour lifetime and final receipt instead of abandoning it early.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3610);
         let mut last_progress = tokio::time::Instant::now();
         loop {
             match response["phase"].as_str() {
