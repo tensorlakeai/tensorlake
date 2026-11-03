@@ -1,9 +1,14 @@
 name: Release - CLI Binaries
 
-run-name: "Release - CLI Binaries · ${{ github.ref_name }} · @${{ github.actor }}"
+run-name: "${{ inputs.fskit_only && 'Build FSKit test artifact' || 'Release - CLI Binaries' }} · ${{ github.ref_name }} · @${{ github.actor }}"
 
 on:
   workflow_dispatch:
+    inputs:
+      fskit_only:
+        description: Build a signed FSKit qualification artifact without publishing a release
+        type: boolean
+        default: false
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -13,6 +18,7 @@ permissions:
 
 jobs:
   notify-start:
+    if: ${{ !inputs.fskit_only }}
     name: Notify Slack that the release is starting
     runs-on: ubuntu-latest
     steps:
@@ -86,6 +92,7 @@ jobs:
           echo "Pinned artifact_storage@$sha for every release job"
 
   build:
+    if: ${{ !inputs.fskit_only }}
     name: Build (${{ matrix.target_id }})
     # The darwin build embeds the notarized TLFS.app.zip from tlfs-app into the binary, so
     # `tl fs setup` installs offline. tlfs-app is continue-on-error: when it produced nothing,
@@ -114,7 +121,7 @@ jobs:
             libc: musl
             build_tool: cargo-zigbuild
             features: mount,git-clone
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
             rust_target_base: aarch64-apple-darwin
             target_id: darwin-aarch64
@@ -314,8 +321,13 @@ jobs:
           path: .tlfs-src
           sparse-checkout: |
             platform/macos/tlfs
+            scripts/test_macos_fskit_transport.py
+            Makefile
           sparse-checkout-cone-mode: false
           persist-credentials: false
+
+      - name: Validate FSKit transport
+        run: make -C .tlfs-src test-macos-fskit-transport test-macos-fskit-check
 
       - name: Extract version from Cargo.toml
         id: version
@@ -372,6 +384,7 @@ jobs:
           path: dist/*
 
   release:
+    if: ${{ !inputs.fskit_only }}
     name: Create GitHub Release
     needs: [build, tlfs-app]
     runs-on: ubuntu-latest

@@ -123,7 +123,7 @@ jobs:
             rust_target_base: aarch64-unknown-linux-musl
             libc: musl
             native_build_tool: cargo-zigbuild
-          - os: macos-14
+          - os: macos-15
             target_id: darwin-arm64
             rust_target: ""
             rust_target_base: ""
