@@ -1,7 +1,9 @@
 //! Sandbox usage and attributed cost for an organization.
 //!
 //! These are the Platform API reads behind the Cloud dashboard's usage page.
-//! A window is either the current billing period or the last 1, 7 or 30 days.
+//! A window is the current billing period, the last 1, 7 or 30 days, or an
+//! explicit date range. The server limits ranges to the current billing
+//! period or the last 30 days, whichever starts earlier.
 
 use std::str::FromStr;
 
@@ -30,15 +32,44 @@ pub enum UsageWindow {
     LastWeek,
     /// The last 30 days, the oldest usage the API serves.
     Last30Days,
+    /// An explicit range. Without `to`, the range runs through now.
+    Range {
+        from: DateTime<Utc>,
+        to: Option<DateTime<Utc>>,
+    },
 }
 
 impl UsageWindow {
-    fn lookback_days(self) -> Option<i64> {
-        match self {
-            Self::CurrentPeriod => None,
-            Self::LastDay => Some(1),
-            Self::LastWeek => Some(7),
-            Self::Last30Days => Some(30),
+    /// The window for a lookback (`1d`, `7d`, `30d`) or an RFC 3339 range.
+    /// With neither, the window is the current billing period. A lookback
+    /// can't be combined with a range, and `to` needs `from`.
+    pub fn resolve(
+        last: Option<&str>,
+        from: Option<&str>,
+        to: Option<&str>,
+    ) -> Result<Self, SdkError> {
+        let parse = |name: &str, value: &str| {
+            DateTime::parse_from_rfc3339(value)
+                .map(|at| at.with_timezone(&Utc))
+                .map_err(|err| {
+                    SdkError::ClientError(format!(
+                        "{name} must be an RFC 3339 date-time, got '{value}': {err}"
+                    ))
+                })
+        };
+        match (last, from, to) {
+            (Some(_), Some(_), _) | (Some(_), _, Some(_)) => Err(SdkError::ClientError(
+                "a lookback can't be combined with a date range".to_string(),
+            )),
+            (Some(last), None, None) => last.parse(),
+            (None, None, Some(_)) => Err(SdkError::ClientError(
+                "a range end requires a range start".to_string(),
+            )),
+            (None, Some(from), to) => Ok(Self::Range {
+                from: parse("from", from)?,
+                to: to.map(|to| parse("to", to)).transpose()?,
+            }),
+            (None, None, None) => Ok(Self::CurrentPeriod),
         }
     }
 
@@ -46,10 +77,18 @@ impl UsageWindow {
     /// ending at `now`; the current period sends none, so the server resolves
     /// the billing period itself.
     fn range_query(self, now: DateTime<Utc>) -> Vec<(&'static str, String)> {
-        let Some(days) = self.lookback_days() else {
-            return Vec::new();
-        };
         let format = |at: DateTime<Utc>| at.to_rfc3339_opts(SecondsFormat::Millis, true);
+        let days = match self {
+            Self::CurrentPeriod => return Vec::new(),
+            Self::Range { from, to } => {
+                let mut query = vec![("fromDate", format(from))];
+                query.extend(to.map(|to| ("toDate", format(to))));
+                return query;
+            }
+            Self::LastDay => 1,
+            Self::LastWeek => 7,
+            Self::Last30Days => 30,
+        };
         vec![
             ("fromDate", format(now - Duration::days(days))),
             ("toDate", format(now)),
@@ -199,6 +238,48 @@ mod tests {
                 ("toDate", "2026-10-28T12:00:00.000Z".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn ranges_send_their_dates() {
+        let now = DateTime::parse_from_rfc3339("2026-10-28T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let window = UsageWindow::resolve(None, Some("2026-10-25T00:00:00+02:00"), None).unwrap();
+        assert_eq!(
+            window.range_query(now),
+            vec![("fromDate", "2026-10-24T22:00:00.000Z".to_string())]
+        );
+        let window = UsageWindow::resolve(
+            None,
+            Some("2026-10-25T00:00:00Z"),
+            Some("2026-10-26T00:00:00Z"),
+        )
+        .unwrap();
+        assert_eq!(
+            window.range_query(now),
+            vec![
+                ("fromDate", "2026-10-25T00:00:00.000Z".to_string()),
+                ("toDate", "2026-10-26T00:00:00.000Z".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_conflicting_or_invalid_input() {
+        assert_eq!(
+            UsageWindow::resolve(None, None, None).unwrap(),
+            UsageWindow::CurrentPeriod
+        );
+        assert_eq!(
+            UsageWindow::resolve(Some("7d"), None, None).unwrap(),
+            UsageWindow::LastWeek
+        );
+        let date = Some("2026-10-25T00:00:00Z");
+        assert!(UsageWindow::resolve(Some("7d"), date, None).is_err());
+        assert!(UsageWindow::resolve(Some("7d"), None, date).is_err());
+        assert!(UsageWindow::resolve(None, None, date).is_err());
+        assert!(UsageWindow::resolve(None, Some("yesterday"), None).is_err());
     }
 
     const WINDOW: &str = r#"{"type":"window","windowStart":"2026-10-01T00:00:00.000Z","windowEnd":"2026-10-28T12:00:00.000Z","attributedUsageCharge":null,"includedUsage":null,"attributedUsageValue":null}"#;

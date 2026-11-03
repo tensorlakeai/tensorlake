@@ -248,8 +248,17 @@ struct UsageArgs {
     command: Option<UsageCommands>,
 
     /// Read the last 1d, 7d or 30d instead of the current billing period
-    #[arg(long, global = true, value_enum)]
+    #[arg(long, global = true, value_enum, conflicts_with_all = ["from", "to"])]
     last: Option<commands::usage::Lookback>,
+
+    /// Range start: a date (00:00 UTC) or an RFC 3339 date-time. The range
+    /// must start in the current billing period or the last 30 days
+    #[arg(long, global = true)]
+    from: Option<String>,
+
+    /// Range end, like --from. Defaults to now
+    #[arg(long, global = true, requires = "from")]
+    to: Option<String>,
 
     /// Output format
     #[arg(short, long, global = true, default_value = "text", value_enum)]
@@ -2538,15 +2547,17 @@ async fn run_command(
         Commands::Usage(args) => {
             // Usage is organization-scoped: no project is needed. An API key
             // names its organization through introspection.
+            let window =
+                commands::usage::window(args.last, args.from.as_deref(), args.to.as_deref())?;
             ensure_auth(ctx).await?;
             if ctx.api_key.is_some() {
                 ctx.introspect().await?;
             }
             let json = matches!(args.output, OutputFormat::Json);
             match args.command {
-                None => commands::usage::summary(ctx, args.last, json).await,
+                None => commands::usage::summary(ctx, window, json).await,
                 Some(UsageCommands::Sandboxes) => {
-                    commands::usage::sandboxes(ctx, args.last, json).await
+                    commands::usage::sandboxes(ctx, window, json).await
                 }
             }
         }

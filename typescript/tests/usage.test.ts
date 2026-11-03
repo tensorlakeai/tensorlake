@@ -5,7 +5,12 @@ import {
 } from "../src/native-sandbox.js";
 import { UsageClient } from "../src/usage.js";
 
-type Call = { method: string; last: string | null };
+type Call = {
+  method: string;
+  last: string | null;
+  fromDate: string | null;
+  toDate: string | null;
+};
 
 /** Stand in for the napi NativeUsageClient; the Rust client owns the wire. */
 function installUsageStub(responses: { summary?: unknown; sandboxes?: unknown; error?: Error }) {
@@ -16,13 +21,13 @@ function installUsageStub(responses: { summary?: unknown; sandboxes?: unknown; e
       constructor(...args: unknown[]) {
         constructed = args;
       }
-      async summary(last: string | null) {
-        calls.push({ method: "summary", last });
+      async summary(last: string | null, fromDate: string | null, toDate: string | null) {
+        calls.push({ method: "summary", last, fromDate, toDate });
         if (responses.error) throw responses.error;
         return { traceId: "trace", json: JSON.stringify(responses.summary) };
       }
-      async sandboxes(last: string | null) {
-        calls.push({ method: "sandboxes", last });
+      async sandboxes(last: string | null, fromDate: string | null, toDate: string | null) {
+        calls.push({ method: "sandboxes", last, fromDate, toDate });
         if (responses.error) throw responses.error;
         return { traceId: "trace", json: JSON.stringify(responses.sandboxes) };
       }
@@ -56,7 +61,7 @@ describe("UsageClient", () => {
     const usage = await client.sandboxes({ last: "30d" });
 
     expect(stub.constructed().slice(0, 3)).toEqual(["http://localhost:8900", "key", "org-1"]);
-    expect(stub.calls).toEqual([{ method: "sandboxes", last: "30d" }]);
+    expect(stub.calls).toEqual([{ method: "sandboxes", last: "30d", fromDate: null, toDate: null }]);
     expect(usage.sandboxes.map((s) => s.sandboxId)).toEqual(["sb-1", "sb-2"]);
     expect(usage.attributedUsageCharge?.basis).toBe("invoice");
   });
@@ -69,9 +74,28 @@ describe("UsageClient", () => {
     const client = new UsageClient({ apiKey: "key", organizationId: "org-1" });
     const summary = await client.summary();
 
-    expect(stub.calls).toEqual([{ method: "summary", last: null }]);
+    expect(stub.calls).toEqual([{ method: "summary", last: null, fromDate: null, toDate: null }]);
     expect(summary.computeUnits).toBe("42.5");
     expect(summary.includedUsage).toBeNull();
+  });
+
+  it("sends a date range as ISO strings", async () => {
+    const stub = installUsageStub({ sandboxes: EXPORT });
+
+    const client = new UsageClient({ apiKey: "key", organizationId: "org-1" });
+    await client.sandboxes({
+      fromDate: new Date("2026-10-25T00:00:00Z"),
+      toDate: "2026-10-26T00:00:00Z",
+    });
+
+    expect(stub.calls).toEqual([
+      {
+        method: "sandboxes",
+        last: null,
+        fromDate: "2026-10-25T00:00:00.000Z",
+        toDate: "2026-10-26T00:00:00Z",
+      },
+    ]);
   });
 
   it("surfaces native errors", async () => {

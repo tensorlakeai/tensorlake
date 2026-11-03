@@ -94,6 +94,27 @@ async fn truncated_export_is_an_error() {
 }
 
 #[tokio::test]
+async fn range_export_sends_its_dates() {
+    let (base_url, server) = serve_once("application/x-ndjson", EXPORT).await;
+    let window = UsageWindow::resolve(
+        None,
+        Some("2026-10-25T00:00:00Z"),
+        Some("2026-10-26T00:00:00Z"),
+    )
+    .expect("window");
+
+    usage_client(&base_url)
+        .sandboxes(window)
+        .await
+        .expect("export");
+
+    assert_eq!(
+        server.await.expect("server join"),
+        "GET /platform/v1/organizations/org-1/sandbox-usage/sandboxes/export?fromDate=2026-10-25T00%3A00%3A00.000Z&toDate=2026-10-26T00%3A00%3A00.000Z HTTP/1.1"
+    );
+}
+
+#[tokio::test]
 async fn lookback_summary_sends_an_exact_range() {
     const SUMMARY: &str = r#"{
       "granularity": "day",

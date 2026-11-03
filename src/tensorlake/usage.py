@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Literal
 
@@ -150,8 +151,13 @@ def _non_empty_env(name: str) -> str | None:
 class UsageClient:
     """Read an organization's sandbox usage and cost.
 
-    Every read covers the current billing period, or the last ``"1d"``,
-    ``"7d"`` or ``"30d"`` when ``last`` is set.
+    Every read covers the current billing period, unless you set either
+    ``last`` (``"1d"``, ``"7d"`` or ``"30d"``) or a range with ``from_date``
+    and an optional ``to_date``. A range without ``to_date`` runs through now.
+    The server serves ranges that start inside the current billing period or
+    the last 30 days, whichever starts earlier.
+
+    Naive datetimes are read as local time, like ``datetime.astimezone()``.
     """
 
     def __init__(
@@ -195,26 +201,53 @@ class UsageClient:
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.close()
 
-    def summary(self, last: UsageLookback | None = None) -> UsageSummary:
+    def summary(
+        self,
+        last: UsageLookback | None = None,
+        from_date: datetime | None = None,
+        to_date: datetime | None = None,
+    ) -> UsageSummary:
         """Organization usage totals for the window."""
         raw = self._client.sandbox_usage_summary_json(
-            self._organization_id, _check_lookback(last)
+            self._organization_id, *_window(last, from_date, to_date)
         )
         return UsageSummary.model_validate(json.loads(raw))
 
-    def sandboxes(self, last: UsageLookback | None = None) -> SandboxUsageExport:
+    def sandboxes(
+        self,
+        last: UsageLookback | None = None,
+        from_date: datetime | None = None,
+        to_date: datetime | None = None,
+    ) -> SandboxUsageExport:
         """Usage and attributed cost of every sandbox that ran in the window.
 
         The server computes the attribution once and returns every sandbox in
         one response.
         """
         raw = self._client.sandbox_usage_export_json(
-            self._organization_id, _check_lookback(last)
+            self._organization_id, *_window(last, from_date, to_date)
         )
         return SandboxUsageExport.model_validate(json.loads(raw))
 
 
-def _check_lookback(last: str | None) -> str | None:
-    if last is not None and last not in _LOOKBACKS:
-        raise UsageError(f"last must be one of {', '.join(_LOOKBACKS)}; got {last!r}")
-    return last
+def _window(
+    last: str | None, from_date: datetime | None, to_date: datetime | None
+) -> tuple[str | None, str | None, str | None]:
+    if last is not None:
+        if from_date is not None or to_date is not None:
+            raise UsageError("last can't be combined with from_date or to_date")
+        if last not in _LOOKBACKS:
+            raise UsageError(
+                f"last must be one of {', '.join(_LOOKBACKS)}; got {last!r}"
+            )
+    if to_date is not None and from_date is None:
+        raise UsageError("to_date requires from_date")
+    return last, _utc_iso(from_date), _utc_iso(to_date)
+
+
+def _utc_iso(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, datetime):
+        raise UsageError(f"expected a datetime, got {type(value).__name__}")
+    return value.astimezone(timezone.utc).isoformat()

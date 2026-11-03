@@ -6,13 +6,12 @@ use tensorlake::usage::{UsageClient, UsageWindow};
 
 use crate::sandbox::{TracedJson, duration_from_seconds, into_napi_error, usage_error, with_retry};
 
-fn usage_window(last: Option<&str>) -> napi::Result<UsageWindow> {
-    match last {
-        None => Ok(UsageWindow::CurrentPeriod),
-        Some(value) => value
-            .parse()
-            .map_err(|error: tensorlake::error::SdkError| usage_error(error.to_string())),
-    }
+fn usage_window(
+    last: Option<&str>,
+    from: Option<&str>,
+    to: Option<&str>,
+) -> napi::Result<UsageWindow> {
+    UsageWindow::resolve(last, from, to).map_err(|error| usage_error(error.to_string()))
 }
 
 #[napi]
@@ -46,11 +45,16 @@ impl NativeUsageClient {
         })
     }
 
-    /// Organization usage totals for the current billing period, or for the
-    /// last `1d`, `7d` or `30d`.
+    /// Organization usage totals for the current billing period, the last
+    /// `1d`, `7d` or `30d`, or an RFC 3339 range.
     #[napi]
-    pub async fn summary(&self, last: Option<String>) -> napi::Result<TracedJson> {
-        let window = usage_window(last.as_deref())?;
+    pub async fn summary(
+        &self,
+        last: Option<String>,
+        from_date: Option<String>,
+        to_date: Option<String>,
+    ) -> napi::Result<TracedJson> {
+        let window = usage_window(last.as_deref(), from_date.as_deref(), to_date.as_deref())?;
         with_retry(self.client.clone(), 5, move |client| async move {
             let traced = client.summary(window).await?;
             Ok(TracedJson {
@@ -63,8 +67,13 @@ impl NativeUsageClient {
 
     /// Every sandbox of the window with its usage and attributed charge.
     #[napi]
-    pub async fn sandboxes(&self, last: Option<String>) -> napi::Result<TracedJson> {
-        let window = usage_window(last.as_deref())?;
+    pub async fn sandboxes(
+        &self,
+        last: Option<String>,
+        from_date: Option<String>,
+        to_date: Option<String>,
+    ) -> napi::Result<TracedJson> {
+        let window = usage_window(last.as_deref(), from_date.as_deref(), to_date.as_deref())?;
         with_retry(self.client.clone(), 5, move |client| async move {
             let traced = client.sandboxes(window).await?;
             Ok(TracedJson {
