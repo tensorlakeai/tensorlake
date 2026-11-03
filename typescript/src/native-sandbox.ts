@@ -266,8 +266,16 @@ interface NativeRepositoryClientCtor {
 }
 
 export interface NativeUsageClient {
-  summary(last: string | null): Promise<TracedJson>;
-  sandboxes(last: string | null): Promise<TracedJson>;
+  summary(
+    last: string | null,
+    fromDate: string | null,
+    toDate: string | null,
+  ): Promise<TracedJson>;
+  sandboxes(
+    last: string | null,
+    fromDate: string | null,
+    toDate: string | null,
+  ): Promise<TracedJson>;
 }
 
 interface NativeUsageClientCtor {

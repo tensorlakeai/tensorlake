@@ -1,3 +1,4 @@
+use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
 use comfy_table::Cell;
 use tensorlake::ClientBuilder;
 use tensorlake::error::SdkError;
@@ -22,18 +23,39 @@ pub enum Lookback {
     Month,
 }
 
-fn window(last: Option<Lookback>) -> UsageWindow {
-    match last {
-        None => UsageWindow::CurrentPeriod,
-        Some(Lookback::Day) => UsageWindow::LastDay,
-        Some(Lookback::Week) => UsageWindow::LastWeek,
-        Some(Lookback::Month) => UsageWindow::Last30Days,
-    }
+/// The window for `--last`, or for `--from` and `--to`. A bare date such as
+/// `2026-10-25` means 00:00 UTC that day; anything else must be RFC 3339.
+/// Clap already rejects `--last` with a range, and `--to` without `--from`.
+pub fn window(last: Option<Lookback>, from: Option<&str>, to: Option<&str>) -> Result<UsageWindow> {
+    let window = match (last, from) {
+        (Some(Lookback::Day), _) => UsageWindow::LastDay,
+        (Some(Lookback::Week), _) => UsageWindow::LastWeek,
+        (Some(Lookback::Month), _) => UsageWindow::Last30Days,
+        (None, None) => UsageWindow::CurrentPeriod,
+        (None, Some(from)) => UsageWindow::Range {
+            from: parse_date("--from", from)?,
+            to: to.map(|to| parse_date("--to", to)).transpose()?,
+        },
+    };
+    Ok(window)
 }
 
-pub async fn summary(ctx: &CliContext, last: Option<Lookback>, json: bool) -> Result<()> {
+fn parse_date(flag: &str, value: &str) -> Result<DateTime<Utc>> {
+    if let Ok(date) = NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+        return Ok(date.and_time(NaiveTime::MIN).and_utc());
+    }
+    DateTime::parse_from_rfc3339(value)
+        .map(|at| at.with_timezone(&Utc))
+        .map_err(|_| {
+            CliError::usage(format!(
+                "{flag} must be a date (2026-10-25) or an RFC 3339 date-time, got '{value}'"
+            ))
+        })
+}
+
+pub async fn summary(ctx: &CliContext, window: UsageWindow, json: bool) -> Result<()> {
     let summary = usage_client(ctx)?
-        .summary(window(last))
+        .summary(window)
         .await
         .map_err(map_sdk_error)?
         .into_inner();
@@ -46,9 +68,9 @@ pub async fn summary(ctx: &CliContext, last: Option<Lookback>, json: bool) -> Re
     Ok(())
 }
 
-pub async fn sandboxes(ctx: &CliContext, last: Option<Lookback>, json: bool) -> Result<()> {
+pub async fn sandboxes(ctx: &CliContext, window: UsageWindow, json: bool) -> Result<()> {
     let export = usage_client(ctx)?
-        .sandboxes(window(last))
+        .sandboxes(window)
         .await
         .map_err(map_sdk_error)?
         .into_inner();
@@ -377,6 +399,30 @@ fn map_sdk_error(error: SdkError) -> CliError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn range_flags_accept_dates_and_date_times() {
+        let at = |value: &str| DateTime::parse_from_rfc3339(value).unwrap().to_utc();
+        assert_eq!(
+            window(None, Some("2026-10-25"), Some("2026-10-26T12:00:00+02:00")).unwrap(),
+            UsageWindow::Range {
+                from: at("2026-10-25T00:00:00Z"),
+                to: Some(at("2026-10-26T10:00:00Z")),
+            }
+        );
+        assert_eq!(
+            window(None, Some("2026-10-25"), None).unwrap(),
+            UsageWindow::Range {
+                from: at("2026-10-25T00:00:00Z"),
+                to: None,
+            }
+        );
+        assert_eq!(
+            window(None, None, None).unwrap(),
+            UsageWindow::CurrentPeriod
+        );
+        assert!(window(None, Some("yesterday"), None).is_err());
+    }
 
     #[test]
     fn formats_minor_units() {

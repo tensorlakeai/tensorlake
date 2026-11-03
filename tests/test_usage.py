@@ -8,6 +8,7 @@ import json
 import os
 import threading
 import unittest
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from unittest import mock
@@ -166,6 +167,49 @@ class TestUsageClient(unittest.TestCase):
             path, "/platform/v1/organizations/org-1/sandbox-usage/sandboxes/export"
         )
         self.assertEqual(query, {})
+
+    def test_sandboxes_range_sends_its_dates(self):
+        self.client.sandboxes(
+            from_date=datetime(2026, 10, 25, tzinfo=timezone.utc),
+            to_date=datetime(2026, 10, 26, 2, tzinfo=timezone(timedelta(hours=2))),
+        )
+
+        _, query = self.server.requests[0]
+        self.assertEqual(
+            query,
+            {
+                "fromDate": ["2026-10-25T00:00:00.000Z"],
+                "toDate": ["2026-10-26T00:00:00.000Z"],
+            },
+        )
+
+    def test_range_without_end_runs_through_now(self):
+        self.client.summary(from_date=datetime(2026, 10, 25, tzinfo=timezone.utc))
+
+        _, query = self.server.requests[0]
+        self.assertEqual(
+            query,
+            {"granularity": ["day"], "fromDate": ["2026-10-25T00:00:00.000Z"]},
+        )
+
+    def test_naive_datetimes_are_local_time(self):
+        naive = datetime(2026, 10, 25, 12)
+        expected = naive.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+        self.client.sandboxes(from_date=naive)
+
+        _, query = self.server.requests[0]
+        self.assertEqual(query, {"fromDate": [expected]})
+
+    def test_rejects_invalid_ranges(self):
+        day = datetime(2026, 10, 25, tzinfo=timezone.utc)
+        with self.assertRaises(UsageError):
+            self.client.sandboxes(last="7d", from_date=day)
+        with self.assertRaises(UsageError):
+            self.client.sandboxes(to_date=day)
+        with self.assertRaises(UsageError):
+            self.client.sandboxes(from_date="2026-10-25")
+        self.assertEqual(self.server.requests, [])
 
     def test_truncated_export_raises(self):
         self.server.truncate_export = True

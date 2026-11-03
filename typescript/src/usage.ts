@@ -18,6 +18,23 @@ export interface UsageClientOptions {
 export interface UsageReadOptions {
   /** Read the last `1d`, `7d` or `30d` instead of the current billing period. */
   last?: UsageLookback;
+  /**
+   * Range start, as a `Date` or an RFC 3339 string. Can't be combined with
+   * `last`. The server serves ranges that start inside the current billing
+   * period or the last 30 days, whichever starts earlier.
+   */
+  fromDate?: Date | string;
+  /** Range end. Requires `fromDate`; defaults to now. */
+  toDate?: Date | string;
+}
+
+type NativeWindow = [last: string | null, fromDate: string | null, toDate: string | null];
+
+function nativeWindow(options?: UsageReadOptions): NativeWindow {
+  // The Rust SDK validates the combination and parses the dates.
+  const iso = (value?: Date | string) =>
+    value === undefined ? null : value instanceof Date ? value.toISOString() : value;
+  return [options?.last ?? null, iso(options?.fromDate), iso(options?.toDate)];
 }
 
 // Money amounts are minor currency units (for example cents), and quantities
@@ -122,8 +139,9 @@ export interface SandboxUsageExport {
 /**
  * Read an organization's sandbox usage and cost.
  *
- * Every read covers the current billing period, or the last `1d`, `7d` or
- * `30d` when `last` is set. Requests, windows and response parsing are done
+ * Every read covers the current billing period, unless you set either `last`
+ * (`1d`, `7d` or `30d`) or a range with `fromDate` and an optional `toDate`.
+ * Requests, windows and response parsing are done
  * by the Rust SDK, the same as for Python and the CLI.
  */
 export class UsageClient {
@@ -162,7 +180,7 @@ export class UsageClient {
 
   /** Organization usage totals for the window. */
   async summary(options?: UsageReadOptions): Promise<UsageSummary> {
-    const { json } = await callNative(() => this.native.summary(options?.last ?? null));
+    const { json } = await callNative(() => this.native.summary(...nativeWindow(options)));
     return JSON.parse(json) as UsageSummary;
   }
 
@@ -173,7 +191,7 @@ export class UsageClient {
    * response.
    */
   async sandboxes(options?: UsageReadOptions): Promise<SandboxUsageExport> {
-    const { json } = await callNative(() => this.native.sandboxes(options?.last ?? null));
+    const { json } = await callNative(() => this.native.sandboxes(...nativeWindow(options)));
     return JSON.parse(json) as SandboxUsageExport;
   }
 }
