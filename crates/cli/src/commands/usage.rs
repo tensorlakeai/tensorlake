@@ -25,8 +25,17 @@ pub enum Lookback {
 
 /// The window for `--last`, or for `--from` and `--to`. A bare date such as
 /// `2026-10-25` means 00:00 UTC that day; anything else must be RFC 3339.
-/// Clap already rejects `--last` with a range, and `--to` without `--from`.
+/// The flags are global, so clap doesn't catch every conflict across command
+/// levels; check them here.
 pub fn window(last: Option<Lookback>, from: Option<&str>, to: Option<&str>) -> Result<UsageWindow> {
+    if last.is_some() && (from.is_some() || to.is_some()) {
+        return Err(CliError::usage(
+            "--last can't be combined with --from or --to",
+        ));
+    }
+    if to.is_some() && from.is_none() {
+        return Err(CliError::usage("--to requires --from"));
+    }
     let window = match (last, from) {
         (Some(Lookback::Day), _) => UsageWindow::LastDay,
         (Some(Lookback::Week), _) => UsageWindow::LastWeek,
@@ -422,6 +431,9 @@ mod tests {
             UsageWindow::CurrentPeriod
         );
         assert!(window(None, Some("yesterday"), None).is_err());
+        assert!(window(Some(Lookback::Week), Some("2026-10-25"), None).is_err());
+        assert!(window(Some(Lookback::Week), None, Some("2026-10-25")).is_err());
+        assert!(window(None, None, Some("2026-10-25")).is_err());
     }
 
     #[test]
