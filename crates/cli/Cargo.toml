@@ -65,7 +65,8 @@ base64 = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }
-rustpython-parser = "0.3"
+# Keep the parser's location support while using the permissively licensed bigint backend.
+rustpython-parser = { version = "0.3", default-features = false, features = ["location", "num-bigint"] }
 gsvc-codec = { workspace = true, optional = true }
 gsvc-fs-client = { workspace = true, optional = true }
 uuid = { workspace = true }
