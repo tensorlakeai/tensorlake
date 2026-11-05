@@ -29,8 +29,8 @@ def helper_func(value: str) -> str:
 
 fn build_code_zip() -> Result<Vec<u8>, String> {
     let mut zip_writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-    let options =
-        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
 
     let manifest = r#"{
         "functions": {
@@ -64,6 +64,31 @@ fn build_code_zip() -> Result<Vec<u8>, String> {
         .map_err(|e| format!("failed to finalize zip archive: {e}"))?;
 
     Ok(cursor.into_inner())
+}
+
+#[test]
+fn code_zip_preserves_application_source_and_manifest() {
+    let bytes = build_code_zip().unwrap();
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    assert_eq!(archive.len(), 2);
+
+    let mut manifest = String::new();
+    std::io::Read::read_to_string(
+        &mut archive.by_name(".tensorlake_code_manifest.json").unwrap(),
+        &mut manifest,
+    )
+    .unwrap();
+    let manifest: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+    assert_eq!(
+        manifest["functions"]["simple_test_func"]["module_import_name"],
+        "app"
+    );
+
+    let mut code = String::new();
+    let mut entry = archive.by_name("app.py").unwrap();
+    assert_eq!(entry.compression(), zip::CompressionMethod::Deflated);
+    std::io::Read::read_to_string(&mut entry, &mut code).unwrap();
+    assert_eq!(code, APP_CODE);
 }
 
 fn build_app_manifest(
