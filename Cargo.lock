@@ -2032,7 +2032,7 @@ dependencies = [
 
 [[package]]
 name = "gsvc-fs-client"
-version = "0.5.161"
+version = "0.5.162"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6050,7 +6050,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake"
-version = "0.5.161"
+version = "0.5.162"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6116,7 +6116,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-cli"
-version = "0.5.161"
+version = "0.5.162"
 dependencies = [
  "anyhow",
  "apple-native-keyring-store",
@@ -6175,7 +6175,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-function-agent-core"
-version = "0.5.161"
+version = "0.5.162"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6201,7 +6201,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-rust-cloud-sdk-node"
-version = "0.5.161"
+version = "0.5.162"
 dependencies = [
  "anyhow",
  "async-compression",
@@ -6225,7 +6225,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-rust-cloud-sdk-py"
-version = "0.5.161"
+version = "0.5.162"
 dependencies = [
  "base64 0.22.1",
  "chrono",
