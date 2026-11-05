@@ -80,24 +80,23 @@ struct ReadResolvers {
 
 impl ReadResolvers {
     fn new(
-        mut builder: hickory_resolver::ResolverBuilder<
-            hickory_resolver::name_server::TokioConnectionProvider,
+        builder: impl Fn() -> Result<
+            hickory_resolver::ResolverBuilder<hickory_resolver::net::runtime::TokioRuntimeProvider>,
+            hickory_resolver::net::NetError,
         >,
-    ) -> Self {
+    ) -> Result<Self, hickory_resolver::net::NetError> {
         use hickory_resolver::config::{LookupIpStrategy, ResolveHosts};
-        builder.options_mut().cache_size = 64;
-        builder.options_mut().use_hosts_file = ResolveHosts::Always;
-        builder.options_mut().ip_strategy = LookupIpStrategy::Ipv4Only;
-        let ipv4 = builder.build();
-        let mut options = ipv4.options().clone();
-        options.ip_strategy = LookupIpStrategy::Ipv6Only;
-        let ipv6 = hickory_resolver::TokioResolver::builder_with_config(
-            ipv4.config().clone(),
-            hickory_resolver::name_server::TokioConnectionProvider::default(),
-        )
-        .with_options(options)
-        .build();
-        Self { ipv4, ipv6 }
+        let resolver = |strategy| {
+            let mut builder = builder()?;
+            builder.options_mut().cache_size = 64;
+            builder.options_mut().use_hosts_file = ResolveHosts::Always;
+            builder.options_mut().ip_strategy = strategy;
+            builder.build()
+        };
+        Ok(Self {
+            ipv4: resolver(LookupIpStrategy::Ipv4Only)?,
+            ipv6: resolver(LookupIpStrategy::Ipv6Only)?,
+        })
     }
 
     async fn lookup(&self, host: &str, deadline: Instant) -> Vec<IpAddr> {
@@ -205,9 +204,7 @@ impl ReadTransport {
         let resolver = self
             .resolver
             .get_or_init(|| async {
-                hickory_resolver::TokioResolver::builder_tokio()
-                    .ok()
-                    .map(ReadResolvers::new)
+                ReadResolvers::new(hickory_resolver::TokioResolver::builder_tokio).ok()
             })
             .await;
         // Reserve time for the platform resolver and connection establishment

@@ -25,7 +25,7 @@ derive_builder = { workspace = true }
 flate2 = { workspace = true }
 futures = { workspace = true }
 hex = { workspace = true }
-hickory-resolver = "0.25.2"
+hickory-resolver = "0.26.2"
 hyper-util = { version = "0.1", features = ["client-proxy"] }
 httpdate = "1"
 ignore = { workspace = true }
@@ -60,7 +60,7 @@ des = { workspace = true }
 rand = "0.9.2"
 nanoid = { workspace = true }
 # Chunk-pack assembly for presigned-PUT staging (matches the server's chunk frame encoding).
-zstd = "0.13"
+zstd = "0.13.4"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
