@@ -67,7 +67,8 @@ pre-commit = { version = "^4.5.1", python = ">=3.11" }
 # `make build_proto` regenerates stubs that are compatible with what users
 # install at runtime (>=1.76.0 per the runtime dependency).
 grpcio = "^1.76.0"
-grpcio-tools = "^1.76.0"
+# Keep code generation reproducible and aligned with the runtime minimum.
+grpcio-tools = "1.76.0"
 protobuf = "^6.31.1"
 setuptools = ">=84.1.0"
 maturin = ">=1.9,<2.0"
