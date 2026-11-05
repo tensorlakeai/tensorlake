@@ -119,7 +119,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # gsvc-codec is tested against; the default miniz_oxide backend has produced a divergent test result.
 flate2 = { version = "1.1.9", features = ["zlib-rs"] }
 tar = "0.4"
-zip = "0.6"
+zip = { version = "9.3.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 # JavaScript/TypeScript bundling. Rolldown's Rust API does not promise semver
 # compatibility, so keep this exact and upgrade it deliberately.

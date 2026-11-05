@@ -157,6 +157,7 @@ const describeFilesystemIntegration = filesystemIntegrationConfigured
 
 describeFilesystemIntegration(
   "Native filesystem SDK",
+  { timeout: 300_000 },
   () => {
     it("creates, gets, writes, reads, lists, versions, and deletes a filesystem", async () => {
       const client = new FilesystemClient();
@@ -239,7 +240,6 @@ describeFilesystemIntegration(
       }
     });
   },
-  { timeout: 300_000 },
 );
 
 function createTestClient(): SandboxClient {
@@ -447,6 +447,7 @@ describe("Sandbox Images", () => {
 
 describe(
   "Sandbox Lifecycle",
+  { timeout: SANDBOX_LIFECYCLE_TIMEOUT_MS },
   () => {
     let client: SandboxClient;
     let sandboxId: string;
@@ -537,11 +538,11 @@ describe(
       );
     });
   },
-  { timeout: SANDBOX_LIFECYCLE_TIMEOUT_MS },
 );
 
 describe(
   "Sandbox Commands",
+  { timeout: SANDBOX_SUITE_TIMEOUT_MS },
   () => {
     let client: SandboxClient;
     let sandbox: Sandbox;
@@ -722,11 +723,11 @@ describe(
       ).toBeGreaterThanOrEqual(0);
     });
   },
-  { timeout: SANDBOX_SUITE_TIMEOUT_MS },
 );
 
 describe(
   "Pool Lifecycle",
+  { timeout: SANDBOX_LIFECYCLE_TIMEOUT_MS },
   () => {
     let client: SandboxClient;
     let poolId: string;
@@ -812,11 +813,11 @@ describe(
       ).rejects.toThrow(PoolNotFoundError);
     });
   },
-  { timeout: SANDBOX_LIFECYCLE_TIMEOUT_MS },
 );
 
 describe(
   "Pool with Sandboxes",
+  { timeout: SANDBOX_LIFECYCLE_TIMEOUT_MS },
   () => {
     let client: SandboxClient;
     let poolId: string;
@@ -885,11 +886,11 @@ describe(
       poolId = undefined!;
     });
   },
-  { timeout: SANDBOX_LIFECYCLE_TIMEOUT_MS },
 );
 
 describe(
   "Warm Containers",
+  { timeout: SANDBOX_SUITE_TIMEOUT_MS },
   () => {
     let client: SandboxClient;
     let poolId: string;
@@ -997,11 +998,11 @@ describe(
       }
     });
   },
-  { timeout: SANDBOX_SUITE_TIMEOUT_MS },
 );
 
 describe(
   "Sandbox Timeout",
+  { timeout: SANDBOX_SUITE_TIMEOUT_MS },
   () => {
     let client: SandboxClient;
     let poolId: string;
@@ -1100,5 +1101,4 @@ describe(
       }
     });
   },
-  { timeout: SANDBOX_SUITE_TIMEOUT_MS },
 );

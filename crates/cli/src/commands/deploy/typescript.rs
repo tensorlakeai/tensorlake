@@ -26,7 +26,7 @@ use tensorlake::sandbox_images::{
 use tokio::process::Command;
 use url::Url;
 use zip::CompressionMethod;
-use zip::write::FileOptions;
+use zip::write::SimpleFileOptions;
 
 use crate::auth::context::CliContext;
 use crate::commands::sbx::image::ImageBuildEventRenderer;
@@ -882,7 +882,7 @@ fn create_code_zip(output_directory: &Path) -> Result<Vec<u8>> {
     }
 
     let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
-    let options = FileOptions::default()
+    let options = SimpleFileOptions::default()
         .compression_method(CompressionMethod::Deflated)
         .unix_permissions(0o644);
     for (name, path) in files {
@@ -1316,17 +1316,68 @@ fn required_string<'a>(value: &'a Value, key: &str, label: &str) -> Result<&'a s
 mod tests {
     use super::{
         SerializedImageOperation, application_dockerfile, application_with_resolved_images,
-        bundle_application, canonical_entrypoint, discover_deployment_with_timeout,
-        ensure_public_endpoint_id, load_function_runner_capsule, registered_image_component,
-        render_image_operation, tensorlake_package_root,
+        bundle_application, canonical_entrypoint, create_code_zip,
+        discover_deployment_with_timeout, ensure_public_endpoint_id, load_function_runner_capsule,
+        registered_image_component, render_image_operation, tensorlake_package_root,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
+    use std::io::{Cursor, Read};
     use std::path::PathBuf;
     use std::time::Duration;
 
     fn repository_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    #[test]
+    fn code_zip_preserves_deployment_archive_format() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir(directory.path().join("nested")).unwrap();
+        let files = [
+            (
+                ".tensorlake_code_manifest.json",
+                b"{\"functions\":{}}".as_slice(),
+            ),
+            ("nested/entry.mjs", b"export const answer = 42;".as_slice()),
+            ("nested/\u{e9}.txt", b"unicode filename".as_slice()),
+        ];
+        for (name, contents) in files {
+            std::fs::write(directory.path().join(name), contents).unwrap();
+        }
+
+        let bytes = create_code_zip(directory.path()).unwrap();
+        let mut archive = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
+        assert_eq!(archive.len(), files.len());
+        for (index, (name, contents)) in files.into_iter().enumerate() {
+            let mut entry = archive.by_index(index).unwrap();
+            assert_eq!(entry.name().unwrap(), name);
+            assert_eq!(entry.compression(), zip::CompressionMethod::Deflated);
+            assert_eq!(entry.unix_mode().unwrap() & 0o777, 0o644);
+            let mut decoded = Vec::new();
+            entry.read_to_end(&mut decoded).unwrap();
+            assert_eq!(decoded, contents);
+
+            // Streaming consumers read local headers; their names must agree
+            // with the central directory used above.
+            let header = entry.header_start() as usize;
+            assert_eq!(&bytes[header..header + 4], b"PK\x03\x04");
+            let name_len =
+                usize::from(u16::from_le_bytes([bytes[header + 26], bytes[header + 27]]));
+            assert_eq!(&bytes[header + 30..header + 30 + name_len], name.as_bytes());
+        }
+    }
+
+    #[test]
+    fn code_zip_rejects_bundles_over_the_deployment_limit() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::File::create(directory.path().join("large.bin"))
+            .unwrap()
+            .set_len(super::MAX_CODE_SIZE + 1)
+            .unwrap();
+
+        let error = create_code_zip(directory.path()).unwrap_err().to_string();
+        assert!(error.contains("exceeding the 5 MB limit"), "{error}");
     }
 
     #[test]

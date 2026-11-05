@@ -86,7 +86,7 @@
     "tsup": "^8.0.0",
     "typescript": "^5.8.0",
     "typescript-eslint": "^8.65.0",
-    "vitest": "^2.0.0"
+    "vitest": "^4.1.12"
   },
   "dependencies": {
     "@grpc/grpc-js": "^1.13.0",
