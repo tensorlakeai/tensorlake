@@ -753,10 +753,10 @@ async fn benchmark_healthy_read_transport() {
 #[tokio::test]
 async fn dns_answers_are_cached_until_their_ttl_and_then_refreshed() {
     use hickory_resolver::{
-        config::{LookupIpStrategy, NameServerConfigGroup, ResolverConfig},
-        name_server::TokioConnectionProvider,
+        config::{NameServerConfig, ResolverConfig},
+        net::runtime::TokioRuntimeProvider,
         proto::{
-            op::{Message, MessageType},
+            op::Message,
             rr::{RData, Record, RecordType, rdata::A},
         },
     };
@@ -769,14 +769,11 @@ async fn dns_answers_are_cached_until_their_ttl_and_then_refreshed() {
         loop {
             let (n, peer) = socket.recv_from(&mut buf).await.unwrap();
             let request = Message::from_vec(&buf[..n]).unwrap();
-            let query = request.queries()[0].clone();
-            let mut response = Message::new();
-            response
-                .set_id(request.id())
-                .set_message_type(MessageType::Response)
-                .set_recursion_desired(true)
-                .set_recursion_available(true)
-                .add_query(query.clone());
+            let query = request.queries[0].clone();
+            let mut response = Message::response(request.id, request.op_code);
+            response.metadata.recursion_desired = true;
+            response.metadata.recursion_available = true;
+            response.add_query(query.clone());
             if query.query_type() == RecordType::A {
                 let n = count.fetch_add(1, Ordering::SeqCst);
                 response.add_answer(Record::from_rdata(
@@ -791,17 +788,23 @@ async fn dns_answers_are_cached_until_their_ttl_and_then_refreshed() {
                 .unwrap();
         }
     });
-    let nameservers = NameServerConfigGroup::from_ips_clear(&[address.ip()], address.port(), true);
-    let mut builder = hickory_resolver::TokioResolver::builder_with_config(
-        ResolverConfig::from_parts(None, vec![], nameservers),
-        TokioConnectionProvider::default(),
-    );
-    builder.options_mut().ip_strategy = LookupIpStrategy::Ipv4Only;
+    let mut nameserver = NameServerConfig::udp_and_tcp(address.ip());
+    for connection in &mut nameserver.connections {
+        connection.port = address.port();
+    }
+    let nameservers = vec![nameserver];
+    let config = ResolverConfig::from_parts(None, vec![], nameservers);
+    let builder = || {
+        Ok(hickory_resolver::TokioResolver::builder_with_config(
+            config.clone(),
+            TokioRuntimeProvider::default(),
+        ))
+    };
     let client = ClientBuilder::new("https://metadata.test").build().unwrap();
     client
         .reads
         .resolver
-        .set(Some(ReadResolvers::new(builder)))
+        .set(Some(ReadResolvers::new(builder).unwrap()))
         .unwrap();
     let url = url::Url::parse("https://metadata.test").unwrap();
     let first = client.reads.addresses(&url, Duration::from_secs(3)).await;
@@ -1021,10 +1024,10 @@ async fn partial_dns(
     ipv4_delay: Duration,
 ) -> (ReadResolvers, JoinHandle<()>) {
     use hickory_resolver::{
-        config::{NameServerConfigGroup, ResolverConfig},
-        name_server::TokioConnectionProvider,
+        config::{NameServerConfig, ResolverConfig},
+        net::runtime::TokioRuntimeProvider,
         proto::{
-            op::{Message, MessageType},
+            op::Message,
             rr::{
                 RData, Record, RecordType,
                 rdata::{A, AAAA},
@@ -1039,7 +1042,7 @@ async fn partial_dns(
         loop {
             let (n, peer) = socket.recv_from(&mut buf).await.unwrap();
             let request = Message::from_vec(&buf[..n]).unwrap();
-            let query = request.queries()[0].clone();
+            let query = request.queries[0].clone();
             let answer = match query.query_type() {
                 RecordType::A if ipv4_answers => RData::A(A::new(127, 0, 0, 1)),
                 RecordType::AAAA if ipv6_answers => {
@@ -1047,12 +1050,10 @@ async fn partial_dns(
                 }
                 _ => continue, // silently drop the unhealthy family's queries
             };
-            let mut response = Message::new();
+            let mut response = Message::response(request.id, request.op_code);
+            response.metadata.recursion_desired = true;
+            response.metadata.recursion_available = true;
             response
-                .set_id(request.id())
-                .set_message_type(MessageType::Response)
-                .set_recursion_desired(true)
-                .set_recursion_available(true)
                 .add_query(query.clone())
                 .add_answer(Record::from_rdata(query.name().clone(), 60, answer));
             let bytes = response.to_vec().unwrap();
@@ -1066,12 +1067,19 @@ async fn partial_dns(
             while tasks.try_join_next().is_some() {}
         }
     });
-    let nameservers = NameServerConfigGroup::from_ips_clear(&[address.ip()], address.port(), true);
-    let builder = hickory_resolver::TokioResolver::builder_with_config(
-        ResolverConfig::from_parts(None, vec![], nameservers),
-        TokioConnectionProvider::default(),
-    );
-    (ReadResolvers::new(builder), server)
+    let mut nameserver = NameServerConfig::udp_and_tcp(address.ip());
+    for connection in &mut nameserver.connections {
+        connection.port = address.port();
+    }
+    let nameservers = vec![nameserver];
+    let config = ResolverConfig::from_parts(None, vec![], nameservers);
+    let builder = || {
+        Ok(hickory_resolver::TokioResolver::builder_with_config(
+            config.clone(),
+            TokioRuntimeProvider::default(),
+        ))
+    };
+    (ReadResolvers::new(builder).unwrap(), server)
 }
 
 #[tokio::test]

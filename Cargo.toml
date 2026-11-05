@@ -35,7 +35,7 @@ gsvc-mount = { path = "crates/gsvc-mount" }
 gsvc-fs-client = { path = "crates/gsvc-fs-client" }
 
 # Async runtime
-tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "time", "process", "io-std", "io-util", "signal"] }
+tokio = { version = "1.53.3", features = ["macros", "rt-multi-thread", "time", "process", "io-std", "io-util", "signal"] }
 tokio-util = { version = "0.7.18", features = ["codec", "io"] }
 tokio-tungstenite = { version = "0.28.0", features = ["rustls-tls-webpki-roots"] }
 futures = "0.3.32"
@@ -47,7 +47,7 @@ png = "0.18"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.149"
 serde_repr = "0.1"
-serde_with = { version = "3.17", default-features = false, features = ["base64", "std", "macros"] }
+serde_with = { version = "3.21", default-features = false, features = ["base64", "std", "macros"] }
 serde_path_to_error = "0.1.20"
 
 # HTTP
@@ -56,7 +56,7 @@ serde_path_to_error = "0.1.20"
 # and `Client::with_base_url`'s connection coalescing (which it documents) can
 # never happen.
 reqwest = { version = "0.13.2", default-features = false, features = ["http2", "json", "multipart", "rustls-no-provider", "stream"] }
-rustls = { version = "0.23", default-features = false, features = ["ring"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring"] }
 webpki-root-certs = "1"
 
 # OS keychain for the login token of each context. One store crate per OS; the Linux store is
@@ -77,7 +77,7 @@ sha1 = "0.11"
 sha2 = "0.10"
 hex = "0.4"
 base64 = "0.22"
-p256 = { version = "0.11.1", features = ["pem"] }
+p256 = { version = "0.14.0", features = ["pem", "getrandom"] }
 postcard = { version = "1", features = ["alloc"] }
 shlex = "1.3"
 crc32fast = "1"
@@ -118,7 +118,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # zlib-rs matches artifact_storage's flate2 feature choice, which the (ephemerally vendored)
 # gsvc-codec is tested against; the default miniz_oxide backend has produced a divergent test result.
 flate2 = { version = "1.1.9", features = ["zlib-rs"] }
-tar = "0.4"
+tar = "0.4.46"
 zip = { version = "9.3.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 # JavaScript/TypeScript bundling. Rolldown's Rust API does not promise semver
@@ -143,8 +143,8 @@ gethostname = "0.5"
 env-file-reader = "0.3.0"
 
 # Python bindings
-pyo3 = { version = "0.28.2", features = ["abi3-py310", "extension-module"] }
-pyo3-async-runtimes = { version = "0.28", features = ["tokio-runtime"] }
+pyo3 = { version = "0.29.0", features = ["abi3-py310", "extension-module"] }
+pyo3-async-runtimes = { version = "0.29", features = ["tokio-runtime"] }
 
 # Node.js bindings (napi-rs)
 napi = { version = "2", default-features = false, features = ["napi6", "async", "tokio_rt", "serde-json"] }

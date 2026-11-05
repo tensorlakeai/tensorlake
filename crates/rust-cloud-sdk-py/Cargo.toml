@@ -27,4 +27,4 @@ uuid = { workspace = true }
 url = { workspace = true }
 
 [build-dependencies]
-pyo3-build-config = "0.28.3"
+pyo3-build-config = "0.29.0"
