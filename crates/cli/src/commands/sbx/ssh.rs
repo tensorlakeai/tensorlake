@@ -192,14 +192,13 @@ fn build_ws_headers(ctx: &CliContext, target: &ResolvedSandboxProxyTarget) -> Re
     Ok(ws_headers)
 }
 
-fn build_ws_url(proxy_base: &str, session_id: &str, token: &str) -> String {
-    // Include the PTY token in both the header and query string for now. The
-    // daemon accepts either form, and the query parameter keeps production
-    // proxies that don't forward the custom header from breaking SSH.
+/// The PTY token goes only in the `X-PTY-Token` header, never in the URL, so
+/// it doesn't leak into proxy or CDN access logs.
+fn build_ws_url(proxy_base: &str, session_id: &str) -> String {
     let ws_base = proxy_base
         .replace("https://", "wss://")
         .replace("http://", "ws://");
-    format!("{}/api/v1/pty/{}/ws?token={}", ws_base, session_id, token)
+    format!("{}/api/v1/pty/{}/ws", ws_base, session_id)
 }
 
 async fn attach_to_session_unchecked(
@@ -215,7 +214,7 @@ async fn attach_to_session_unchecked(
         None => resolve_sandbox_proxy_target(ctx, sandbox_id).await?,
     };
     let ws_headers = build_ws_headers(ctx, &target)?;
-    let ws_url = build_ws_url(&target.proxy_base, session_id, token);
+    let ws_url = build_ws_url(&target.proxy_base, session_id);
 
     // Connect WebSocket
     use tokio_tungstenite::tungstenite;
@@ -607,14 +606,14 @@ mod tests {
     }
 
     #[test]
-    fn build_ws_url_uses_websocket_scheme_and_token_query() {
+    fn build_ws_url_uses_websocket_scheme_without_token() {
         assert_eq!(
-            build_ws_url("https://sandbox.tensorlake.ai", "sess-1", "tok-1"),
-            "wss://sandbox.tensorlake.ai/api/v1/pty/sess-1/ws?token=tok-1"
+            build_ws_url("https://sandbox.tensorlake.ai", "sess-1"),
+            "wss://sandbox.tensorlake.ai/api/v1/pty/sess-1/ws"
         );
         assert_eq!(
-            build_ws_url("http://localhost:9443", "sess-1", "tok-1"),
-            "ws://localhost:9443/api/v1/pty/sess-1/ws?token=tok-1"
+            build_ws_url("http://localhost:9443", "sess-1"),
+            "ws://localhost:9443/api/v1/pty/sess-1/ws"
         );
     }
 

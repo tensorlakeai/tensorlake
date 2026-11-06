@@ -9,6 +9,7 @@ use crate::commands::sbx::{
     ResolvedSandboxProxyTarget, resolve_sandbox_proxy_target, with_sandbox_headers,
 };
 use crate::error::{CliError, Result};
+use crate::output::terminal::field;
 
 pub struct LogsArgs<'a> {
     pub levels: Vec<i8>,
@@ -213,37 +214,44 @@ fn has_log_attributes(log_attributes: &str) -> bool {
     !matches!(log_attributes, "" | "{}" | "null")
 }
 
+// The process fields come from the sandbox, so the code running in it controls
+// them. `field` keeps them from injecting terminal escapes or forging rows.
 fn print_process_table(processes: &[Value]) {
     println!("PID\tStatus\tManaged\tName\tRestarts\tHealth\tCommand");
     for process in processes {
-        let pid = process
-            .get("pid")
-            .and_then(Value::as_i64)
-            .map(|pid| pid.to_string())
-            .unwrap_or_default();
-        let status = process
-            .get("status")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        let command = format_command(process);
-        let managed = process.get("managed").filter(|value| !value.is_null());
-        let managed_flag = if managed.is_some() { "yes" } else { "no" };
-        let name = managed
+        println!("{}", process_row(process));
+    }
+}
+
+fn process_row(process: &Value) -> String {
+    let pid = process
+        .get("pid")
+        .and_then(Value::as_i64)
+        .map(|pid| pid.to_string())
+        .unwrap_or_default();
+    let status = field(process.get("status").and_then(Value::as_str).unwrap_or(""));
+    let command = format_command(process);
+    let command = field(&command);
+    let managed = process.get("managed").filter(|value| !value.is_null());
+    let managed_flag = if managed.is_some() { "yes" } else { "no" };
+    let name = field(
+        managed
             .and_then(|value| value.get("name"))
             .and_then(Value::as_str)
-            .unwrap_or("");
-        let restarts = managed
-            .and_then(|value| value.get("restart_count"))
-            .and_then(Value::as_u64)
-            .map(|value| value.to_string())
-            .unwrap_or_default();
-        let health = managed
+            .unwrap_or(""),
+    );
+    let restarts = managed
+        .and_then(|value| value.get("restart_count"))
+        .and_then(Value::as_u64)
+        .map(|value| value.to_string())
+        .unwrap_or_default();
+    let health = field(
+        managed
             .and_then(|value| value.get("health_status"))
             .and_then(Value::as_str)
-            .unwrap_or("");
-        println!("{pid}\t{status}\t{managed_flag}\t{name}\t{restarts}\t{health}\t{command}");
-    }
+            .unwrap_or(""),
+    );
+    format!("{pid}\t{status}\t{managed_flag}\t{name}\t{restarts}\t{health}\t{command}")
 }
 
 fn print_log_process_table(processes: &[SandboxProcessLogFilter]) {
@@ -251,12 +259,12 @@ fn print_log_process_table(processes: &[SandboxProcessLogFilter]) {
     for process in processes {
         println!(
             "{}\t{}\t{}\t{}\t{}\t{}",
-            process.process_id,
-            process.process_pid,
-            process.process_managed_id,
-            process.process_managed_name,
+            field(&process.process_id),
+            field(&process.process_pid),
+            field(&process.process_managed_id),
+            field(&process.process_managed_name),
             process.log_count,
-            process.process_command
+            field(&process.process_command)
         );
     }
 }
@@ -292,6 +300,30 @@ mod tests {
             }}"#
         ))
         .unwrap()
+    }
+
+    #[test]
+    fn process_row_neutralizes_terminal_escapes() {
+        let process = serde_json::json!({
+            "pid": 7,
+            "status": "running\x1b[2K\r",
+            "command": "sh",
+            "args": ["-c", "\x1b]52;c;ZWNobyBoaQ==\x07"],
+            "managed": {
+                "name": "web\x1b]2;owned\x07",
+                "restart_count": 1,
+                "health_status": "ok\nfake\trow",
+            },
+        });
+
+        let row = process_row(&process);
+
+        assert!(!row.contains(['\u{1b}', '\u{7}', '\r', '\n']));
+        assert_eq!(row.matches('\t').count(), 6);
+        assert_eq!(
+            row,
+            "7\trunning\\x1b[2K\\r\tyes\tweb\\x1b]2;owned\\x07\t1\tok\\nfake\\trow\tsh -c \\x1b]52;c;ZWNobyBoaQ==\\x07"
+        );
     }
 
     #[test]

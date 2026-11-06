@@ -122,7 +122,7 @@ describe("Sandbox PTY", () => {
 
     const socket = MockWebSocket.instances[0];
     expect(socket.url).toBe(
-      "wss://sandbox.tensorlake.ai/api/v1/pty/sess-1/ws?token=tok-1",
+      "wss://sandbox.tensorlake.ai/api/v1/pty/sess-1/ws",
     );
     expect(socket.options?.headers?.["X-PTY-Token"]).toBe("tok-1");
     expect(socket.sent[0]).toEqual(Buffer.from([0x02]));

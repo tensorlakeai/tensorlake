@@ -4,6 +4,7 @@ use crate::commands::sbx::{
     error_details_message, format_gpu_allocation, native_ssh, sandbox_endpoint,
 };
 use crate::error::{CliError, Result};
+use crate::output::terminal::message;
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -179,7 +180,7 @@ fn print_sandbox_details(item: &SandboxDescription) {
             resize.requested.cpus, resize.requested.memory_mb, resize.requested.disk_mb
         );
         if let Some(error) = &resize.error_message {
-            println!("Resize error:    {error}");
+            println!("Resize error:    {}", message(error));
         }
     }
 
@@ -262,14 +263,15 @@ fn print_sandbox_details(item: &SandboxDescription) {
         println!("Terminated:      {}", terminated_at);
 
         let reason = item.failure.termination_reason.as_deref().unwrap_or("");
-        println!("Reason:          {}", reason);
+        println!("Reason:          {}", message(reason));
         if let Some(details) = item
             .failure
             .error_details
             .as_ref()
             .and_then(error_details_message)
         {
-            println!("Error details:   {}", details);
+            // Error details can carry text from inside the sandbox.
+            println!("Error details:   {}", message(&details));
         }
 
         let outcome = item.outcome.as_deref().unwrap_or("");
