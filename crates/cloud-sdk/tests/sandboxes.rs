@@ -2460,3 +2460,102 @@ async fn auto_resume_unnamed_rejection_preserves_server_error() {
     }
     assert_eq!(server.await.unwrap().len(), 2);
 }
+
+#[tokio::test]
+async fn run_stream_finishes_at_exit_without_waiting_for_http_eof() {
+    for exit in [EXITED, "data: {\"signal\":15}\n\n"] {
+        let (url, server) = run_stream_server(
+            Some(Duration::ZERO),
+            vec![
+                (Duration::ZERO, STARTED),
+                (
+                    Duration::ZERO,
+                    "data: {\"stream\":\"stdout\",\"timestamp\":0,\"line\":\"done\"}\n\n",
+                ),
+                (Duration::ZERO, exit),
+                (Duration::from_secs(30), KEEP_ALIVE),
+            ],
+        )
+        .await;
+        let proxy = run_stream_proxy(&url, Duration::from_millis(150));
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            proxy.run_process(&serde_json::json!({"command":"true"})),
+        )
+        .await;
+        server.abort();
+        let events = result
+            .expect("run completes")
+            .expect("exit settles the run")
+            .into_inner();
+        assert_eq!(events.len(), 3);
+        assert!(matches!(&events[1], RunProcessEvent::Output(output) if output.line == "done"));
+        assert!(matches!(
+            events.last(),
+            Some(RunProcessEvent::Exited { .. })
+        ));
+    }
+}
+
+#[tokio::test]
+async fn run_stream_does_not_deliver_data_after_the_terminal_exit() {
+    let (url, server) = run_stream_server(
+        Some(Duration::ZERO),
+        vec![(
+            Duration::ZERO,
+            concat!(
+                "data: {\"exit_code\":0}\n\n",
+                "data: {\"stream\":\"stdout\",\"timestamp\":0,\"line\":\"after exit\"}\n\n"
+            ),
+        )],
+    )
+    .await;
+    let proxy = run_stream_proxy(&url, Duration::from_secs(2));
+    let events = proxy
+        .run_process(&serde_json::json!({"command":"true"}))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(events.len(), 1);
+    assert!(matches!(
+        events[0],
+        RunProcessEvent::Exited {
+            exit_code: Some(0),
+            ..
+        }
+    ));
+    server.await.expect("server join");
+}
+
+#[tokio::test]
+async fn run_stream_keeps_waiting_after_an_unrecognized_event() {
+    let (url, server) = run_stream_server(
+        Some(Duration::ZERO),
+        vec![
+            (Duration::ZERO, "data: {\"keep_alive\":true}\n\n"),
+            (Duration::from_secs(30), EXITED),
+        ],
+    )
+    .await;
+    let proxy = run_stream_proxy(&url, Duration::from_millis(150));
+    let result = proxy
+        .run_process(&serde_json::json!({"command":"true"}))
+        .await;
+    server.abort();
+    assert!(matches!(result, Err(SdkError::StreamTimeout { .. })));
+}
+
+#[tokio::test]
+async fn run_stream_propagates_a_consumer_failure_on_the_exit_event() {
+    let (url, server) =
+        run_stream_server(Some(Duration::ZERO), vec![(Duration::ZERO, EXITED)]).await;
+    let proxy = run_stream_proxy(&url, Duration::from_secs(2));
+    let error = proxy
+        .run_process_streaming_async(&serde_json::json!({"command":"true"}), |_| {
+            std::future::ready(Err(SdkError::ClientError("consumer failed".into())))
+        })
+        .await
+        .expect_err("consumer error must be retained");
+    assert!(matches!(error, SdkError::ClientError(message) if message == "consumer failed"));
+    server.await.expect("server join");
+}
