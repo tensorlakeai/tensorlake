@@ -51,6 +51,7 @@ jobs:
             tests.applications.test_parse_gitignore \
             tests.applications.test_request_context_headers \
             tests.utils.test_retries \
+            tests.sandbox.test_async_pty \
             tests.sandbox.test_timestamps
           do
             poetry run python -m unittest "$module"

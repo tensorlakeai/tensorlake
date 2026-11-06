@@ -1594,7 +1594,7 @@ class AsyncSandbox:
                 on_exit=on_exit,
                 connect_timeout=connect_timeout,
             )
-        except Exception:
+        except (Exception, asyncio.CancelledError):
             try:
                 await self._delete_pty_session(
                     session["session_id"], timeout=connect_timeout
