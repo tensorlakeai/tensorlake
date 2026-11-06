@@ -7,6 +7,7 @@ use crate::commands::sbx::{resolve_sandbox_proxy_target, with_sandbox_headers};
 use crate::config::files::normalize_api_url;
 use crate::error::{CliError, Result};
 use crate::output::table::new_table;
+use crate::output::terminal::field;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PtySessionSummary {
@@ -71,14 +72,16 @@ pub async fn list(ctx: &CliContext, sandbox_id: &str, output_json: bool) -> Resu
         "Created",
         "Token",
     ]);
+    // Session fields come from the sandbox, so the code running in it controls
+    // them. `field` keeps them from injecting terminal escapes.
     for session in sessions {
         table.add_row(vec![
-            Cell::new(session.session_id),
-            Cell::new(display_value(session.command.as_deref())),
-            Cell::new(display_value(session.status.as_deref())),
-            Cell::new(display_value(session.clients.as_deref())),
-            Cell::new(display_value(session.created.as_deref())),
-            Cell::new(display_token(session.token.as_deref())),
+            Cell::new(field(&session.session_id)),
+            Cell::new(field(display_value(session.command.as_deref()))),
+            Cell::new(field(display_value(session.status.as_deref()))),
+            Cell::new(field(display_value(session.clients.as_deref()))),
+            Cell::new(field(display_value(session.created.as_deref()))),
+            Cell::new(field(&display_token(session.token.as_deref()))),
         ]);
     }
 

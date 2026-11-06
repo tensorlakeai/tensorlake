@@ -1519,9 +1519,9 @@ describe("Sandbox", () => {
         sandboxId: "sbx-1",
         proxyUrl: "https://sandbox.tensorlake.ai",
       });
-      const url = sbx.ptyWsUrl("sess-1", "tok-1");
+      const url = sbx.ptyWsUrl("sess-1");
       expect(url).toBe(
-        "wss://sandbox.tensorlake.ai/api/v1/pty/sess-1/ws?token=tok-1",
+        "wss://sandbox.tensorlake.ai/api/v1/pty/sess-1/ws",
       );
       sbx.close();
     });
@@ -1529,9 +1529,9 @@ describe("Sandbox", () => {
     it("constructs correct WS URL for http localhost", () => {
       installNativeStub();
       const sbx = makeSandbox("sbx-1");
-      const url = sbx.ptyWsUrl("sess-1", "tok-1");
+      const url = sbx.ptyWsUrl("sess-1");
       expect(url).toBe(
-        "ws://localhost:9443/api/v1/pty/sess-1/ws?token=tok-1",
+        "ws://localhost:9443/api/v1/pty/sess-1/ws",
       );
       sbx.close();
     });

@@ -1530,16 +1530,13 @@ export class Sandbox {
     options?: PtyConnectionOptions,
   ): Promise<Pty> {
     await this.proxy.ensureResolved();
-    const wsUrl = new URL(this.ptyWsUrl(sessionId, token));
-    const authToken = wsUrl.searchParams.get("token") ?? token;
-
     const pty = new Pty({
       sessionId,
-      token: authToken,
-      wsUrl: wsUrl.toString(),
+      token,
+      wsUrl: this.ptyWsUrl(sessionId),
       wsHeaders: {
         ...this.wsHeaders,
-        "X-PTY-Token": authToken,
+        "X-PTY-Token": token,
       },
       killSession: async () => {
         const proxy = await this.proxy.client();
@@ -1642,7 +1639,12 @@ export class Sandbox {
     );
   }
 
-  ptyWsUrl(sessionId: string, token: string): string {
+  /**
+   * WebSocket URL for a PTY session. The token is not part of the URL, so it
+   * doesn't leak into proxy or CDN access logs. Send it in the `X-PTY-Token`
+   * header instead.
+   */
+  ptyWsUrl(sessionId: string): string {
     let wsBase: string;
     if (this.baseUrl.startsWith("https://")) {
       wsBase = "wss://" + this.baseUrl.slice(8);
@@ -1651,7 +1653,7 @@ export class Sandbox {
     } else {
       wsBase = this.baseUrl;
     }
-    return `${wsBase}/api/v1/pty/${sessionId}/ws?token=${token}`;
+    return `${wsBase}/api/v1/pty/${sessionId}/ws`;
   }
 
   // --- Health ---

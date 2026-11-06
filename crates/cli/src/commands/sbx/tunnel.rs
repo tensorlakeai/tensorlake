@@ -7,6 +7,7 @@ use tensorlake::sandboxes::tunnel::{TcpTunnel, TcpTunnelOptions};
 use crate::auth::context::CliContext;
 use crate::commands::sbx::{ResolvedSandboxProxyTarget, resolve_sandbox_proxy_target};
 use crate::error::{CliError, Result};
+use crate::output::terminal::message;
 
 pub async fn run(
     ctx: &CliContext,
@@ -36,7 +37,11 @@ pub async fn run(
         tokio::select! {
             signal = tokio::signal::ctrl_c() => { signal.map_err(CliError::Io)?; break; }
             _ = tunnel.closed() => break,
-            Ok(error) = errors.recv() => eprintln!("Tunnel connection from {} failed: {}", error.peer_addr, error.message),
+            Ok(error) = errors.recv() => eprintln!(
+                "Tunnel connection from {} failed: {}",
+                error.peer_addr,
+                message(&error.message)
+            ),
         }
     }
     tunnel.close().await;

@@ -2289,7 +2289,7 @@ async fn main() {
         match tensorlake::docker_config::load_docker_config_json() {
             Ok(contents) => Some(contents),
             Err(error) => {
-                eprintln!("Error: {error}");
+                eprintln!("Error: {}", output::terminal::message(&error.to_string()));
                 std::process::exit(1);
             }
         }
@@ -2338,11 +2338,14 @@ async fn main() {
             // `tl git setup`, or a config that no longer resolves, must fail softly: say why
             // on stderr and exit 0, so git falls through to its other helpers or a prompt.
             if matches!(command, Commands::Git(GitCommands::CredentialHelper { .. })) {
-                eprintln!("tl: {e}. run `tl git setup` in the repo again");
+                eprintln!(
+                    "tl: {}. run `tl git setup` in the repo again",
+                    output::terminal::message(&e.to_string())
+                );
                 drain_stdin();
                 std::process::exit(0);
             }
-            eprintln!("Error: {e}");
+            eprintln!("Error: {}", output::terminal::message(&e.to_string()));
             std::process::exit(1);
         }
     };
@@ -2367,7 +2370,9 @@ async fn main() {
             CliError::ExitCode(code) => std::process::exit(*code),
             CliError::Cancelled => std::process::exit(1),
             _ => {
-                eprintln!("Error: {}", e);
+                // Error text can hold response bodies from the sandbox, which
+                // the code running in it controls.
+                eprintln!("Error: {}", output::terminal::message(&e.to_string()));
                 // Walk the source chain: wrapped errors like reqwest's hide the
                 // root cause (DNS failure, connection refused, TLS, timeout)
                 // behind Display and only expose it via source().
@@ -2376,14 +2381,14 @@ async fn main() {
                 while let Some(cause) = source {
                     let msg = cause.to_string();
                     if !prev.contains(&msg) {
-                        eprintln!("  Caused by: {}", msg);
+                        eprintln!("  Caused by: {}", output::terminal::message(&msg));
                         prev = msg;
                     }
                     source = cause.source();
                 }
                 if ctx.debug {
                     eprintln!("\nDebug info:");
-                    eprintln!("  {:?}", e);
+                    eprintln!("  {}", output::terminal::message(&format!("{:?}", e)));
                 }
                 std::process::exit(1);
             }

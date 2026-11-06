@@ -139,7 +139,10 @@ pub async fn run(
                 .unwrap_or_default();
             if matches!(error, CliError::Cancelled) {
                 if !cleanup.is_empty() {
-                    eprintln!("Mount process {pid} cleanup failed:{cleanup}");
+                    eprintln!(
+                        "Mount process {pid} cleanup failed:{}",
+                        crate::output::terminal::message(&cleanup)
+                    );
                 }
                 return Err(CliError::Cancelled);
             }
