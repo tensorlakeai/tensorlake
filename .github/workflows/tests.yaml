@@ -45,6 +45,7 @@ jobs:
         run: |
           set -euo pipefail
           for module in \
+            tests.applications.blob_store.test_s3_blob_store_retries \
             tests.applications.test_application_manifest \
             tests.applications.test_code_zip \
             tests.applications.test_future_validation \
