@@ -331,13 +331,7 @@ class TestFuturesWait(unittest.TestCase):
         request: Request = run_application(
             app_return_when_first_failure, is_remote, "foo"
         )
-        # We're currently stopping whole request execution on a function run failure.
-        # So the request error gets propagated to the request output instead of being
-        # raised in the application function.
-        # self.assertEqual(request.output(), "success")
-        with self.assertRaises(RequestError) as cm:
-            request.output()
-        self.assertEqual(str(cm.exception), "bar")
+        self.assertEqual(request.output(), "success")
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_future_result_caching(self, _: str, is_remote: bool):

@@ -118,12 +118,6 @@ _LOCAL_REQUEST_ID = "local-request-id"
 _SLEEP_POLL_INTERVAL_SECONDS = 0.002
 
 
-# TODO: Implement Exception propagation from called function to its caller.
-# Only mark request as failed with an exception if Application function raised/didn't
-# catch the exception or if application function finished successfully but one of non-blocking
-# function calls failed later.
-
-
 class LocalRunner:
     def __init__(self, app: Function, app_args: list[Any], app_kwargs: dict[str, Any]):
         self._app: Function = app
@@ -155,6 +149,10 @@ class LocalRunner:
         # Exception that caused the request to fail.
         # None when request finished successfully.
         self._request_failed_exception: RequestFailed | None = None
+        # The request fails only if this call fails. Failures of other calls go to their callers.
+        self._app_future: Future | None = None
+        # Future ID -> future run of the function that started the Future in its code.
+        self._future_run_callers: Dict[str, LocalFutureRun] = {}
         # Share class instances between all functions. If we don't do this then there's
         # going to be >1 instance of the same class per process.
         self._class_instance_store: ClassInstanceStore = ClassInstanceStore.singleton()
@@ -311,6 +309,7 @@ class LocalRunner:
             app_function_call_future: FunctionCallFuture = self._app.future(
                 *self._app_args, **self._app_kwargs
             )
+            self._app_future = app_function_call_future
             app_output_serializer: UserDataSerializer = function_output_serializer(
                 self._app, None
             )
@@ -335,6 +334,15 @@ class LocalRunner:
             )
 
         self._control_loop()
+
+        if (
+            self._request_failed_exception is None
+            and app_function_call_future.exception is not None
+        ):
+            # The exception is already printed when the function call failed.
+            self._request_failed_exception = _request_failed_exception(
+                app_function_call_future.exception
+            )
 
         if self._request_failed_exception is not None:
             return LocalRequest(
@@ -473,6 +481,8 @@ class LocalRunner:
                     is_map_concat=False,
                     parent_function_name=current_future_run.local_future.future_metadata.function_name,
                 )
+                if future is user_future:
+                    self._future_run_callers[future._id] = current_future_run
         except TensorlakeError:
             raise
         except Exception as e:
@@ -605,6 +615,9 @@ class LocalRunner:
         if self._request_failed_exception is not None:
             return True
 
+        if self._app_future is not None and self._app_future.exception is not None:
+            return True
+
         if not self._future_run_result_queue.empty():
             return False
 
@@ -617,13 +630,25 @@ class LocalRunner:
             # Process one future run result at a time because it takes
             # ~_SLEEP_POLL_INTERVAL_SECONDS at most. This keeps our timers accurate enough.
             self._control_loop_wait_and_process_future_run_result()
-            if self._request_failed_exception is not None:
-                break
 
     def _control_loop_start_runnable_futures(self) -> None:
         # Future runs can be modified concurrently so iterate over a copy.
         for future_run in self._future_runs.copy().values():
             future: LocalFunctionCallFuture = future_run.local_future
+
+            if future_run.is_started:
+                continue
+
+            dependency_error: TensorlakeError | None = (
+                self._future_run_failed_data_dependency_error(future_run)
+            )
+            if dependency_error is not None:
+                self._handle_future_run_final_output(
+                    future_run=future_run,
+                    ser_value=None,
+                    error=dependency_error,
+                )
+                continue
 
             if not future.start_time_elapsed:
                 continue
@@ -749,7 +774,13 @@ class LocalRunner:
         future_run: LocalFutureRun,
         error: TensorlakeError,
     ) -> None:
-        self._handle_user_exception(error)
+        """Fails the function call. Its caller can handle the error.
+
+        The request fails only if the error propagates to the application function call.
+        """
+        # Print here, not at the request level: the caller can catch the error
+        # and the request can still succeed.
+        print_exception(error)
 
         self._handle_future_run_final_output(
             future_run=future_run,
@@ -766,11 +797,23 @@ class LocalRunner:
         # Always print the user exception.
         # This aligns with remote mode UX where the user exception is printed in FE.
         print_exception(error)
-        if isinstance(error, RequestError):
-            self._request_failed_exception = error
-        else:
-            # Consistent with remote mode, full exception trace is printed separately.
-            self._request_failed_exception = RequestFailed("function_error")
+        self._request_failed_exception = _request_failed_exception(error)
+
+    def _future_run_failed_data_dependency_error(
+        self, future_run: LocalFutureRun
+    ) -> TensorlakeError | None:
+        """Returns the error of a failed function call whose output is an input of the future run."""
+        metadata: FunctionCallMetadata = future_run.local_future.future_metadata
+        for arg_metadata in [*metadata.args, *metadata.kwargs.values()]:
+            # value_id is a Future ID when the argument is another function call.
+            source: LocalFutureRun | None = self._future_runs.get(arg_metadata.value_id)
+            if (
+                source is not None
+                and source.std_future.done()
+                and source.std_future.exception() is not None
+            ):
+                return source.local_future.future.exception
+        return None
 
     def _future_run_data_dependencies_are_resolved(
         self, future_run: LocalFutureRun
@@ -811,6 +854,14 @@ class LocalRunner:
                 else:
                     # Intentionally do serialize -> deserialize cycle to ensure the same UX as in remote mode.
                     local_future.future._set_result(_deserialize_value(ser_value))
+
+            if error is not None and self._request_failed_exception is None:
+                caller: LocalFutureRun | None = self._future_run_callers.get(
+                    local_future.future._id
+                )
+                if caller is not None and caller.user_function_returned:
+                    # Nobody can handle the error, the function that started this call already returned.
+                    self._request_failed_exception = _request_failed_exception(error)
 
             # Finish std future so wait hooks waiting on it unblock.
             # Success/failure needs to be propagated to std future as well so std wait calls work correctly.
@@ -1260,6 +1311,13 @@ class LocalRunner:
                 raise InternalError(
                     f"Future with ID {user_object._id} has no future run."
                 )
+
+
+def _request_failed_exception(error: TensorlakeError) -> RequestFailed:
+    if isinstance(error, RequestError):
+        return error
+    # Consistent with remote mode, full exception trace is printed separately.
+    return RequestFailed("function_error")
 
 
 def _deserialize_value(ser_value: SerializedValue) -> Any | File:
