@@ -107,15 +107,7 @@ pub async fn run(
 
     let resolved_sandbox_id = target.sandbox_id.clone();
 
-    attach_to_session_unchecked(
-        ctx,
-        &resolved_sandbox_id,
-        session_id,
-        token,
-        "ssh",
-        Some(target),
-    )
-    .await
+    attach_to_session_unchecked(ctx, &resolved_sandbox_id, session_id, token, Some(target)).await
 }
 
 pub(crate) async fn attach_to_session(
@@ -126,7 +118,7 @@ pub(crate) async fn attach_to_session(
     command_name: &str,
 ) -> Result<()> {
     ensure_interactive_terminal(command_name)?;
-    attach_to_session_unchecked(ctx, sandbox_id, session_id, token, command_name, None).await
+    attach_to_session_unchecked(ctx, sandbox_id, session_id, token, None).await
 }
 
 fn ensure_interactive_terminal(command_name: &str) -> Result<()> {
@@ -206,7 +198,6 @@ async fn attach_to_session_unchecked(
     sandbox_id: &str,
     session_id: &str,
     token: &str,
-    _command_name: &str,
     target: Option<ResolvedSandboxProxyTarget>,
 ) -> Result<()> {
     let target = match target {
