@@ -91,6 +91,11 @@ fn make_napi_error(category: &str, status: Option<u16>, message: String) -> napi
 /// substring reported real DNS and TCP failures as opaque internal errors.
 pub(crate) fn into_napi_error(error: SdkError) -> napi::Error {
     match error.into_original() {
+        SdkError::SandboxResume(error) => make_napi_error(
+            "resume_failed",
+            None,
+            serde_json::to_string(&error).expect("serializable resume error"),
+        ),
         SdkError::SandboxResize(error) => make_napi_error(
             "resize",
             None,

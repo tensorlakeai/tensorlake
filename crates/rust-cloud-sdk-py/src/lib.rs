@@ -4061,6 +4061,11 @@ fn into_py_error(error: SdkError) -> PyErr {
 
 fn into_sandbox_py_error(error: SdkError) -> PyErr {
     match error.into_original() {
+        SdkError::SandboxResume(error) => CloudSandboxClientError::new_err((
+            "resume_failed",
+            Option::<u16>::None,
+            serde_json::to_string(&error).expect("serializable resume error"),
+        )),
         SdkError::SandboxResize(error) => CloudSandboxClientError::new_err((
             "resize",
             Option::<u16>::None,

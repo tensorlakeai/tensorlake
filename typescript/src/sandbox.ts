@@ -7,6 +7,7 @@ import {
 import {
   RemoteAPIError,
   SandboxError,
+  SandboxResumeError,
   SandboxNotFoundError,
   SandboxPending,
 } from "./errors.js";
@@ -807,6 +808,9 @@ export class Sandbox {
         // exists; this status fetch is the existence check that routes a
         // free name to the create step below.
         const status = await sandbox.status();
+        if (status === SandboxStatus.RESUME_FAILED) {
+          throw new SandboxResumeError(await sandbox.info());
+        }
         if (status === SandboxStatus.PENDING) {
           // Another caller's create is still starting this sandbox. Match
           // create(): block until Running, then pick up fresh proxy
@@ -998,7 +1002,8 @@ export class Sandbox {
   }
 
   /**
-   * Resume this sandbox.
+   * Resume this sandbox or explicitly retry `resume_failed`. A failed attempt
+   * throws SandboxResumeError and retains the sandbox and checkpoint.
    *
    * By default blocks until the sandbox is `Running` and refreshes this
    * handle's cached proxy routing. Rare transient proxy errors may still occur
@@ -1067,6 +1072,7 @@ export class Sandbox {
         await this.proxy.refreshFromInfo(info);
         return;
       }
+      if (info.status === SandboxStatus.RESUME_FAILED) throw new SandboxResumeError(info);
       if (info.status === SandboxStatus.TERMINATED) {
         throw new SandboxError(
           `Sandbox ${this.lifecycleIdentifier} terminated while refreshing proxy routing`,

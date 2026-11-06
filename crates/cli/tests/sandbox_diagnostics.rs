@@ -381,3 +381,33 @@ async fn ls_quiet_keeps_ids_only_for_gpu_and_cpu_sandboxes() {
         assert_eq!(stdout, "sbx-gpu\nsbx-cpu\n");
     }
 }
+
+#[tokio::test]
+async fn describe_resume_failed_keeps_checkpoint_and_diagnosis_without_ssh_route() {
+    let output = run_cli(
+        &["describe", "sbx-1"],
+        vec![(
+            200,
+            json!({
+                "id":"sbx-1", "status":"resume_failed", "snapshot_id":"snap-retained",
+                "error_details":{"message":"restore failed"}
+            }),
+        )],
+    )
+    .await;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for expected in [
+        "resume_failed",
+        "snap-retained",
+        "restore failed",
+        "tl sbx resume",
+    ] {
+        assert!(stdout.contains(expected), "{stdout}");
+    }
+    assert!(!stdout.contains("SSH Config:"));
+}

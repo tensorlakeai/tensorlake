@@ -2460,3 +2460,105 @@ async fn auto_resume_unnamed_rejection_preserves_server_error() {
     }
     assert_eq!(server.await.unwrap().len(), 2);
 }
+
+const RESUME_FAILED_INFO: &str = r#"{"id":"sbx-1","namespace":"default","status":"resume_failed","snapshot_id":"snap-1","error_details":{"message":"restore failed","debug_data":{"attempt_id":17}},"resources":{"cpus":1,"memory_mb":512,"disk_mb":1024}}"#;
+
+#[tokio::test]
+async fn recoverable_resume_failure_preserves_checkpoint_and_explicit_retry() {
+    for body in [
+        "restore failed",
+        r#"{"message":"restore failed"}"#,
+        r#"{"sandbox_id":"sbx-1","status":"resume_failed","error_details":"restore failed"}"#,
+    ] {
+        let (url, server) = scripted_server(vec![
+            (200, RESUME_FAILED_INFO),
+            (409, body),
+            (200, RESUME_FAILED_INFO),
+            (200, ""),
+            (200, info("running")),
+            (202, ""),
+        ])
+        .await;
+        let client = ClientBuilder::new(&url).build().unwrap();
+        let sandboxes = SandboxesClient::new(client, "default", true);
+        let observed = sandboxes.get("sbx-1").await.unwrap();
+        assert_eq!(observed.status, "resume_failed");
+        assert_eq!(observed.snapshot_id.as_deref(), Some("snap-1"));
+        let error = sandboxes
+            .resume_and_wait("sbx-1", Duration::from_secs(120))
+            .await
+            .unwrap_err();
+        let SdkError::SandboxResume(error) = error else {
+            panic!("{error:?}");
+        };
+        assert_eq!(error.status(), "resume_failed");
+        assert_eq!(error.sandbox_id, "sbx-1");
+        assert_eq!(error.snapshot_id.as_deref(), Some("snap-1"));
+        assert_eq!(error.error_details, observed.error_details);
+        assert!(
+            *sandboxes
+                .resume_and_wait("sbx-1", Duration::from_secs(120))
+                .await
+                .unwrap()
+        );
+        assert_eq!(sandboxes.get("sbx-1").await.unwrap().error_details, None);
+        assert!(
+            !*sandboxes
+                .resume_and_wait("sbx-1", Duration::from_secs(120))
+                .await
+                .unwrap()
+        );
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 6);
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|r| request_line(r).starts_with("POST"))
+                .count(),
+            3
+        );
+        assert!(
+            requests
+                .iter()
+                .all(|r| !request_line(r).starts_with("DELETE"))
+        );
+    }
+}
+
+#[tokio::test]
+async fn uncertain_resume_and_legacy_conflicts_are_not_classified_by_diagnosis() {
+    for response in [
+        (200, info("pending")),
+        (200, info("terminated")),
+        (404, "missing"),
+        (200, "unrecognized"),
+    ] {
+        let (url, server) = scripted_server(vec![(409, "Resident resume failed"), response]).await;
+        let sandboxes =
+            SandboxesClient::new(ClientBuilder::new(&url).build().unwrap(), "default", true);
+        let error = sandboxes
+            .resume_and_wait("sbx-1", Duration::from_secs(1))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, SdkError::ServerError { status, ref message } if status.as_u16() == 409 && message == "Resident resume failed")
+        );
+        assert_eq!(server.await.unwrap().len(), 2);
+    }
+}
+
+#[tokio::test]
+async fn readiness_settles_on_resume_failed_without_mutation() {
+    let (url, server) = scripted_server(vec![(200, RESUME_FAILED_INFO)]).await;
+    let sandboxes =
+        SandboxesClient::new(ClientBuilder::new(&url).build().unwrap(), "default", true);
+    let observed = sandboxes
+        .wait_until_settled("sbx-1", Duration::from_secs(120), Duration::from_millis(1))
+        .await
+        .unwrap();
+    assert_eq!(observed.status, "resume_failed");
+    assert_eq!(observed.snapshot_id.as_deref(), Some("snap-1"));
+    let requests = server.await.unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(request_line(&requests[0]).starts_with("GET"));
+}

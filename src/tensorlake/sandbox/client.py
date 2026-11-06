@@ -24,6 +24,7 @@ from .exceptions import (
     SandboxNotRoutableError,
     SandboxPending,
     SandboxResizeError,
+    SandboxResumeError,
     _format_error_details,
 )
 from .models import (
@@ -163,6 +164,8 @@ def _raise_as_sandbox_error(e: Exception) -> NoReturn:
         and len(e.args) > 0
     ):
         kind, status_code, message = _parse_rust_client_error_fields(e)
+        if kind == "resume_failed":
+            raise SandboxResumeError(**json.loads(message)) from None
         if kind == "resize":
             payload = json.loads(message)
             raise SandboxResizeError(
@@ -877,6 +880,8 @@ class SandboxClient:
     ) -> "Sandbox":
         """Turn the last observed sandbox state into a handle or an error.
         Shared by :meth:`PendingSandbox.ready` and :meth:`create_and_connect`."""
+        if observed.status == SandboxStatus.RESUME_FAILED:
+            raise SandboxResumeError.from_info(observed.value)
         status = observed.status
         sandbox_id = observed.sandbox_id
         if status == SandboxStatus.PENDING:
@@ -1468,7 +1473,10 @@ class SandboxClient:
         timeout: float = 300,
         poll_interval: float = 1.0,
     ) -> Traced[None]:
-        """Resume a suspended sandbox.
+        """Resume a suspended sandbox or explicitly retry ``resume_failed``.
+
+        A failed attempt raises ``SandboxResumeError`` and retains the sandbox
+        and checkpoint. No further resume is submitted automatically.
 
         By default blocks until the sandbox is ``Running``; pass
         ``wait=False`` for fire-and-return.
@@ -1530,7 +1538,12 @@ class SandboxClient:
                 _raise_as_sandbox_error(e)
             # The request failed or another one superseded it. A concurrent
             # request may still have reached the target.
-            info = self.get(sandbox_id)
+            try:
+                info = self.get(sandbox_id)
+            except Exception:
+                _raise_as_sandbox_error(e)
+            if info.value.status == SandboxStatus.RESUME_FAILED:
+                raise SandboxResumeError.from_info(info.value) from None
             if info.value.status == target:
                 return Traced(info.trace_id, None)
             _raise_as_sandbox_error(e)
@@ -1538,6 +1551,8 @@ class SandboxClient:
             return Traced(trace_id, None)
         while time.time() < deadline:
             info = self.get(sandbox_id).value
+            if info.status == SandboxStatus.RESUME_FAILED:
+                raise SandboxResumeError.from_info(info)
             if info.status == target:
                 return Traced(trace_id, None)
             if info.status == SandboxStatus.TERMINATED:
@@ -2092,6 +2107,8 @@ class SandboxClient:
             info = self.get(sandbox_identifier)
             routing_info = info.value
             cached_info = info.value
+            if info.status == SandboxStatus.RESUME_FAILED:
+                raise SandboxResumeError.from_info(info)
             if info.status == SandboxStatus.PENDING:
                 # The sandbox is queued for capacity. Wait for it here rather
                 # than failing: readiness is a property of the sandbox, not
@@ -2110,6 +2127,8 @@ class SandboxClient:
                         pending_reason=observed.pending_reason,
                         timeout=budget,
                     )
+                if observed.status == SandboxStatus.RESUME_FAILED:
+                    raise SandboxResumeError.from_info(observed.value)
                 if observed.status in (SandboxStatus.TERMINATED, SandboxStatus.FAILED):
                     raise _startup_failure(
                         observed.sandbox_id,

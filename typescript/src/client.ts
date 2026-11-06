@@ -3,6 +3,7 @@ import { enumValue, withRaw } from "./enum.js";
 import {
   RemoteAPIError,
   SandboxError,
+  SandboxResumeError,
   SandboxPending,
   formatErrorDetails,
 } from "./errors.js";
@@ -402,6 +403,7 @@ export class SandboxClient {
       traceId?: string;
     },
   ): Promise<Sandbox> {
+    if (observed.status === SandboxStatus.RESUME_FAILED) throw new SandboxResumeError(observed);
     const { status, sandboxId } = observed;
     if (isSandboxPending(status)) {
       if (options.cancelOnTimeout) {
@@ -468,6 +470,7 @@ export class SandboxClient {
     requestTimeout?: number,
   ): Promise<Traced<SandboxInfo>> {
     const info = await this.get(identifier);
+    if (info.status === SandboxStatus.RESUME_FAILED) throw new SandboxResumeError(info);
     if (info.status !== SandboxStatus.PENDING) return info;
     const budget = requestTimeout ?? this.requestTimeoutMs / 1000;
     const observed = await this.waitForSandbox(
@@ -475,6 +478,7 @@ export class SandboxClient {
       budget,
       DEFAULT_WAIT_POLL_INTERVAL_SEC,
     );
+    if (observed.status === SandboxStatus.RESUME_FAILED) throw new SandboxResumeError(observed);
     if (isSandboxPending(observed.status)) {
       throw new SandboxPending(observed.sandboxId, {
         pendingReason: observed.pendingReason,
@@ -834,7 +838,9 @@ export class SandboxClient {
   }
 
   /**
-   * Resume a suspended sandbox and bring it back to `Running`.
+   * Resume a suspended sandbox or explicitly retry `resume_failed`.
+   * A failed attempt throws SandboxResumeError and retains its checkpoint;
+   * another attempt requires an explicit resume call.
    *
    * By default blocks until the sandbox is `Running` and routable. Pass
    * `{ wait: false }` to return immediately after the request is sent
@@ -888,12 +894,15 @@ export class SandboxClient {
       }
       // The request failed or another one superseded it. A concurrent
       // request may still have reached the target.
-      if ((await this.get(sandboxId)).status === target) return;
+      const info = await this.get(sandboxId).catch(() => { throw error; });
+      if (info.status === SandboxStatus.RESUME_FAILED) throw new SandboxResumeError(info);
+      if (info.status === target) return;
       throw error;
     }
     if (settled) return;
     while (Date.now() < deadline) {
       const info = await this.get(sandboxId);
+      if (info.status === SandboxStatus.RESUME_FAILED) throw new SandboxResumeError(info);
       if (info.status === target) return;
       if (info.status === SandboxStatus.TERMINATED) {
         throw new SandboxError(

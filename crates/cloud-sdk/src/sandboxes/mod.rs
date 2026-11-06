@@ -78,6 +78,30 @@ impl ListingPage for ListSnapshotsResponse {
     }
 }
 
+/// A failed resume with a preserved sandbox and checkpoint. Retry only explicitly.
+#[derive(Clone, Debug, serde::Serialize, thiserror::Error)]
+#[error(
+    "Sandbox {sandbox_id} resume_failed: {error_details:?}; sandbox and checkpoint retained. Call resume() explicitly to retry."
+)]
+pub struct SandboxResumeError {
+    pub sandbox_id: String,
+    pub snapshot_id: Option<String>,
+    pub error_details: Option<serde_json::Value>,
+}
+
+impl SandboxResumeError {
+    pub fn from_info(info: &SandboxInfo) -> Self {
+        Self {
+            sandbox_id: info.sandbox_id.clone(),
+            snapshot_id: info.snapshot_id.clone(),
+            error_details: info.error_details.clone(),
+        }
+    }
+    pub fn status(&self) -> &'static str {
+        "resume_failed"
+    }
+}
+
 /// Whether a sandbox `status` is one a readiness wait keeps polling through.
 pub fn is_sandbox_pending(status: &str) -> bool {
     status == "pending"
@@ -862,6 +886,8 @@ impl SandboxesClient {
         Ok(self.client.execute_traced(req).await?.map(|_| ()))
     }
 
+    /// Submit an explicit resume, including a retry of `resume_failed`.
+    /// An accepted request does not imply that the sandbox is running yet.
     pub async fn resume(&self, sandbox_id: &str) -> Result<Traced<()>, SdkError> {
         let uri = self.endpoint(&format!("sandboxes/{sandbox_id}/resume"));
         let req = self.client.build_empty_post_request(&uri)?;
@@ -884,7 +910,8 @@ impl SandboxesClient {
     /// Resume that waits on the server for up to `wait`. Returns `true` when
     /// the server answers that the sandbox is running (HTTP 200) and `false`
     /// when the wait ran out first (HTTP 202, the resume continues). A failed
-    /// or superseded resume is an HTTP 409 error. A server without the wait
+    /// resume confirmed as `resume_failed` is [`SdkError::SandboxResume`].
+    /// Other failed or superseded resumes retain their HTTP 409 error. A server without the wait
     /// answers 202 at once.
     pub async fn resume_and_wait(
         &self,
@@ -907,11 +934,30 @@ impl SandboxesClient {
                 .request(Method::POST, &uri)
                 .query(&[("wait_ms", wait_ms)]),
         )?;
-        Ok(self
-            .client
-            .execute_traced(req)
-            .await?
-            .map(|response| response.status() == StatusCode::OK))
+        match self.client.execute_traced(req).await {
+            Ok(response) => Ok(response.map(|response| response.status() == StatusCode::OK)),
+            Err(
+                error @ SdkError::ServerError {
+                    status: StatusCode::CONFLICT,
+                    ..
+                },
+            ) if action == "resume" => {
+                // Both schedulers may return a diagnostic-only 409. Observe state,
+                // never infer retry safety from error text (resume_uncertain is pending).
+                if let Ok(info) = self.get(sandbox_id).await {
+                    if info.status == "resume_failed" {
+                        return Err(SdkError::SandboxResume(Box::new(
+                            SandboxResumeError::from_info(&info),
+                        )));
+                    }
+                    if info.status == "running" {
+                        return Ok(info.map(|_| true));
+                    }
+                }
+                Err(error)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// The server-side wait for a lifecycle request: at most `wait`, the

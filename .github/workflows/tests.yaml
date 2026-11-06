@@ -271,6 +271,7 @@ jobs:
             tests.sandbox.test_resource_resize \
             tests.sandbox.test_auto_resume_rust_backend \
             tests.sandbox.test_auto_resume_transport \
+            tests.sandbox.test_resume_failed \
             tests.image.test_sandbox_builder \
             tests.image.test_builds \
             tests.image.test_builds_native \

@@ -15,6 +15,7 @@ if (!process.argv.includes("--child")) {
   await import("./test-native-stream-lifetime.mjs");
   await import("./test-native-ready-timeout.mjs");
   await import("./test-native-auto-resume.mjs");
+  await import("./test-resume-failed.mjs");
   if (!["linux", "darwin"].includes(process.platform)) {
     console.log("Forbidden certificate I/O regression requires Linux or macOS FIFOs.");
   } else {

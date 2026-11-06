@@ -22,6 +22,9 @@ pub enum SdkError {
     /// for language bindings and callers inspecting the failure.
     #[error(transparent)]
     ReadRetryExhausted(Box<SdkError>),
+    /// A resume failed safely, preserving the sandbox and checkpoint.
+    #[error(transparent)]
+    SandboxResume(#[from] Box<crate::sandboxes::SandboxResumeError>),
     /// A resize failed or could not be observed to completion.
     #[error(transparent)]
     SandboxResize(#[from] Box<crate::sandboxes::resize::SandboxResizeError>),
