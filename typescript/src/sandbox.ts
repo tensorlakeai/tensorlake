@@ -1533,7 +1533,7 @@ export class Sandbox {
     const pty = new Pty({
       sessionId,
       token,
-      wsUrl: this.ptyWsUrl(sessionId, token),
+      wsUrl: this.ptyWsUrl(sessionId),
       wsHeaders: {
         ...this.wsHeaders,
         "X-PTY-Token": token,
@@ -1642,9 +1642,9 @@ export class Sandbox {
   /**
    * WebSocket URL for a PTY session. The token is not part of the URL, so it
    * doesn't leak into proxy or CDN access logs. Send it in the `X-PTY-Token`
-   * header instead. The `token` argument is kept for compatibility.
+   * header instead.
    */
-  ptyWsUrl(sessionId: string, _token?: string): string {
+  ptyWsUrl(sessionId: string): string {
     let wsBase: string;
     if (this.baseUrl.startsWith("https://")) {
       wsBase = "wss://" + this.baseUrl.slice(8);
