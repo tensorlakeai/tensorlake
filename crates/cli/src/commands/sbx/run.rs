@@ -12,6 +12,7 @@ pub async fn run(
     memory: i64,
     disk_mb: Option<u64>,
     timeout: Option<f64>,
+    max_output_bytes: Option<u32>,
     workdir: Option<&str>,
     env: &[String],
     user: Option<&str>,
@@ -93,6 +94,7 @@ pub async fn run(
         args,
         crate::commands::sbx::exec::ExecOptions {
             timeout,
+            max_output_bytes,
             workdir,
             env,
             user,

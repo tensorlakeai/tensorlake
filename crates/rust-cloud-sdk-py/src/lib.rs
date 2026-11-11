@@ -3142,6 +3142,31 @@ impl CloudSandboxProxyClient {
         })
     }
 
+    fn run_process_with_output_limit_json(
+        &self,
+        payload_json: String,
+        max_output_bytes: u32,
+    ) -> PyResult<(String, Vec<String>, bool)> {
+        let payload: Value = parse_json_payload(&payload_json)?;
+        // Match run_process_json: never replay a command after delivery.
+        self.run_with_connect_replay(move |client| {
+            let payload = payload.clone();
+            async move {
+                let traced = client
+                    .run_process_with_output_limit(&payload, max_output_bytes as usize)
+                    .await?;
+                let trace_id = traced.trace_id.clone();
+                let output = traced.into_inner();
+                let events = output
+                    .events
+                    .into_iter()
+                    .map(|event| serde_json::to_string(&event).map_err(SdkError::from))
+                    .collect::<Result<Vec<String>, SdkError>>()?;
+                Ok((trace_id, events, output.output_truncated))
+            }
+        })
+    }
+
     fn health_json(&self) -> PyResult<(String, String)> {
         self.run_with_retry(5, move |client| async move {
             let traced = client.health().await?;
@@ -3567,6 +3592,35 @@ impl CloudSandboxProxyClient {
                 .map(|event| serde_json::to_string(&event).map_err(sandbox_serde_err))
                 .collect::<Result<Vec<String>, _>>()?;
             Ok((trace_id, events))
+        })
+    }
+
+    fn run_process_with_output_limit_json_async<'py>(
+        &self,
+        py: Python<'py>,
+        payload_json: String,
+        max_output_bytes: u32,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let payload: Value = parse_json_payload(&payload_json)?;
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = replay_if_never_delivered(client, move |c| {
+                let payload = payload.clone();
+                async move {
+                    c.run_process_with_output_limit(&payload, max_output_bytes as usize)
+                        .await
+                }
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            let trace_id = traced.trace_id.clone();
+            let output = traced.into_inner();
+            let events = output
+                .events
+                .into_iter()
+                .map(|event| serde_json::to_string(&event).map_err(sandbox_serde_err))
+                .collect::<Result<Vec<String>, _>>()?;
+            Ok((trace_id, events, output.output_truncated))
         })
     }
 

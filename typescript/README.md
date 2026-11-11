@@ -47,6 +47,10 @@ start of the tail is omitted, so the result can be slightly smaller than the
 budget. `0` retains only exit metadata; omitting the option preserves unlimited
 capture. Truncation is reported separately from the command's exit status.
 
+Either stream can consume the entire shared budget. Received order can differ
+from when the command wrote each stream: buffered stdout can arrive after a
+stderr diagnostic and evict it.
+
 The native client evicts old output as it reads the stream, before constructing
 the result passed to JavaScript. It continues reading until the command exits;
 the cap does not stop the command, reduce network traffic, or limit the size of

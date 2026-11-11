@@ -11,7 +11,9 @@ pub struct LimitedRunProcessOutput {
     pub output_truncated: bool,
 }
 
-pub(super) struct OutputCollector {
+/// Retain a bounded tail of process events, sharing the byte budget across
+/// stdout and stderr while preserving their labels in the result.
+pub struct OutputCollector {
     limit: usize,
     bytes: VecDeque<u8>,
     // One stream tag per retained byte keeps storage bounded even when every
@@ -23,7 +25,7 @@ pub(super) struct OutputCollector {
 }
 
 impl OutputCollector {
-    pub(super) fn new(max_output_bytes: usize) -> Self {
+    pub fn new(max_output_bytes: usize) -> Self {
         Self {
             limit: max_output_bytes,
             bytes: VecDeque::new(),
@@ -34,7 +36,7 @@ impl OutputCollector {
         }
     }
 
-    pub(super) fn push(&mut self, event: RunProcessEvent) {
+    pub fn push(&mut self, event: RunProcessEvent) {
         match event {
             RunProcessEvent::Output(event) => {
                 let is_stderr = event.stream.as_deref() == Some("stderr");
@@ -80,7 +82,7 @@ impl OutputCollector {
             .extend(std::iter::repeat_n(is_stderr, retained.len()));
     }
 
-    pub(super) fn finish(mut self) -> LimitedRunProcessOutput {
+    pub fn finish(mut self) -> LimitedRunProcessOutput {
         // A byte limit can cut the oldest character in the middle. Each event
         // is valid UTF-8, so discarding leading continuation bytes preserves
         // complete characters in both returned streams.

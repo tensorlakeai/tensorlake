@@ -1139,7 +1139,10 @@ class AsyncSandbox:
         working_dir: str | None = None,
         timeout: float | None = None,
         user: ProcessUser | None = None,
+        max_output_bytes: int | None = None,
     ) -> Traced[CommandResult]:
+        """Run a command; ``max_output_bytes`` has the same semantics as ``Sandbox.run``."""
+        Sandbox._validate_max_output_bytes(max_output_bytes)
         process_user = Sandbox._normalize_process_user(user)
         payload = Sandbox._build_command_payload(
             command,
@@ -1149,14 +1152,25 @@ class AsyncSandbox:
             timeout=timeout,
             user=process_user,
         )
+        output_truncated = None
         try:
-            trace_id, events_json = await self._rust_client.run_process_json_async(
-                json.dumps(payload)
-            )
+            if max_output_bytes is None:
+                trace_id, events_json = await self._rust_client.run_process_json_async(
+                    json.dumps(payload)
+                )
+            else:
+                trace_id, events_json, output_truncated = (
+                    await self._rust_client.run_process_with_output_limit_json_async(
+                        json.dumps(payload), max_output_bytes
+                    )
+                )
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-        return Traced(trace_id, Sandbox._command_result_from_run_events(events_json))
+        return Traced(
+            trace_id,
+            Sandbox._command_result_from_run_events(events_json, output_truncated),
+        )
 
     # --- Process management ---
 

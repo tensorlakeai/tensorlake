@@ -2,8 +2,13 @@ use futures::StreamExt;
 use reqwest::{StatusCode, header::ACCEPT};
 use serde_json::Value;
 use std::future::Future;
+use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
+use tensorlake::sandboxes::{
+    OutputCollector,
+    models::{OutputEvent, RunProcessEvent},
+};
 
 use crate::auth::context::CliContext;
 use crate::commands::sbx::{parse_env_vars, resolve_sandbox_proxy_target, with_sandbox_headers};
@@ -12,6 +17,7 @@ use crate::error::{CliError, Result};
 #[derive(Debug, Clone, Copy)]
 pub struct ExecOptions<'a> {
     pub timeout: Option<f64>,
+    pub max_output_bytes: Option<u32>,
     pub workdir: Option<&'a str>,
     pub env: &'a [String],
     pub user: Option<&'a str>,
@@ -85,6 +91,11 @@ pub async fn run(
     let detached_mount = (options.detach || options.protect_long_lived_mounts)
         .then(|| rewrite_direct_mount(command, args))
         .flatten();
+    if detached_mount.is_some() && options.max_output_bytes.is_some() {
+        return Err(CliError::usage(
+            "--max-output-bytes cannot be used with a detached mount; use --foreground",
+        ));
+    }
     // Validate an explicitly configured readiness deadline before creating the detached process.
     // With no `--timeout`, wait as long as the mount leader remains alive: cross-machine Git WAL
     // recovery downloads and installs all dirty files before attaching the mount and can
@@ -185,7 +196,7 @@ pub async fn run(
         )));
     }
 
-    let exit_code = stream_run_events(resp).await?;
+    let exit_code = stream_run_events(resp, options.max_output_bytes).await?;
     if exit_code != 0 {
         return Err(CliError::ExitCode(exit_code));
     }
@@ -456,7 +467,7 @@ async fn probe_mount_ready_request(
             "readiness check failed (HTTP {status}): {body}"
         )));
     }
-    match stream_run_events(resp).await? {
+    match stream_run_events(resp, None).await? {
         0 => Ok(MountReadinessProbe::Ready),
         124 => Ok(MountReadinessProbe::Waiting),
         125 => Ok(MountReadinessProbe::ProcessExited),
@@ -739,6 +750,11 @@ fn build_process_payload(
     if options.detach && options.timeout.is_some() {
         return Err(CliError::usage("--timeout cannot be used with --detach"));
     }
+    if options.detach && options.max_output_bytes.is_some() {
+        return Err(CliError::usage(
+            "--max-output-bytes cannot be used with --detach",
+        ));
+    }
 
     let mut env_dict = parse_env_vars(options.env)?;
     // Every Process API payload owns a cgroup around its leader, including detached/managed
@@ -892,19 +908,30 @@ fn parse_http_health_spec(spec: &str) -> Result<(u16, Option<String>)> {
 
 /// Read a streaming `POST /api/v1/processes/run` SSE response, print output
 /// lines to stdout/stderr, and return the exit code from the final event.
-async fn stream_run_events(resp: reqwest::Response) -> Result<i32> {
+async fn stream_run_events(resp: reqwest::Response, max_output_bytes: Option<u32>) -> Result<i32> {
     let mut stream = tensorlake::sse::event_stream(resp, None);
     let mut exit_code: Option<i32> = None;
+    let mut output = max_output_bytes.map(|limit| OutputCollector::new(limit as usize));
 
     while let Some(event) = stream.next().await {
         match event {
             Ok(msg) => {
                 if let Some(parsed) = parse_run_event(&msg.data)? {
                     match parsed {
-                        RunEvent::Output { line, stream } => match stream.as_deref() {
-                            Some("stderr") => eprintln!("{}", line),
-                            _ => println!("{}", line),
-                        },
+                        RunEvent::Output { line, stream } => {
+                            if let Some(output) = output.as_mut() {
+                                output.push(RunProcessEvent::Output(OutputEvent {
+                                    line,
+                                    stream,
+                                    timestamp: Value::Null,
+                                }));
+                            } else {
+                                match stream.as_deref() {
+                                    Some("stderr") => eprintln!("{}", line),
+                                    _ => println!("{}", line),
+                                }
+                            }
+                        }
                         RunEvent::Exited { code, timed_out } => {
                             if timed_out {
                                 eprintln!("process timed out and was killed");
@@ -924,6 +951,23 @@ async fn stream_run_events(resp: reqwest::Response) -> Result<i32> {
         }
     }
 
+    if let Some(output) = output {
+        for event in output.finish().events {
+            if let RunProcessEvent::Output(event) = event {
+                // Write the retained bytes exactly: adding a final newline
+                // would exceed the requested budget, including at limit zero.
+                if event.stream.as_deref() == Some("stderr") {
+                    let mut stderr = std::io::stderr().lock();
+                    stderr.write_all(event.line.as_bytes())?;
+                    stderr.flush()?;
+                } else {
+                    let mut stdout = std::io::stdout().lock();
+                    stdout.write_all(event.line.as_bytes())?;
+                    stdout.flush()?;
+                }
+            }
+        }
+    }
     Ok(exit_code.unwrap_or(1))
 }
 
@@ -1079,6 +1123,7 @@ mod tests {
     fn options<'a>() -> ExecOptions<'a> {
         ExecOptions {
             timeout: None,
+            max_output_bytes: None,
             workdir: None,
             env: &[],
             user: None,

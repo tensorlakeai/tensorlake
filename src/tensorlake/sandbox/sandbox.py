@@ -1622,7 +1622,9 @@ class Sandbox:
         return payload
 
     @staticmethod
-    def _command_result_from_run_events(events_json: list[str]) -> CommandResult:
+    def _command_result_from_run_events(
+        events_json: list[str], output_truncated: bool | None = None
+    ) -> CommandResult:
         """Reduce the ``POST /api/v1/processes/run`` events into a result."""
         stdout_lines: list[str] = []
         stderr_lines: list[str] = []
@@ -1666,8 +1668,20 @@ class Sandbox:
             exit_code=exit_code,
             stdout="\n".join(stdout_lines),
             stderr="\n".join(stderr_lines),
+            output_truncated=output_truncated,
             reason=reason,
         )
+
+    @staticmethod
+    def _validate_max_output_bytes(max_output_bytes: int | None) -> None:
+        if max_output_bytes is not None and (
+            isinstance(max_output_bytes, bool)
+            or not isinstance(max_output_bytes, int)
+            or not 0 <= max_output_bytes <= 0xFFFFFFFF
+        ):
+            raise ValueError(
+                "max_output_bytes must be an integer between 0 and 4294967295"
+            )
 
     @staticmethod
     def _normalize_process_user(
@@ -1754,6 +1768,7 @@ class Sandbox:
         working_dir: str | None = None,
         timeout: float | None = None,
         user: ProcessUser | None = None,
+        max_output_bytes: int | None = None,
     ) -> Traced[CommandResult]:
         """Run a command to completion and return its output.
 
@@ -1773,12 +1788,18 @@ class Sandbox:
                 configured user (the image ``USER`` directive, falling back to
                 root). Pass a username such as ``"root"``, a Docker-style id
                 string like ``"1000:1000"``, or ``ProcessUserSpec(uid=1000, gid=1000)``.
+            max_output_bytes: Retain the last N UTF-8 bytes across stdout and
+                stderr in received event order, including newline separators.
+                The returned streams stay separate. ``None`` captures unlimited
+                output; ``0`` retains only exit metadata. An incomplete leading
+                character is omitted. The command still runs to completion.
 
         Returns:
             Traced[CommandResult] — access ``.trace_id`` for the W3C trace ID
             and ``.exit_code`` / ``.stdout`` / ``.stderr`` directly (or via
             ``.value``).
         """
+        self._validate_max_output_bytes(max_output_bytes)
         process_user = self._normalize_process_user(user)
         payload = self._build_command_payload(
             command,
@@ -1789,14 +1810,25 @@ class Sandbox:
             user=process_user,
         )
 
+        output_truncated = None
         try:
-            trace_id, events_json = self._rust_client.run_process_json(
-                json.dumps(payload)
-            )
+            if max_output_bytes is None:
+                trace_id, events_json = self._rust_client.run_process_json(
+                    json.dumps(payload)
+                )
+            else:
+                trace_id, events_json, output_truncated = (
+                    self._rust_client.run_process_with_output_limit_json(
+                        json.dumps(payload), max_output_bytes
+                    )
+                )
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-        return Traced(trace_id, self._command_result_from_run_events(events_json))
+        return Traced(
+            trace_id,
+            self._command_result_from_run_events(events_json, output_truncated),
+        )
 
     # --- Process management ---
 

@@ -24,7 +24,7 @@ use crate::{
     sse::event_stream,
 };
 pub use desktop::SandboxDesktopClient;
-pub use output::LimitedRunProcessOutput;
+pub use output::{LimitedRunProcessOutput, OutputCollector};
 
 /// Default interval between `GET /sandboxes/{id}` polls while waiting for a
 /// sandbox to run (ADR 0086).
