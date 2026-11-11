@@ -65,6 +65,7 @@ function makeProxy(): FakeFns {
     followStderr: vi.fn(tracedId()),
     followOutput: vi.fn(tracedId()),
     runProcess: vi.fn(async () => ({ traceId: "t", events: [] })),
+    runProcessWithOutputLimit: vi.fn(async () => ({ traceId: "t", events: [], outputTruncated: false })),
     runProcessStreaming: vi.fn(tracedId()),
     readFile: vi.fn(async () => ({ traceId: "t", data: Buffer.alloc(0) })),
     writeFile: vi.fn(tracedId()),

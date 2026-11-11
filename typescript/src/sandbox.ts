@@ -1200,6 +1200,12 @@ export class Sandbox {
    * the process, streams output, and delivers the exit code over one connection.
    */
   async run(command: string, options?: RunOptions): Promise<Traced<CommandResult>> {
+    const maxOutputBytes = options?.maxOutputBytes;
+    if (maxOutputBytes !== undefined && (
+      !Number.isInteger(maxOutputBytes) || maxOutputBytes < 0 || maxOutputBytes > 0xffff_ffff
+    )) {
+      throw new RangeError("maxOutputBytes must be an integer between 0 and 4294967295");
+    }
     const opStart = nowMs();
     const body: Record<string, unknown> = { command };
     if (options?.args) body.args = options.args;
@@ -1216,8 +1222,10 @@ export class Sandbox {
     });
 
     const proxy = await this.proxy.client();
-    const { traceId, events } = await callNative(
-      () => proxy.runProcess(JSON.stringify(body)),
+    const { traceId, events, outputTruncated } = await callNative(
+      () => maxOutputBytes === undefined
+        ? proxy.runProcess(JSON.stringify(body))
+        : proxy.runProcessWithOutputLimit(JSON.stringify(body), maxOutputBytes),
       { sandboxId: this.sandboxId },
     );
     const { exitCode, stdout, stderr, reason } = assembleCommandResult(events);
@@ -1231,7 +1239,11 @@ export class Sandbox {
     });
 
     const timedOut = reason === CommandExitReason.TIMED_OUT;
-    return Object.assign({ exitCode, stdout, stderr, reason, timedOut }, { traceId });
+    return Object.assign(
+      { exitCode, stdout, stderr, reason, timedOut },
+      outputTruncated === undefined ? {} : { outputTruncated },
+      { traceId },
+    );
   }
 
   // --- Process management ---

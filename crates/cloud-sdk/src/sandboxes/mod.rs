@@ -1,5 +1,6 @@
 pub mod desktop;
 pub mod models;
+mod output;
 pub mod resize;
 pub mod tunnel;
 
@@ -23,6 +24,7 @@ use crate::{
     sse::event_stream,
 };
 pub use desktop::SandboxDesktopClient;
+pub use output::LimitedRunProcessOutput;
 
 /// Default interval between `GET /sandboxes/{id}` polls while waiting for a
 /// sandbox to run (ADR 0086).
@@ -1434,6 +1436,22 @@ impl SandboxProxyClient {
             .run_process_streaming(payload, |event| events.push(event))
             .await?;
         Ok(Traced::new(trace_id, events))
+    }
+
+    /// Retain the last `max_output_bytes` of combined stdout/stderr in arrival
+    /// order, including newlines. Older output is discarded while the
+    /// stream is drained to preserve the real exit status. This limits retained
+    /// output, not network traffic or the size of an individual incoming event.
+    pub async fn run_process_with_output_limit(
+        &self,
+        payload: &Value,
+        max_output_bytes: usize,
+    ) -> Result<Traced<LimitedRunProcessOutput>, SdkError> {
+        let mut output = output::OutputCollector::new(max_output_bytes);
+        let trace_id = self
+            .run_process_streaming(payload, |event| output.push(event))
+            .await?;
+        Ok(Traced::new(trace_id, output.finish()))
     }
 
     /// Start a process and stream its lifecycle events to `on_event` as they

@@ -69,6 +69,13 @@ pub struct TracedEvents {
     pub events: Vec<String>,
 }
 
+#[napi(object)]
+pub struct TracedLimitedEvents {
+    pub trace_id: String,
+    pub events: Vec<String>,
+    pub output_truncated: bool,
+}
+
 // ---- Error encoding -------------------------------------------------------
 
 fn make_napi_error(category: &str, status: Option<u16>, message: String) -> napi::Error {
@@ -1297,6 +1304,40 @@ impl NativeSandboxProxyClient {
             .collect::<Result<Vec<String>, serde_json::Error>>()
             .map_err(|e| into_napi_error(SdkError::from(e)))?;
         Ok(TracedEvents { trace_id, events })
+    }
+
+    /// Limit retained output while reading the stream, before constructing JS
+    /// strings. A separate method prevents older addons silently ignoring a cap.
+    #[napi]
+    pub async fn run_process_with_output_limit(
+        &self,
+        payload_json: String,
+        max_output_bytes: u32,
+    ) -> napi::Result<TracedLimitedEvents> {
+        let payload: Value = parse_json_payload(&payload_json)?;
+        let traced = replay_if_never_delivered(self.client().await?, |client| {
+            let payload = payload.clone();
+            async move {
+                client
+                    .run_process_with_output_limit(&payload, max_output_bytes as usize)
+                    .await
+            }
+        })
+        .await
+        .map_err(into_napi_error)?;
+        let trace_id = traced.trace_id.clone();
+        let output = traced.into_inner();
+        let events = output
+            .events
+            .into_iter()
+            .map(|event| serde_json::to_string(&event))
+            .collect::<Result<Vec<String>, serde_json::Error>>()
+            .map_err(|e| into_napi_error(SdkError::from(e)))?;
+        Ok(TracedLimitedEvents {
+            trace_id,
+            events,
+            output_truncated: output.output_truncated,
+        })
     }
 
     // -- File operations --

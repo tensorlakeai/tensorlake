@@ -44,6 +44,7 @@ export interface TracedBytes {
 export interface TracedEvents {
   traceId: string;
   events: string[];
+  outputTruncated?: boolean;
 }
 
 /** Per-event callback used by the streaming proxy methods. */
@@ -69,6 +70,7 @@ export interface NativeSandboxProxyClient {
   followStderr(process: string, emit: NativeEmit): Promise<string>;
   followOutput(process: string, emit: NativeEmit): Promise<string>;
   runProcess(payloadJson: string): Promise<TracedEvents>;
+  runProcessWithOutputLimit(payloadJson: string, maxOutputBytes: number): Promise<TracedEvents>;
   runProcessStreaming(payloadJson: string, emit: NativeEmit): Promise<string>;
 
   readFile(path: string): Promise<TracedBytes>;
