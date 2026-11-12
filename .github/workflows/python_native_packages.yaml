@@ -1,36 +1,15 @@
-name: Release - Python SDK (PyPI)
-
-run-name: "Release - Python SDK (PyPI) · ${{ github.ref_name }} · @${{ github.actor }}"
+name: Python native package checks
 
 on:
+  pull_request:
+  push:
+    branches: [main]
   workflow_dispatch:
-
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 permissions:
   contents: read
 
 jobs:
-  notify-start:
-    name: Notify Slack that the release is starting
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Read version
-        id: version
-        run: echo "version=$(grep -m1 -E '^version = ' pyproject.toml | sed -E 's/version = "(.*)"/\1/')" >> "$GITHUB_OUTPUT"
-
-      - name: Notify Slack
-        continue-on-error: true
-        uses: ./.github/actions/notify-release
-        with:
-          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
-          package: Python SDK (PyPI)
-          version: ${{ steps.version.outputs.version }}
-          package-url: https://pypi.org/project/tensorlake/${{ steps.version.outputs.version }}/
-
   build-wheels:
     name: Build wheels on ${{ matrix.platform.os }} (${{ matrix.platform.target }})
     runs-on: ${{ matrix.platform.os }}
@@ -56,12 +35,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Vendor canonical Function Agent core
-        uses: ./.github/actions/vendor-function-agent-core
-        with:
-          app-id: ${{ secrets.COMPUTE_ENGINE_APP_ID }}
-          private-key: ${{ secrets.COMPUTE_ENGINE_APP_PRIVATE_KEY }}
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -86,7 +59,7 @@ jobs:
           CARGO_TARGET_DIR: target
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist
+          args: --release --no-default-features --out dist
           manylinux: ${{ matrix.platform.manylinux || 'auto' }}
           container: ${{ matrix.platform.manylinux_container || '' }}
           sccache: 'true'
@@ -95,32 +68,11 @@ jobs:
         run: |
           python .github/scripts/verify_wheel.py "dist/tensorlake-*.whl" tensorlake._cloud_sdk tensorlake.cli.deploy --tls-check https://api.tensorlake.ai --expect-script function-executor --expect-script tensorlake-python-function-runner --expect-script tensorlake-deploy --reject-script tl --reject-script tensorlake
 
-      - name: Upload wheels
+      # These wheels omit Function Agent and must never be published.
+      - name: Upload CI wheels
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ matrix.platform.os }}-${{ matrix.platform.target }}
+          name: ci-wheels-${{ matrix.platform.os }}-${{ matrix.platform.target }}
+          retention-days: 3
           path: dist
 
-  publish:
-    name: Publish to PyPI
-    # The private Function Agent implementation is compiled into wheels. Publishing an sdist
-    # would either expose that source or produce an artifact that cannot build from public files.
-    needs: [build-wheels]
-    runs-on: ubuntu-latest
-    environment:
-      name: pypi
-      url: https://pypi.org/p/tensorlake
-    permissions:
-      id-token: write
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: wheels-*
-          merge-multiple: true
-          path: dist
-
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          verbose: true

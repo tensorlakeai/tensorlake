@@ -12,7 +12,6 @@ import unittest
 import zipfile
 from typing import Any, Coroutine
 
-from tensorlake._cloud_sdk import FunctionAgentCore
 from tensorlake.applications.request_context.request_state import (
     REQUEST_STATE_USER_DATA_SERIALIZER,
 )
@@ -56,18 +55,6 @@ class LoopBoundNativeCore:
 
 
 class PythonFunctionRunnerTest(unittest.IsolatedAsyncioTestCase):
-    async def test_native_core_can_start_inside_the_python_event_loop(self) -> None:
-        core = FunctionAgentCore(
-            "http://127.0.0.1:9",
-            "test-token",
-            registration_attempts=1,
-            registration_retry_ms=1,
-            request_timeout_ms=50,
-        )
-        self.assertTrue(callable(core.next_input))
-        self.assertTrue(callable(core.submit_output))
-        await asyncio.sleep(0.1)
-
     async def test_protocol_writer_invokes_native_core_on_event_loop(self) -> None:
         core = LoopBoundNativeCore()
         protocol = ProtocolWriter(core, asyncio.get_running_loop())  # type: ignore[arg-type]

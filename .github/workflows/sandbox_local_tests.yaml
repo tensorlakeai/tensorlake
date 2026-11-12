@@ -15,12 +15,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Vendor canonical Function Agent core
-        uses: ./.github/actions/vendor-function-agent-core
-        with:
-          app-id: ${{ secrets.COMPUTE_ENGINE_APP_ID }}
-          private-key: ${{ secrets.COMPUTE_ENGINE_APP_PRIVATE_KEY }}
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -44,7 +38,7 @@ jobs:
           virtualenvs-in-project: true
 
       - name: Install Python dependencies
-        run: poetry install --with=dev
+        run: poetry install --no-root --with=dev && poetry run maturin develop --no-default-features
 
       - name: Set up Docker
         uses: docker/setup-docker-action@v4
@@ -193,4 +187,4 @@ jobs:
       - name: Run Sandbox integration tests
         env:
           TENSORLAKE_API_URL: http://127.0.0.1:8900
-        run: make test_sandbox
+        run: poetry run python tests/sandbox/test_lifecycle.py -v

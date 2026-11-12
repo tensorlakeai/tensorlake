@@ -9,9 +9,13 @@ description = "napi-rs bindings for the Tensorlake Rust cloud SDK (Node.js consu
 name = "tensorlake_node"
 crate-type = ["cdylib"]
 
+[features]
+default = ["function-agent"]
+function-agent = ["dep:tensorlake-function-agent-core"]
+
 [dependencies]
 tensorlake = { workspace = true }
-tensorlake-function-agent-core = { workspace = true }
+tensorlake-function-agent-core = { workspace = true, optional = true }
 base64 = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true }

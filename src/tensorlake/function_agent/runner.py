@@ -19,9 +19,8 @@ import zipfile
 from dataclasses import dataclass, field
 from email.parser import BytesParser
 from email.policy import default as email_policy
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from tensorlake._cloud_sdk import FunctionAgentCore
 from tensorlake.applications import (
     RETURN_WHEN,
     FunctionError,
@@ -91,6 +90,9 @@ from tensorlake.applications.runtime_hooks import (
     set_run_future_hook,
     set_wait_futures_hook,
 )
+
+if TYPE_CHECKING:
+    from tensorlake._cloud_sdk import FunctionAgentCore
 
 LOGGER = logging.getLogger("tensorlake.function_agent.runner")
 MAX_REQUEST_STATE_KEY_BYTES = 1024
@@ -1293,6 +1295,8 @@ def _parse_args() -> argparse.Namespace:
 
 
 async def _run(args: argparse.Namespace) -> None:
+    from tensorlake._cloud_sdk import FunctionAgentCore
+
     core = FunctionAgentCore(
         args.function_service_url,
         args.registration_token,

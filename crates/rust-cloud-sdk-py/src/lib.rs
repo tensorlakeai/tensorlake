@@ -4,6 +4,7 @@
 #![allow(clippy::useless_conversion)]
 #![allow(clippy::too_many_arguments)]
 
+#[cfg(feature = "function-agent")]
 mod function_agent;
 mod tunnel;
 
@@ -5366,6 +5367,7 @@ fn _cloud_sdk(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<CloudSandboxProxyClient>()?;
     module.add_class::<CloudSandboxDesktopClient>()?;
     module.add_class::<tunnel::CloudTcpTunnel>()?;
+    #[cfg(feature = "function-agent")]
     module.add_class::<function_agent::FunctionAgentCore>()?;
     module.add_function(wrap_pyfunction!(create_image_context_file, module)?)?;
     module.add_function(wrap_pyfunction!(load_docker_config_json, module)?)?;

@@ -28,30 +28,15 @@ source changes. Release workflows resolve the pin once and pass it to every bina
 job. Ordinary test workflows omit `source-ref` to use the same pin; stacked changes may pass a
 different full commit SHA explicitly. Moving branch names are rejected.
 
-## One-time setup
+## Credentials
 
-Create a **GitHub App** (org-owned) with **Repository permissions → Contents: Read-only**, install
-it on `tensorlakeai/artifact_storage`, and add these repository (or org) secrets to the public repo:
-
-| Secret | Value |
-| --- | --- |
-| `ARTIFACT_STORAGE_APP_ID` | The GitHub App's App ID. |
-| `ARTIFACT_STORAGE_APP_PRIVATE_KEY` | A generated private key (PEM) for the App. |
-
-A GitHub App is used (instead of a PAT or deploy key) so access is short-lived, auditable, and
-scoped to exactly one repo.
-
-## Fork PRs
-
-Pull requests from forks cannot read these secrets, so mount jobs are gated with
-`if: ... pull_request.head.repo.full_name == github.repository` and are skipped for forks. The
-default (no-mount) lanes still run for them, so external contributors' PRs build and test normally.
+The calling workflows run in `tensorlakeai/compute-engine-internal` and use its existing
+`vars.APP_ID` and `secrets.APP_PRIVATE_KEY` to mint a token scoped to `artifact_storage`.
+Public Tensorlake CI does not call this action or need access to the private repository.
 
 ## Consumers
 
-- `.github/workflows/tests.yaml` — full-feature Rust workspace tests, macOS private client tests, and
-  the Windows CLI build with `git-clone` enabled.
-- `.github/workflows/publish_cli.yaml` — release `tensorlake` binaries (Linux, macOS, Windows).
+- CEI's `.github/workflows/release_tensorlake_cli.yaml` — release `tensorlake` binaries (Linux, macOS, Windows).
 
 Local equivalent (no App needed, uses a sibling artifact_storage checkout): `just build-cli-full`.
 Check out the recorded AS revision in that sibling to reproduce CI; the local recipe deliberately
