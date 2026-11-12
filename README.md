@@ -149,6 +149,38 @@ with client.create_and_connect() as sandbox:
 # Sandbox is automatically terminated when the context manager exits
 ```
 
+For commands that can produce large output, `Sandbox.run()` and
+`AsyncSandbox.run()` accept `max_output_bytes`:
+
+```python
+result = sandbox.run(
+    "rg", ["pattern", "."], max_output_bytes=1024 * 1024, timeout=30
+)
+print(result.stdout)  # Retained stdout tail.
+print(result.stderr)  # Retained stderr tail, sharing the same byte budget.
+print(result.output_truncated)  # True if older output was discarded.
+```
+
+The budget counts UTF-8 bytes, including newline separators, in received event
+order. An incomplete leading character is omitted. Streams remain separate,
+but either stream can consume the entire budget. Received order can differ
+from when the command wrote each stream: buffered stdout can arrive after a
+stderr diagnostic and evict it. Omitting the limit preserves unlimited capture;
+`0` retains only exit metadata. The limit bounds retained output, not network
+traffic or command runtime; use `timeout` to bound execution.
+
+The CLI supports the same shared budget on `tl sbx exec` and `tl sbx run`:
+
+```bash
+tl sbx exec --max-output-bytes 1048576 <sandbox-id> -- rg pattern .
+tl sbx run --max-output-bytes 1048576 -- rg pattern .
+```
+
+With a limit, the CLI waits for completion and writes the retained strings to
+their respective stdout/stderr streams without adding a final newline. Without
+the flag, it streams output as it arrives. The command's exit status is preserved;
+the limit cannot be combined with `--detach`.
+
 `create_and_connect()` (and `Sandbox.create()`) send a create that the server
 answers as soon as the sandbox runs. **If the wait runs out, the sandbox is not
 deleted**: a `SandboxPending` is raised with its `sandbox_id`, and the sandbox

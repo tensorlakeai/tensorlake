@@ -29,6 +29,35 @@ without generating diagnostic reports. For a nonstandard or statically linked No
 executable, set `TENSORLAKE_NODE_LIBC=gnu` or `TENSORLAKE_NODE_LIBC=musl` before using
 the SDK.
 
+For agent commands, `maxOutputBytes` keeps only the last N bytes of output:
+
+```ts
+const result = await sandbox.run("rg", {
+  args: ["pattern", "."],
+  maxOutputBytes: 1024 * 1024,
+  timeout: 30,
+});
+// result.stdout and result.stderr contain the retained tail.
+// result.outputTruncated is true if older output was discarded.
+```
+
+The limit is a shared UTF-8 byte budget across stdout and stderr in arrival
+order, including the newlines between output events. A character cut at the
+start of the tail is omitted, so the result can be slightly smaller than the
+budget. `0` retains only exit metadata; omitting the option preserves unlimited
+capture. Truncation is reported separately from the command's exit status.
+
+Either stream can consume the entire shared budget. Received order can differ
+from when the command wrote each stream: buffered stdout can arrive after a
+stderr diagnostic and evict it.
+
+The native client evicts old output as it reads the stream, before constructing
+the result passed to JavaScript. It continues reading until the command exits;
+the cap does not stop the command, reduce network traffic, or limit the size of
+an individual incoming event. Use `timeout` to bound command execution as well.
+Run `npm run test:native-command-output-limit` after building the SDK and native
+addon to verify a 148.4 MiB stream is retained as a 1 MiB tail.
+
 ## Expose ports when creating a sandbox
 
 Set `exposedPorts` in the creation options to configure HTTP access through the

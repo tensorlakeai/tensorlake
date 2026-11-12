@@ -1383,6 +1383,10 @@ enum SbxCommands {
         #[arg(short, long)]
         timeout: Option<f64>,
 
+        /// Retain the last N bytes across stdout/stderr and print after exit (0: no output)
+        #[arg(long, value_name = "BYTES", conflicts_with = "detach")]
+        max_output_bytes: Option<u32>,
+
         /// Working directory
         #[arg(short, long)]
         workdir: Option<String>,
@@ -1538,6 +1542,10 @@ enum SbxCommands {
         /// Command timeout in seconds
         #[arg(short, long)]
         timeout: Option<f64>,
+
+        /// Retain the last N bytes across stdout/stderr and print after exit (0: no output)
+        #[arg(long, value_name = "BYTES")]
+        max_output_bytes: Option<u32>,
 
         /// Working directory
         #[arg(short, long)]
@@ -2716,6 +2724,7 @@ async fn run_command(
                         command,
                         args,
                         timeout,
+                        max_output_bytes,
                         workdir,
                         env,
                         user,
@@ -2739,6 +2748,7 @@ async fn run_command(
                             &args,
                             commands::sbx::exec::ExecOptions {
                                 timeout,
+                                max_output_bytes,
                                 workdir: workdir.as_deref(),
                                 env: &env,
                                 user: user.as_deref(),
@@ -2851,6 +2861,7 @@ async fn run_command(
                         memory,
                         disk_mb,
                         timeout,
+                        max_output_bytes,
                         workdir,
                         env,
                         user,
@@ -2870,6 +2881,7 @@ async fn run_command(
                             memory,
                             disk_mb,
                             timeout,
+                            max_output_bytes,
                             workdir.as_deref(),
                             &env,
                             user.as_deref(),
@@ -4891,6 +4903,61 @@ mod tests {
             }
             _ => panic!("expected sbx exec command"),
         }
+    }
+
+    #[test]
+    fn sbx_output_limits_parse_and_reject_detached_capture() {
+        match parse_command([
+            "tl",
+            "sbx",
+            "exec",
+            "--max-output-bytes",
+            "0",
+            "sbx-123",
+            "echo",
+        ]) {
+            Commands::Sbx(SbxCommands::Exec {
+                max_output_bytes, ..
+            }) => {
+                assert_eq!(max_output_bytes, Some(0));
+            }
+            _ => panic!("expected sbx exec command"),
+        }
+        match parse_command(["tl", "sbx", "run", "--max-output-bytes", "1048576", "echo"]) {
+            Commands::Sbx(SbxCommands::Run {
+                max_output_bytes, ..
+            }) => {
+                assert_eq!(max_output_bytes, Some(1048576));
+            }
+            _ => panic!("expected sbx run command"),
+        }
+        for value in ["-1", "4294967296", "1.5"] {
+            assert!(
+                Cli::try_parse_from([
+                    "tl",
+                    "sbx",
+                    "exec",
+                    "--max-output-bytes",
+                    value,
+                    "sbx-123",
+                    "echo",
+                ])
+                .is_err()
+            );
+        }
+        assert!(
+            Cli::try_parse_from([
+                "tl",
+                "sbx",
+                "exec",
+                "--max-output-bytes",
+                "8",
+                "--detach",
+                "sbx-123",
+                "echo",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

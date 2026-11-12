@@ -739,6 +739,13 @@ export interface RunOptions {
   workingDir?: string;
   timeout?: number;
   user?: ProcessUser;
+  /**
+   * Retain only the last N combined UTF-8 bytes of stdout and stderr in arrival
+   * order, including newlines. Older output is discarded while waiting for the
+   * command's exit status. Defaults to unlimited; 0 retains only exit metadata.
+   * A partial character at the start of the tail is omitted.
+   */
+  maxOutputBytes?: number;
 }
 
 /** Why a command run with `Sandbox.run()` ended. */
@@ -765,6 +772,8 @@ export interface CommandResult {
   reason?: CommandExitReason;
   /** True when the run's `timeout` expired and the process was killed. */
   timedOut?: boolean;
+  /** Whether output was omitted. Set when `maxOutputBytes` was supplied. */
+  outputTruncated?: boolean;
 }
 
 // --- File operations ---

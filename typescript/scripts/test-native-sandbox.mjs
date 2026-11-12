@@ -12,6 +12,7 @@ import { build } from "esbuild";
 // Run in a disposable process: certificate settings and native module state
 // must be fresh, and the parent must be able to detect a blocked event loop.
 if (!process.argv.includes("--child")) {
+  await import("./test-native-command-output-limit.mjs");
   await import("./test-native-stream-lifetime.mjs");
   await import("./test-native-ready-timeout.mjs");
   await import("./test-native-auto-resume.mjs");

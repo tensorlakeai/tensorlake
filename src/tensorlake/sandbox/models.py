@@ -1243,6 +1243,8 @@ class CommandResult(BaseModel):
     exit_code: int
     stdout: str
     stderr: str
+    output_truncated: bool | None = None
+    """Whether older output was discarded. ``None`` when no byte limit was set."""
     reason: CommandExitReason | None = None
     """Why the command ended. ``Sandbox.run`` always sets it; sandboxes that
     predate timeout reporting never report ``TIMED_OUT``, so a timed-out run

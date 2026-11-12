@@ -416,6 +416,57 @@ describe("Sandbox", () => {
   });
 
   describe("run", () => {
+    it.each([true, false])("returns the native output limit result (truncated=%s)", async (outputTruncated) => {
+      const stub = installNativeStub({
+        proxy: {
+          runProcessWithOutputLimit: vi.fn(async () => ({
+            traceId: "limited-run",
+            events: [
+              JSON.stringify({ line: "bounded", stream: "stdout" }),
+              JSON.stringify({ exit_code: null, signal: 9, reason: "timed_out" }),
+            ],
+            outputTruncated,
+          })),
+        },
+      });
+      const sbx = makeSandbox();
+      try {
+        expect(await sbx.run("rg", { args: ["pattern", "."], maxOutputBytes: 1024 })).toEqual({
+          traceId: "limited-run", stdout: "bounded", stderr: "", exitCode: -9,
+          reason: CommandExitReason.TIMED_OUT, timedOut: true, outputTruncated,
+        });
+        expect(stub.proxy.runProcess).not.toHaveBeenCalled();
+        const [body, limit] = stub.proxy.runProcessWithOutputLimit.mock.calls[0];
+        expect(JSON.parse(body)).toEqual({ command: "rg", args: ["pattern", "."] });
+        expect(limit).toBe(1024);
+      } finally {
+        sbx.close();
+      }
+    });
+
+    it("allows a zero-byte output limit", async () => {
+      const stub = installNativeStub();
+      const sbx = makeSandbox();
+      try {
+        await sbx.run("echo", { maxOutputBytes: 0 });
+        expect(stub.proxy.runProcessWithOutputLimit).toHaveBeenCalledWith('{"command":"echo"}', 0);
+      } finally {
+        sbx.close();
+      }
+    });
+
+    it.each([-1, 1.5, NaN, Infinity, 0x1_0000_0000])("rejects invalid output limits before starting a command: %s", async (maxOutputBytes) => {
+      const stub = installNativeStub();
+      const sbx = makeSandbox();
+      try {
+        await expect(sbx.run("echo", { maxOutputBytes })).rejects.toThrow(RangeError);
+        expect(stub.proxy.runProcess).not.toHaveBeenCalled();
+        expect(stub.proxy.runProcessWithOutputLimit).not.toHaveBeenCalled();
+      } finally {
+        sbx.close();
+      }
+    });
+
     /** A buffered run_process event list (each event a JSON string). */
     function runEvents(events: unknown[]): { traceId: string; events: string[] } {
       return { traceId: "t", events: events.map((e) => JSON.stringify(e)) };
