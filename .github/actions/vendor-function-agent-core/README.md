@@ -8,17 +8,11 @@ manifest, fail-closed source placeholders, and an immutable CEI revision are tra
 Remote mode mints a short-lived GitHub App token scoped to `compute-engine-internal`, sparse-checks
 out the pinned crate and binding modules, verifies that the placeholder manifest differs only in
 its portable TLS default, and stages the complete core crate plus bindings for the current job.
-Configure these repository secrets:
+Release builds run in CEI. They check out the full commit from
+`crates/function-agent-core/CEI_REVISION` using CEI's own repository token, then pass that checkout
+to this action's local mode. CEI acceptance instead passes its current source checkout to test
+the service and SDK runner together.
 
-| Secret | Value |
-| --- | --- |
-| `COMPUTE_ENGINE_APP_ID` | GitHub App ID with `contents: read` on `compute-engine-internal` |
-| `COMPUTE_ENGINE_APP_PRIVATE_KEY` | GitHub App private key (PEM) |
-
-Release and Tensorlake CI builds read the full commit from
-`crates/function-agent-core/CEI_REVISION`. CEI acceptance uses local mode instead: it passes the
-current CEI repository checkout and therefore tests the service and SDK runner from one source
-tree without a companion Tensorlake source-copy PR.
-
-Fork pull requests cannot read the GitHub App secrets. Jobs that compile the native Function Agent
-are intentionally skipped for forks; pure public-source jobs remain available.
+Public Tensorlake CI does not call this action or need a private-repository credential. It builds
+the Python and Node bindings with `--no-default-features`, disabling only the private Function
+Agent integration. The `function-agent` feature remains enabled by default for full builds.

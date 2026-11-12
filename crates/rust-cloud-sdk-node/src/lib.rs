@@ -8,6 +8,7 @@
 #![deny(clippy::all)]
 
 mod cloud;
+#[cfg(feature = "function-agent")]
 mod function_agent;
 mod repositories;
 mod sandbox;

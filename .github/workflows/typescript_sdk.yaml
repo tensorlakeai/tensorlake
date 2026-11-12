@@ -131,18 +131,11 @@ jobs:
         run: npm test -- tests/client.test.ts tests/sandbox-image.test.ts
 
   native-binding-smoke:
-    name: Native Function Agent binding smoke tests
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    name: Native SDK binding smoke tests
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-
-      - name: Vendor canonical Function Agent core
-        uses: ./.github/actions/vendor-function-agent-core
-        with:
-          app-id: ${{ secrets.COMPUTE_ENGINE_APP_ID }}
-          private-key: ${{ secrets.COMPUTE_ENGINE_APP_PRIVATE_KEY }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -177,7 +170,7 @@ jobs:
         run: npm run build:sdk
 
       - name: Build native binding (glibc compatibility smoke)
-        run: npm run build:native
+        run: npm run build:native -- --no-default-features
         env:
           TENSORLAKE_NODE_TARGET_ID: linux-x64
           TENSORLAKE_NODE_TARGET_TRIPLE: x86_64-unknown-linux-gnu.2.28
@@ -196,7 +189,7 @@ jobs:
           fi
 
       - name: Build native binding (musl smoke)
-        run: npm run build:native
+        run: npm run build:native -- --no-default-features
         env:
           TENSORLAKE_NODE_TARGET_ID: linux-x64-musl
           TENSORLAKE_NODE_TARGET_TRIPLE: x86_64-unknown-linux-musl
@@ -222,9 +215,9 @@ jobs:
       - name: Verify shared Rust TCP tunnel through the TypeScript SDK
         run: npm run test:native-tunnel
 
-      - name: Verify cloud decoding preserves Function Agent blob transfers
+      - name: Verify cloud decoding leaves raw HTTP clients unchanged
         run: |
-          cargo test -p tensorlake-rust-cloud-sdk-node --lib cloud::tests::
+          cargo test --locked -p tensorlake-rust-cloud-sdk-node --no-default-features --lib cloud::tests::
 
       - name: Verify the SDK package excludes local native builds
         run: |
@@ -236,18 +229,12 @@ jobs:
 
   integration-tests:
     name: Integration tests
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: prod
     steps:
       - uses: actions/checkout@v4
-
-      - name: Vendor canonical Function Agent core
-        uses: ./.github/actions/vendor-function-agent-core
-        with:
-          app-id: ${{ secrets.COMPUTE_ENGINE_APP_ID }}
-          private-key: ${{ secrets.COMPUTE_ENGINE_APP_PRIVATE_KEY }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -270,7 +257,7 @@ jobs:
           cache-bin: false
 
       - name: Build native binding
-        run: npm run build:native
+        run: npm run build:native -- --no-default-features
 
       - name: Wait for Python sandbox integration
         if: github.event_name != 'workflow_dispatch'
