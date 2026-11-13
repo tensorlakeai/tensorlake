@@ -31,9 +31,9 @@ const NATIVE_PACKAGES: Readonly<Record<string, string>> = {
 };
 
 function packageRoot(): string {
-  const parent = fileURLToPath(new URL("../", import.meta.url));
+  const parent = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   if (fs.existsSync(path.join(parent, "package.json"))) return parent;
-  const grandparent = fileURLToPath(new URL("../../", import.meta.url));
+  const grandparent = path.resolve(parent, "..");
   if (fs.existsSync(path.join(grandparent, "package.json"))) return grandparent;
   return parent;
 }
@@ -84,14 +84,49 @@ export function nativePackageName(
   return NATIVE_PACKAGES[nativeTargetId(platform, arch, options)];
 }
 
-export function loadNative<T>(): T {
+/** Bundlers copy package URLs into their server assets; plain Node uses require. */
+export function nativeBindingAsset(): string | undefined {
+  let asset: URL;
+  try {
+    switch (nativeTargetId()) {
+      case "darwin-arm64":
+        asset = new URL("@tensorlakeai/native-darwin-arm64/tensorlake-node.node", import.meta.url);
+        break;
+      case "linux-arm64":
+        asset = new URL("@tensorlakeai/native-linux-arm64-gnu/tensorlake-node.node", import.meta.url);
+        break;
+      case "linux-arm64-musl":
+        asset = new URL("@tensorlakeai/native-linux-arm64-musl/tensorlake-node.node", import.meta.url);
+        break;
+      case "linux-x64":
+        asset = new URL("@tensorlakeai/native-linux-x64-gnu/tensorlake-node.node", import.meta.url);
+        break;
+      case "linux-x64-musl":
+        asset = new URL("@tensorlakeai/native-linux-x64-musl/tensorlake-node.node", import.meta.url);
+        break;
+      case "win32-x64":
+        asset = new URL("@tensorlakeai/native-win32-x64/tensorlake-node.node", import.meta.url);
+        break;
+      default:
+        return undefined;
+    }
+    return fs.existsSync(asset) ? fileURLToPath(asset) : undefined;
+  } catch {
+    // Optional packages for other platforms are absent from an installation.
+    return undefined;
+  }
+}
+
+export function loadNative<T>(workerBindingPath?: string): T {
   const target = nativeTargetId();
-  const bindingPath = nativeBindingPath();
+  const bindingPath = workerBindingPath ?? nativeBindingAsset() ?? nativeBindingPath();
   const require = createRequire(import.meta.url);
 
   // Local source builds stage the addon here. Published packages intentionally
   // omit this directory and resolve the platform-specific optional dependency.
-  if (fs.existsSync(bindingPath)) return require(bindingPath) as T;
+  // These are real Node filesystem paths, including bundler-emitted assets.
+  // Keep bundlers from rewriting require/resolve into module IDs.
+  if (fs.existsSync(bindingPath)) return Reflect.apply(require, undefined, [bindingPath]) as T;
 
   const packageName = nativePackageName();
   if (!packageName) {
@@ -102,12 +137,12 @@ export function loadNative<T>(): T {
 
   let packageEntry: string;
   try {
-    packageEntry = require.resolve(packageName);
+    packageEntry = Reflect.apply(require.resolve, require, [packageName]);
   } catch (cause) {
     throw new Error(
       `Missing native binding package ${packageName} for ${target}. Reinstall @tensorlakeai/tensorlake without omitting optional dependencies, and install dependencies on the machine where they will run.`,
       { cause },
     );
   }
-  return require(packageEntry) as T;
+  return Reflect.apply(require, undefined, [packageEntry]) as T;
 }

@@ -59,6 +59,7 @@
     "test:native-command-output-limit": "node ./scripts/test-native-command-output-limit.mjs",
     "test:native-tunnel": "node ./scripts/test-native-tunnel.mjs",
     "test:native-cloud": "node ./scripts/test-native-cloud.mjs",
+    "test:nextjs": "node ./scripts/test-nextjs.mjs",
     "test:watch": "vitest",
     "lint": "eslint src/ tests/",
     "prepack": "npm run build"

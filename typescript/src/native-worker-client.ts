@@ -1,5 +1,7 @@
+import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
-import { Worker } from "node:worker_threads";
+import { Worker, type WorkerOptions } from "node:worker_threads";
+import { nativeBindingAsset } from "./native-binding.js";
 import type { NativeEmit, NativeSandboxBinding } from "./native-sandbox.js";
 import {
   cancelNativeCall,
@@ -19,6 +21,16 @@ interface PendingCall {
   handle?: NativeHandle;
 }
 
+function defaultWorkerPath(): string | URL {
+  // A package URL lets bundlers emit the worker regardless of the entrypoint's
+  // directory. Node and bundlers such as esbuild that leave URLs unchanged use
+  // normal package resolution instead of looking beside the consumer bundle.
+  const asset = new URL("@tensorlakeai/tensorlake/internal/native-worker", import.meta.url);
+  if (existsSync(asset)) return asset;
+  const require = createRequire(import.meta.url);
+  return Reflect.apply(require.resolve, require, ["@tensorlakeai/tensorlake/internal/native-worker"]);
+}
+
 /** One persistent worker per SDK installation and calling isolate. */
 export class NativeWorkerClient {
   private worker?: Worker;
@@ -29,12 +41,7 @@ export class NativeWorkerClient {
     this.release(id),
   );
 
-  constructor(
-    private readonly workerPath: () => string | URL = () =>
-      createRequire(import.meta.url).resolve(
-        "@tensorlakeai/tensorlake/internal/native-worker",
-      ),
-  ) {}
+  constructor(private readonly workerPath: () => string | URL = defaultWorkerPath) {}
 
   handle(
     kind: NativeHandle["kind"],
@@ -119,13 +126,18 @@ export class NativeWorkerClient {
 
   private getWorker(): Worker {
     if (this.worker) return this.worker;
-    const worker = new Worker(this.workerPath(), {
+    const options: WorkerOptions = {
       // The bundled worker needs no application loaders or telemetry preloads.
       // NODE_OPTIONS is parsed independently of execArgv by Node.
       execArgv: [],
       env: { ...process.env, NODE_OPTIONS: "" },
       name: "tensorlake-native",
-    });
+      workerData: { tensorlakeNativeBindingPath: nativeBindingAsset() },
+    };
+    // Worker paths are Node runtime inputs. Let the package resolver trace the
+    // default file without treating it as a browser worker module or globbing
+    // dist for custom capsule/test paths.
+    const worker: Worker = Reflect.construct(Worker, [this.workerPath(), options]);
     this.worker = worker;
     worker.on("message", (message: WorkerResponse) => {
       const pending = this.pending.get(message.id);
