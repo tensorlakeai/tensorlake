@@ -232,5 +232,5 @@ jobs:
         run: poetry run python tests/sandbox/test_lifecycle.py -v
         env:
           TENSORLAKE_API_URL: https://api.tensorlake.dev
-          TENSORLAKE_API_KEY: ${{ secrets.TENSORLAKE_DEV_TEST_API_KEY }}
+          TENSORLAKE_API_KEY: ${{ secrets.TENSORLAKE_API_KEY }}
           TENSORLAKE_TEST_CLEANUP_GRACE_SECS: "60"
