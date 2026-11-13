@@ -232,7 +232,7 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    environment: prod
+    environment: dev
     steps:
       - uses: actions/checkout@v4
 
@@ -301,7 +301,8 @@ jobs:
       - name: Run integration tests
         run: npm run test:integration
         env:
-          TENSORLAKE_API_KEY: ${{ secrets.TENSORLAKE_API_KEY }}
+          TENSORLAKE_API_URL: https://api.tensorlake.dev
+          TENSORLAKE_API_KEY: ${{ secrets.TENSORLAKE_DEV_TEST_API_KEY }}
           TENSORLAKE_ORGANIZATION_ID: ${{ vars.TENSORLAKE_ORGANIZATION_ID }}
           TENSORLAKE_PROJECT_ID: ${{ vars.TENSORLAKE_PROJECT_ID }}
           TENSORLAKE_TEST_CLEANUP_GRACE_SECS: "60"
