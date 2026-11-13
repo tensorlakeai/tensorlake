@@ -195,11 +195,11 @@ jobs:
 
   test_sandbox:
     name: Sandbox integration tests
-    # The prod environment permits main and manual runs, not PR merge refs.
+    # The dev environment permits only main, not PR merge refs.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    environment: prod
+    environment: dev
     steps:
       - uses: actions/checkout@v4
 
@@ -231,6 +231,6 @@ jobs:
       - name: Run Sandbox integration tests
         run: poetry run python tests/sandbox/test_lifecycle.py -v
         env:
-          TENSORLAKE_API_URL: https://api.tensorlake.ai
-          TENSORLAKE_API_KEY: ${{ secrets.TENSORLAKE_API_KEY }}
+          TENSORLAKE_API_URL: https://api.tensorlake.dev
+          TENSORLAKE_API_KEY: ${{ secrets.TENSORLAKE_DEV_TEST_API_KEY }}
           TENSORLAKE_TEST_CLEANUP_GRACE_SECS: "60"
