@@ -14,7 +14,7 @@ dependencies = [
     "httpx[http2]>=0.27.2,<1.0",
     "websocket-client>=1.8.0,<2.0",
     "websockets>=14.0,<18.0",
-    "pydantic>=2.0,<3.0",
+    "pydantic>=2.14.3,<3.0",
     "grpcio>=1.76.0,<2.0.0",
     "protobuf>=6.31.1,<7.0.0",
 ]
@@ -57,9 +57,9 @@ extend_skip = ["vendor", "crates"]
 [tool.poetry.group.dev.dependencies]
 black = "26.10.1"
 parameterized = "^0.9.0"
-respx = "^0.22.0"
+respx = "^0.23.1"
 psutil = "^7.2.2"
-isort = "^8.0.0"
+isort = "^9.0.2"
 # Patched virtualenv/filelock tooling requires Python 3.11; runtime still supports 3.10.
 pre-commit = { version = "^4.5.1", python = ">=3.11" }
 # grpcio is forward compatible within the major version. The minimum version
@@ -68,7 +68,7 @@ pre-commit = { version = "^4.5.1", python = ">=3.11" }
 # install at runtime (>=1.76.0 per the runtime dependency).
 grpcio = "^1.76.0"
 # Keep code generation reproducible and aligned with the runtime minimum.
-grpcio-tools = "1.76.0"
+grpcio-tools = "1.81.2"
 protobuf = "^6.31.1"
 setuptools = ">=84.1.0"
 maturin = ">=1.9,<2.0"
