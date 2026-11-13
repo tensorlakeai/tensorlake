@@ -1,4 +1,4 @@
-import { parentPort } from "node:worker_threads";
+import { parentPort, workerData } from "node:worker_threads";
 import { loadNative } from "./native-binding.js";
 import type {
   WorkerRequest,
@@ -6,9 +6,9 @@ import type {
 } from "./native-worker-protocol.js";
 
 const port = parentPort!;
-// This module is only a worker entrypoint. All platform detection, dlopen and
-// native object construction happen in this isolate.
-const binding = loadNative<Record<string, any>>();
+// This module is only a worker entrypoint. dlopen and native object construction
+// happen in this isolate, including when a bundler emitted the addon as an asset.
+const binding = loadNative<Record<string, any>>(workerData?.tensorlakeNativeBindingPath);
 const handles = new Map<number, { value?: any; error?: unknown }>();
 interface StreamState {
   cancel?: () => void;

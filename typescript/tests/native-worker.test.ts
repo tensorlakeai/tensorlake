@@ -1,9 +1,12 @@
 import { build } from "esbuild";
 import { execFile } from "node:child_process";
+import { once } from "node:events";
 import { promisify } from "node:util";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
+import { Worker } from "node:worker_threads";
 import { setTimeout as delay } from "node:timers/promises";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
@@ -98,6 +101,34 @@ describe("native worker boundary", () => {
     await buildNativeWorker(output);
     expect(await readFile(addon, "utf8")).toBe("staged addon");
     expect(await readFile(path.join(output, "native-worker.cjs"), "utf8")).toContain("worker_threads");
+  });
+  it("loads an emitted native binding from the path supplied by its parent", async () => {
+    const output = path.join(directory, "asset-worker");
+    await buildNativeWorker(output);
+    const bindingPath = path.join(output, "binding.cjs");
+    await writeFile(bindingPath, `module.exports = {
+      NativeSandboxProxyClient: class { health() { return { traceId: 'asset', json: '{}' }; } }
+    };`);
+    const worker = new Worker(path.join(output, "native-worker.cjs"), {
+      workerData: { tensorlakeNativeBindingPath: bindingPath },
+    });
+    try {
+      worker.postMessage({ type: "create", handle: { id: 1, kind: "NativeSandboxProxyClient", args: [] } });
+      worker.postMessage({ type: "call", id: 2, handleId: 1, method: "health", args: [] });
+      const [message] = await once(worker, "message");
+      expect(message).toEqual({ type: "result", id: 2, value: { traceId: "asset", json: "{}" } });
+    } finally {
+      await worker.terminate();
+    }
+  });
+  it("preserves custom worker URL callbacks used by runtime capsules", async () => {
+    const resolve = vi.fn(() => pathToFileURL(workerPath));
+    const binding = createWorkerBinding(new NativeWorkerClient(resolve));
+    const proxy = new binding.NativeSandboxProxyClient("http://localhost", "capsule");
+    expect(resolve).not.toHaveBeenCalled();
+    expect((await health(proxy)).threadId).toBeGreaterThan(0);
+    expect(resolve).toHaveBeenCalledOnce();
+    releaseNativeHandle(proxy);
   });
   it("keeps constructors lazy and the event loop live during cold loading; shares clients across concurrent proxies", async () => {
     const { binding, client, proxy, resolve } = setup();
