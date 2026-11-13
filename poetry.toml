@@ -1,2 +1,6 @@
 [virtualenvs]
 in-project = true
+
+[solver]
+# Only resolve package versions published at least 7 days ago (Poetry 2.4+).
+min-release-age = 7
