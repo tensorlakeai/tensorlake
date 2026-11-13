@@ -1455,8 +1455,8 @@ impl SandboxProxyClient {
     }
 
     /// Start a process and stream its lifecycle events to `on_event` as they
-    /// arrive. Returns the request `trace_id` once the process exits and the
-    /// stream closes. This is the streaming counterpart to [`run_process`].
+    /// arrive. Returns the request `trace_id` once the process exits, without
+    /// waiting for HTTP EOF. This is the streaming counterpart to [`run_process`].
     pub async fn run_process_streaming(
         &self,
         payload: &Value,
@@ -1519,7 +1519,12 @@ impl SandboxProxyClient {
             });
         futures::pin_mut!(stream);
         while let Some(event) = stream.next().await {
-            on_event(event?).await?;
+            let event = event?;
+            let exited = matches!(&event, RunProcessEvent::Exited { .. });
+            on_event(event).await?;
+            if exited {
+                break;
+            }
         }
         Ok(trace_id)
     }
