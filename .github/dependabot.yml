@@ -1,0 +1,44 @@
+# Keep Dependabot quiet: one grouped PR per ecosystem per month, only for
+# versions published at least 7 days ago. Security updates are not delayed,
+# and are grouped into one PR per ecosystem.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 1
+    groups:
+      cargo:
+        patterns: ["*"]
+      cargo-security:
+        applies-to: security-updates
+        patterns: ["*"]
+  - package-ecosystem: npm
+    directory: /typescript
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 1
+    groups:
+      npm:
+        patterns: ["*"]
+      npm-security:
+        applies-to: security-updates
+        patterns: ["*"]
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 1
+    groups:
+      python:
+        patterns: ["*"]
+      python-security:
+        applies-to: security-updates
+        patterns: ["*"]
