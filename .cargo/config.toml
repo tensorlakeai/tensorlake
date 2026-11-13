@@ -1,0 +1,3 @@
+[registry]
+# Only resolve crate versions published at least 7 days ago (Cargo 1.100+).
+global-min-publish-age = "7 days"
