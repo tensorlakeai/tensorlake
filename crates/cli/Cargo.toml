@@ -66,7 +66,7 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }
 # Keep the parser's location support while using the permissively licensed bigint backend.
-rustpython-parser = { version = "0.3", default-features = false, features = ["location", "num-bigint"] }
+rustpython-parser = { version = "0.4", default-features = false, features = ["location", "num-bigint"] }
 gsvc-codec = { workspace = true, optional = true }
 gsvc-fs-client = { workspace = true, optional = true }
 uuid = { workspace = true }
@@ -84,7 +84,7 @@ keyring-core = { workspace = true }
 libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-tikv-jemallocator = "0.6"
+tikv-jemallocator = "0.7"
 zbus-secret-service-keyring-store = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]

@@ -19,7 +19,7 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 async-trait = "0.1"
-fastcdc = "3"
+fastcdc = "5"
 
 # Internal crates
 tensorlake = { path = "crates/cloud-sdk" }
@@ -37,10 +37,10 @@ gsvc-fs-client = { path = "crates/gsvc-fs-client" }
 # Async runtime
 tokio = { version = "1.53.3", features = ["macros", "rt-multi-thread", "time", "process", "io-std", "io-util", "signal"] }
 tokio-util = { version = "0.7.18", features = ["codec", "io"] }
-tokio-tungstenite = { version = "0.28.0", features = ["rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
 futures = "0.3.32"
 async-compression = { version = "0.4.41", default-features = false, features = ["tokio", "gzip"] }
-des = "0.8"
+des = "0.9"
 png = "0.18"
 
 # Serialization
@@ -74,12 +74,12 @@ urlencoding = "2.1"
 blake3 = "1.8"
 filetime = "0.2"
 sha1 = "0.11"
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4"
-base64 = "0.22"
+base64 = "0.23"
 p256 = { version = "0.14.0", features = ["pem", "getrandom"] }
 postcard = { version = "1", features = ["alloc"] }
-shlex = "1.3"
+shlex = "2.0"
 crc32fast = "1"
 
 # Docker
@@ -90,13 +90,13 @@ http = "1"
 http-body-util = "0.1"
 
 # Templating
-minijinja = "2"
+minijinja = "3"
 
 # Data types
 bytes = "1.11.1"
 chrono = { version = "0.4.44", features = ["serde"] }
-rand = "0.9.2"
-nanoid = "0.4"
+rand = "0.10.2"
+nanoid = "0.5"
 uuid = { version = "1.22.0", features = ["serde", "v4"] }
 zeroize = "1.8.2"
 xattr = "1"
@@ -127,19 +127,19 @@ rolldown = "=1.2.0"
 rolldown_common = "=1.2.0"
 
 # OpenAPI
-utoipa = { version = "5.4.0", features = ["chrono"] }
+utoipa = { version = "6.0.0", features = ["chrono"] }
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
-toml = "0.9.8"
-dirs = "6"
-comfy-table = "7"
+toml = "1.1.2"
+dirs = "7"
+comfy-table = "8"
 indicatif = "0.18.4"
 console = "0.16.2"
 dialoguer = "0.12"
 open = "5"
 crossterm = "0.29"
-gethostname = "0.5"
+gethostname = "1.1"
 env-file-reader = "0.3.0"
 
 # Python bindings
@@ -147,8 +147,8 @@ pyo3 = { version = "0.29.0", features = ["abi3-py310", "extension-module"] }
 pyo3-async-runtimes = { version = "0.29", features = ["tokio-runtime"] }
 
 # Node.js bindings (napi-rs)
-napi = { version = "2", default-features = false, features = ["napi6", "async", "tokio_rt", "serde-json"] }
-napi-derive = "2"
+napi = { version = "3", default-features = false, features = ["napi6", "async", "tokio_rt", "serde-json"] }
+napi-derive = "3"
 napi-build = "2"
 
 [profile.release]
