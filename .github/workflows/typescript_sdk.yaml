@@ -209,7 +209,7 @@ jobs:
       - name: Build and verify Function Service runner capsule
         run: npm run build:runtime
 
-      - name: Verify Next.js 16.2.4 production builds and standalone runtime
+      - name: Verify Next.js production builds and standalone runtime
         run: npm run test:nextjs
 
       - name: Verify native cloud transport and cancellation

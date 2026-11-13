@@ -82,6 +82,7 @@ try {
     return path.join(directory, filename);
   });
   run(npm, ["install", "--ignore-scripts", "--no-audit", "--no-fund", ...packed], directory);
+  const { version: nextVersion } = JSON.parse(await readFile(path.join(directory, "node_modules/next/package.json"), "utf8"));
   // Prefer CI's freshly built addon. A JavaScript-only local checkout can reuse
   // its installed optional native package without compiling Rust.
   const addon = existsSync(runtime.nativeBindingPath())
@@ -107,7 +108,7 @@ try {
       await rm(path.join(directory, ".next"), { recursive: true, force: true });
       run(process.execPath, ["node_modules/next/dist/bin/next", "build", "--turbopack"], directory);
       await checkStandalone();
-      console.log(`Next.js 16.2.4 ${name}, external=${external}: build and isolated native runtime passed`);
+      console.log(`Next.js ${nextVersion} ${name}, external=${external}: build and isolated native runtime passed`);
     }
   }
 } finally {
