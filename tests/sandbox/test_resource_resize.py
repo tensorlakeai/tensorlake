@@ -3,7 +3,9 @@
 import asyncio
 import inspect
 import json
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import AsyncMock, MagicMock
 
 from tensorlake._tracing import Traced
@@ -56,6 +58,119 @@ def client(async_=False):
     return obj
 
 
+class TestResizeTransport(unittest.TestCase):
+    """Run the public sync/async APIs through the native HTTP poller."""
+
+    def setUp(self):
+        self.observations = []
+        self.requests = []
+        test = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def handle_request(self):
+                length = int(self.headers.get("content-length", 0))
+                body = json.loads(self.rfile.read(length)) if length else None
+                test.requests.append((self.command, body))
+                payload = test.observations.pop(0)
+                encoded = json.dumps(payload).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+
+            do_GET = handle_request
+            do_PATCH = handle_request
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.server.server_port}"
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+
+    def test_resize_waits_for_capacity_and_pending_migration(self):
+        for async_ in [False, True]:
+            for admitted_status in [
+                ResizeStatus.WAITING_FOR_CAPACITY,
+                ResizeStatus.MIGRATING,
+            ]:
+                with self.subTest(async_=async_, admitted_status=admitted_status):
+
+                    def observation(resize_status, sandbox_status="running"):
+                        return {
+                            **INFO,
+                            "runtime": "cloud-hypervisor",
+                            "status": sandbox_status,
+                            "resources": {
+                                **INFO["resources"],
+                                "memory_mb": (
+                                    2048 if resize_status == "succeeded" else 1024
+                                ),
+                            },
+                            "resource_resize": {
+                                **INFO["resource_resize"],
+                                "status": resize_status,
+                            },
+                        }
+
+                    self.requests.clear()
+                    self.observations = [
+                        observation("pending"),
+                        observation(
+                            admitted_status,
+                            (
+                                "pending"
+                                if admitted_status == ResizeStatus.MIGRATING
+                                else "running"
+                            ),
+                        ),
+                        observation("migrating", "pending"),
+                        observation("pending"),
+                        observation("succeeded"),
+                    ]
+                    if async_:
+
+                        async def run():
+                            client = AsyncSandboxClient.for_cloud(
+                                api_url=self.url, api_key="test"
+                            )
+                            try:
+                                return await client.update_sandbox(
+                                    "sb-1",
+                                    memory_mb=2048,
+                                    timeout=2,
+                                    poll_interval=0.001,
+                                )
+                            finally:
+                                await client.close()
+
+                        result = asyncio.run(run())
+                    else:
+                        with SandboxClient.for_cloud(
+                            api_url=self.url, api_key="test"
+                        ) as obj:
+                            result = obj.update_sandbox(
+                                "sb-1", memory_mb=2048, timeout=2, poll_interval=0.001
+                            )
+                    self.assertIs(result.resource_resize.status, ResizeStatus.SUCCEEDED)
+                    self.assertEqual(result.resources.memory_mb, 2048)
+                    self.assertEqual(
+                        [method for method, _ in self.requests],
+                        ["GET", "PATCH", "GET", "GET", "GET"],
+                    )
+                    self.assertEqual(
+                        self.requests[1][1], {"resources": {"memory_mb": 2048}}
+                    )
+                    self.assertEqual(self.observations, [])
+
+
 class TestResourceResize(unittest.TestCase):
 
     def test_resource_names_and_types_match_create(self):
@@ -72,6 +187,20 @@ class TestResourceResize(unittest.TestCase):
                     assert update[name].annotation == create[name].annotation
                     assert update[name].default is None
                 assert update["wait"].default is True
+
+    def test_capacity_and_migration_statuses_are_typed(self):
+        for status in [ResizeStatus.WAITING_FOR_CAPACITY, ResizeStatus.MIGRATING]:
+            with self.subTest(status=status):
+                payload = {
+                    **INFO,
+                    "resource_resize": {
+                        **INFO["resource_resize"],
+                        "status": status.value,
+                    },
+                }
+                self.assertIs(
+                    SandboxInfo.model_validate(payload).resource_resize.status, status
+                )
 
     def test_future_resize_status_preserves_sandbox_info_and_wire_value(self):
         payload = {

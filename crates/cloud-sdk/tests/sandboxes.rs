@@ -1814,6 +1814,105 @@ async fn resize_omits_unchanged_dimensions_and_waits_for_confirmed_generation() 
 }
 
 #[tokio::test]
+async fn resize_waits_through_capacity_and_pending_migration() {
+    use tensorlake::sandboxes::{models::ResizeSandboxResources, resize::ResizeOptions};
+
+    for admitted_status in ["waiting_for_capacity", "migrating"] {
+        let mut migrating = resize_info(7, "migrating", 1024, None);
+        migrating["status"] = "pending".into();
+        let admitted = if admitted_status == "migrating" {
+            migrating.clone()
+        } else {
+            resize_info(7, admitted_status, 1024, None)
+        };
+        let (client, task) = resize_server(vec![
+            (200, serde_json::from_str(SANDBOX_INFO_JSON).unwrap()),
+            (200, admitted),
+            (200, migrating),
+            (200, resize_info(7, "migrating", 1024, None)),
+            (200, resize_info(7, "pending", 1024, None)),
+            (200, resize_info(7, "succeeded", 2048, None)),
+        ])
+        .await;
+        let info = client
+            .update_with_options(
+                "sb-1",
+                &resize_request(ResizeSandboxResources {
+                    memory_mb: Some(2048),
+                    ..Default::default()
+                }),
+                ResizeOptions {
+                    timeout: Duration::from_secs(2),
+                    poll_interval: Duration::from_millis(1),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(info.resources.memory_mb, 2048);
+        assert_eq!(info.resource_resize.as_ref().unwrap().status, "succeeded");
+        let requests = task.await.unwrap();
+        assert_eq!(requests.len(), 6);
+        assert_eq!(
+            requests.iter().filter(|r| r.starts_with("PATCH ")).count(),
+            1
+        );
+    }
+}
+
+#[tokio::test]
+async fn resize_migration_preserves_generation_and_lifecycle_fences() {
+    for (generation, resize_status, sandbox_status, reason) in [
+        (8, "migrating", "pending", "superseded"),
+        (6, "migrating", "pending", "interrupted"),
+        (7, "migrating", "suspended", "interrupted"),
+        (7, "migrating", "terminated", "interrupted"),
+        (7, "waiting_for_capacity", "pending", "interrupted"),
+        (7, "pending", "pending", "interrupted"),
+        (7, "unknown", "running", "incompatible_response"),
+    ] {
+        let mut info = resize_info(generation, resize_status, 1024, None);
+        info["status"] = sandbox_status.into();
+        let (client, task) = resize_server(vec![(200, info)]).await;
+        let error = client
+            .wait_for_resource_resize("sb-1", 7, Duration::from_secs(1), Duration::from_millis(1))
+            .await
+            .unwrap_err();
+        let tensorlake::error::SdkError::SandboxResize(error) = error else {
+            panic!("expected typed resize error")
+        };
+        assert_eq!(error.reason, reason);
+        task.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn resize_capacity_and_migration_waits_remain_bounded() {
+    for (resize_status, sandbox_status) in [
+        ("waiting_for_capacity", "running"),
+        ("migrating", "pending"),
+    ] {
+        let mut info = resize_info(7, resize_status, 1024, None);
+        info["status"] = sandbox_status.into();
+        let (client, task) = resize_server(vec![(200, info)]).await;
+        let error = client
+            .wait_for_resource_resize("sb-1", 7, Duration::ZERO, Duration::from_millis(1))
+            .await
+            .unwrap_err();
+        let tensorlake::error::SdkError::SandboxResize(error) = error else {
+            panic!("expected typed resize error")
+        };
+        assert_eq!(error.reason, "timeout");
+        let observed = error.info.unwrap();
+        assert_eq!(observed.resources.memory_mb, 1024);
+        assert_eq!(observed.resource_resize.unwrap().status, resize_status);
+        let requests = task.await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with("GET "));
+    }
+}
+
+#[tokio::test]
 async fn gvisor_resize_only_patches_disk_and_waits_for_confirmed_growth() {
     use tensorlake::sandboxes::{models::ResizeSandboxResources, resize::ResizeOptions};
 

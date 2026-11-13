@@ -14,6 +14,20 @@ const response = () => ({ traceId: "resize-trace", json: JSON.stringify(info) })
 afterEach(() => { clearNativeStub(); vi.restoreAllMocks(); });
 
 describe("resource resize", () => {
+  it.each([ResizeStatus.WAITING_FOR_CAPACITY, ResizeStatus.MIGRATING])("preserves resize progress status %s", async (status) => {
+    installNativeStub({ client: { updateSandbox: vi.fn(async () => ({
+      traceId: "resize-trace", json: JSON.stringify({ ...info, resource_resize: { ...info.resource_resize, status } }),
+    })) } });
+    const client = SandboxClient.forLocalhost();
+    try {
+      const result = await client.update("sb-1", { memoryMb: 2048, wait: false });
+      expect(result.resourceResize?.status).toBe(status);
+      expect(result.resources.memoryMb).toBe(1024);
+    } finally {
+      client.close();
+    }
+  });
+
   it.each([
     [{ cpus: 2 }, { cpus: 2 }],
     [{ memoryMb: 1001 }, { memory_mb: 1001 }],
