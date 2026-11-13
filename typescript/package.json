@@ -81,23 +81,23 @@
   },
   "license": "Apache-2.0",
   "devDependencies": {
-    "@eslint/js": "^9.39.4",
-    "@types/node": "^24.0.0",
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.6.6",
     "@types/ws": "^8.18.1",
     "esbuild": "^0.28.1",
-    "eslint": "^9.0.0",
-    "tsup": "^8.0.0",
-    "typescript": "^5.8.0",
+    "eslint": "^10.14.0",
+    "tsup": "^9.0.0",
+    "typescript": "^7.0.2",
     "typescript-eslint": "^8.65.0",
-    "vitest": "^4.1.12"
+    "vitest": "^5.1.0"
   },
   "dependencies": {
     "@grpc/grpc-js": "^1.14.5",
     "@grpc/proto-loader": "^0.8.0",
     "ajv": "^8.17.1",
     "fflate": "^0.8.2",
-    "google-proto-files": "^5.0.2",
-    "nanoid": "^3.3.18",
+    "google-proto-files": "^6.1.0",
+    "nanoid": "^6.0.2",
     "ws": "^8.20.0"
   },
   "optionalDependencies": {
