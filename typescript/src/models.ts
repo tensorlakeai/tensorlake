@@ -255,6 +255,8 @@ export interface ResourceResizeWaitOptions {
 
 export enum ResizeStatus {
   PENDING = "pending",
+  WAITING_FOR_CAPACITY = "waiting_for_capacity",
+  MIGRATING = "migrating",
   SUCCEEDED = "succeeded",
   FAILED = "failed",
 }

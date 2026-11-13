@@ -476,6 +476,8 @@ class ResizeStatus(str, Enum):
     """Status of a live resource resize generation."""
 
     PENDING = "pending"
+    WAITING_FOR_CAPACITY = "waiting_for_capacity"
+    MIGRATING = "migrating"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
 

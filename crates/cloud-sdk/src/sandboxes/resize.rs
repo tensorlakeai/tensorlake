@@ -329,7 +329,10 @@ fn resize_complete(id: &str, generation: u64, info: &SandboxInfo) -> Result<bool
                         Some(info),
                     ));
                 }
-                "pending" => {}
+                // Migration can temporarily leave the sandbox Pending while its
+                // matching resize generation remains in flight.
+                "migrating" if info.status == "pending" => return Ok(false),
+                "pending" | "waiting_for_capacity" | "migrating" => {}
                 status => {
                     return Err(failure(
                         id,

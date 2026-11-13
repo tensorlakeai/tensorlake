@@ -183,10 +183,14 @@ This also lets the CLI report no-ops without a second preflight GET.
 
 Each accepted resize has a generation. `resources` is the confirmed allocation;
 `resource_resize.requested` (`resourceResize.requested` in TypeScript) is the
-operation's target. Status is `pending`, `succeeded`, or `failed`, exposed as
-`ResizeStatus` in Python and TypeScript. Unknown future statuses remain strings
-so the sandbox can still be fetched and inspected. A failed resize can partially converge,
-so inspect confirmed resources on failure.
+operation's target. Status is `pending`, `waiting_for_capacity`, `migrating`,
+`succeeded`, or `failed`, exposed as `ResizeStatus` in Python and TypeScript.
+The SDK continues waiting during capacity waits and migration, including when
+migration temporarily makes the sandbox `pending`, within the requested timeout.
+Only migration of the matching resize generation permits that pending lifecycle
+state. Unknown future resize statuses remain strings so the sandbox can still
+be fetched and inspected. A failed resize can partially converge, so inspect
+confirmed resources on failure.
 
 Waiting for an older generation never treats a newer successful resize as its
 result. Instead it reports `ResizeErrorReason.SUPERSEDED`; the earlier result is
