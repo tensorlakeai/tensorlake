@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Run GitHub Actions on fresh Tensorlake sandboxes by changing one runner label."
+    />
+    <title>Tensorlake CI — serverless GitHub Actions runners</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <header class="nav shell">
+      <a class="brand" href="/" aria-label="Tensorlake CI home">
+        <span class="mark" aria-hidden="true">T</span>
+        <span>Tensorlake</span>
+        <span class="product">CI</span>
+      </a>
+      <span class="status"><span class="status-dot"></span>Runner service online</span>
+    </header>
+
+    <main>
+      <section class="hero shell">
+        <div class="eyebrow">GitHub-native serverless runners</div>
+        <h1>Change one line.<br />Your CI runs on Tensorlake.</h1>
+        <p class="lede">
+          Install the GitHub App once. Then use a Tensorlake runner label in any
+          workflow. Every job starts in a fresh sandbox and disappears when it is done.
+        </p>
+
+        <div id="installed-banner" class="installed" hidden>
+          <span class="check" aria-hidden="true">✓</span>
+          <span><strong>GitHub connected.</strong> Add the label below and push.</span>
+        </div>
+
+        <div class="actions">
+          <a id="install-link" class="button primary" href="#">Install GitHub App</a>
+          <button id="copy-button" class="button secondary" type="button">
+            Copy runner label
+          </button>
+        </div>
+        <p class="trust">No repository secrets. No agents to deploy. No runner fleet to manage.</p>
+      </section>
+
+      <section class="switcher shell" aria-labelledby="switch-heading">
+        <div class="section-heading">
+          <span>01</span>
+          <div>
+            <h2 id="switch-heading">Replace your runner label</h2>
+            <p>That is the entire repository-side setup.</p>
+          </div>
+        </div>
+
+        <div class="code-card" aria-label="GitHub Actions workflow change">
+          <div class="code-topbar">
+            <span>.github/workflows/ci.yml</span>
+            <span class="yaml">YAML</span>
+          </div>
+          <pre><code><span class="muted">jobs:</span>
+  <span class="muted">test:</span>
+<span class="removed">-   runs-on: ubuntu-latest</span>
+<span class="added">+   runs-on: <strong id="runner-label">tensorlake</strong></span>
+    <span class="muted">steps:</span>
+      <span class="muted">- uses: actions/checkout@v4</span>
+      <span class="muted">- run: npm test</span></code></pre>
+          <button id="code-copy" class="code-copy" type="button">Copy</button>
+        </div>
+      </section>
+
+      <section class="how shell" aria-labelledby="how-heading">
+        <div class="section-heading">
+          <span>02</span>
+          <div>
+            <h2 id="how-heading">Push. Tensorlake handles the rest.</h2>
+            <p>The runner appears only when GitHub queues the job.</p>
+          </div>
+        </div>
+
+        <div class="flow">
+          <article>
+            <div class="flow-icon">GH</div>
+            <h3>GitHub queues the job</h3>
+            <p>The App receives a signed <code>workflow_job</code> event for the label.</p>
+          </article>
+          <div class="arrow" aria-hidden="true">→</div>
+          <article>
+            <div class="flow-icon accent">TL</div>
+            <h3>A sandbox starts</h3>
+            <p>A one-job JIT runner boots with the requested CPU and memory profile.</p>
+          </article>
+          <div class="arrow" aria-hidden="true">→</div>
+          <article>
+            <div class="flow-icon">✓</div>
+            <h3>The sandbox disappears</h3>
+            <p>Logs stay in GitHub. The isolated runner terminates after the job.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="profiles shell" aria-labelledby="profiles-heading">
+        <div>
+          <span class="kicker">Runner profiles</span>
+          <h2 id="profiles-heading">Start simple. Size up in one word.</h2>
+        </div>
+        <div id="profile-list" class="profile-list">
+          <div><code>tensorlake</code><span>2 vCPU · 8 GB</span></div>
+        </div>
+      </section>
+
+      <section id="demo-panel" class="demo shell">
+        <div>
+          <span class="kicker">Local demo</span>
+          <h2>See the webhook-to-sandbox path</h2>
+          <p>Dispatch a simulated labeled GitHub job against this local service.</p>
+        </div>
+        <div class="demo-action">
+          <button id="demo-button" class="button secondary" type="button">Run demo job</button>
+          <span id="demo-status" aria-live="polite"></span>
+        </div>
+      </section>
+    </main>
+
+    <footer class="shell">
+      <span>Tensorlake CI</span>
+      <span>Ephemeral by default.</span>
+    </footer>
+  </body>
+</html>
