@@ -155,15 +155,7 @@ class TestAsyncio(unittest.TestCase):
             gather_first_failure,
             is_remote,
         )
-        if is_remote:
-            # Function Service delivers the typed child failure to the suspended
-            # parent, where asyncio.gather raises it for application code to catch.
-            self.assertEqual(request.output(), "success")
-        else:
-            # The local runner still terminates the whole request on a child failure.
-            with self.assertRaises(RequestError) as cm:
-                request.output()
-            self.assertEqual(str(cm.exception), "bar")
+        self.assertEqual(request.output(), "success")
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_create_task(self, _: str, is_remote: bool):
