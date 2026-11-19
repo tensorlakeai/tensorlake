@@ -13,6 +13,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+from tensorlake.applications.interface.exceptions import SDKUsageError
 from tensorlake.applications.remote.code.ignored_code_paths import (
     _parse_gitignore,
     ignored_code_paths,
@@ -553,6 +554,164 @@ class TestWalkCodeEndToEnd(unittest.TestCase):
             self.assertIn(_abspath(root, "src/utils.py"), walked_files)
             self.assertNotIn(_abspath(root, "build/generated.py"), walked_files)
             self.assertNotIn(_abspath(root, "dist/bundle.py"), walked_files)
+
+
+class TestVirtualenvExclusion(unittest.TestCase):
+    """Virtualenvs must never reach the application code ZIP.
+
+    Regression tests for issue #523: an application file deployed from the root of a
+    virtualenv deployed successfully but then failed to load in the Function Executor.
+    """
+
+    def test_rejects_application_file_in_virtualenv_root(self):
+        """Deploying from the root of a virtualenv must fail with an actionable error."""
+        with TemporaryDirectory() as root:
+            root = Path(root)
+            _make_tree(
+                root,
+                [
+                    "pyvenv.cfg",
+                    "agent.py",
+                    "bin/activate",
+                    "lib/python3.12/site-packages/somepkg/__init__.py",
+                ],
+            )
+
+            with patch.dict(os.environ, {"VIRTUAL_ENV": str(root)}, clear=False):
+                with self.assertRaises(SDKUsageError) as ctx:
+                    ignored_code_paths(str(root))
+
+            # The message has to tell the user what to do about it.
+            self.assertIn("virtualenv", str(ctx.exception))
+            self.assertIn(str(root), str(ctx.exception))
+
+    def test_rejects_virtualenv_root_without_virtual_env_set(self):
+        """The marker file alone is enough; the virtualenv need not be activated."""
+        with TemporaryDirectory() as root:
+            root = Path(root)
+            _make_tree(root, ["pyvenv.cfg", "agent.py"])
+
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("VIRTUAL_ENV", None)
+                with self.assertRaises(SDKUsageError):
+                    ignored_code_paths(str(root))
+
+    def test_ordinary_directory_is_not_rejected(self):
+        with TemporaryDirectory() as root:
+            root = Path(root)
+            _make_tree(root, ["agent.py", "src/utils.py"])
+
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("VIRTUAL_ENV", None)
+                excluded = ignored_code_paths(str(root))
+
+            walked_files = list(walk_code(str(root), excluded))
+
+            self.assertIn(_abspath(root, "agent.py"), walked_files)
+            self.assertIn(_abspath(root, "src/utils.py"), walked_files)
+
+    def test_excludes_nested_virtualenv(self):
+        """A virtualenv below the top level must be excluded, not just a direct child."""
+        with TemporaryDirectory() as root:
+            root = Path(root)
+            _make_tree(
+                root,
+                [
+                    "app.py",
+                    "envs/myenv/pyvenv.cfg",
+                    "envs/myenv/lib/site-packages/pkg/mod.py",
+                ],
+            )
+
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("VIRTUAL_ENV", None)
+                excluded = ignored_code_paths(str(root))
+
+            self.assertIn(_abspath(root, "envs/myenv"), excluded)
+
+            walked_files = list(walk_code(str(root), excluded))
+
+            self.assertIn(_abspath(root, "app.py"), walked_files)
+            self.assertNotIn(
+                _abspath(root, "envs/myenv/lib/site-packages/pkg/mod.py"), walked_files
+            )
+
+    def test_excludes_multiple_virtualenvs_at_different_depths(self):
+        with TemporaryDirectory() as root:
+            root = Path(root)
+            _make_tree(
+                root,
+                [
+                    "app.py",
+                    ".venv/pyvenv.cfg",
+                    ".venv/lib/site-packages/a/mod.py",
+                    "tools/envs/other/pyvenv.cfg",
+                    "tools/envs/other/lib/site-packages/b/mod.py",
+                    "tools/helper.py",
+                ],
+            )
+
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("VIRTUAL_ENV", None)
+                excluded = ignored_code_paths(str(root))
+
+            walked_files = list(walk_code(str(root), excluded))
+
+            self.assertIn(_abspath(root, "app.py"), walked_files)
+            self.assertIn(_abspath(root, "tools/helper.py"), walked_files)
+            self.assertNotIn(
+                _abspath(root, ".venv/lib/site-packages/a/mod.py"), walked_files
+            )
+            self.assertNotIn(
+                _abspath(root, "tools/envs/other/lib/site-packages/b/mod.py"),
+                walked_files,
+            )
+
+    def test_excludes_active_virtualenv_reached_through_a_symlink(self):
+        """The active virtualenv is checked explicitly because the scan skips symlinks."""
+        with TemporaryDirectory() as outer:
+            outer = Path(outer)
+            root = outer / "project"
+            real_venv = outer / "real-venv"
+            _make_tree(root, ["app.py"])
+            _make_tree(real_venv, ["pyvenv.cfg", "lib/site-packages/pkg/mod.py"])
+
+            linked_venv = root / ".venv"
+            try:
+                linked_venv.symlink_to(real_venv, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlinks are not supported on this platform")
+
+            with patch.dict(os.environ, {"VIRTUAL_ENV": str(linked_venv)}, clear=False):
+                excluded = ignored_code_paths(str(root))
+
+            self.assertIn(_abspath(root, ".venv"), excluded)
+
+    def test_does_not_descend_into_gitignored_directories(self):
+        """A gitignored directory stays excluded and is not scanned for virtualenvs."""
+        with TemporaryDirectory() as root:
+            root = Path(root)
+            _make_tree(
+                root,
+                [
+                    "app.py",
+                    "build/pyvenv.cfg",
+                    "build/lib/site-packages/pkg/mod.py",
+                ],
+            )
+            (root / ".gitignore").write_text("/build/\n")
+
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("VIRTUAL_ENV", None)
+                excluded = ignored_code_paths(str(root))
+
+            walked_files = list(walk_code(str(root), excluded))
+
+            self.assertIn(_abspath(root, "build"), excluded)
+            self.assertIn(_abspath(root, "app.py"), walked_files)
+            self.assertNotIn(
+                _abspath(root, "build/lib/site-packages/pkg/mod.py"), walked_files
+            )
 
 
 if __name__ == "__main__":
