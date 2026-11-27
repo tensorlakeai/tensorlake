@@ -71,7 +71,7 @@ keyring-core = { workspace = true }
 libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-tikv-jemallocator = "0.6"
+tikv-jemallocator = "0.7"
 zbus-secret-service-keyring-store = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
