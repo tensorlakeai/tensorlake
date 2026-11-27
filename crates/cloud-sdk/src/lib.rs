@@ -1,26 +1,19 @@
 //! # Tensorlake Cloud SDK
 //!
 //! A Rust SDK for interacting with Tensorlake Cloud APIs.
-//! This SDK provides a high-level, ergonomic interface for managing applications,
-//! functions, and execution requests in the Tensorlake Cloud platform.
 //!
 //! ## Quick Start
 //!
 //! ```rust,no_run
-//! use tensorlake::{Sdk, applications::models::ListApplicationsRequest};
+//! use tensorlake::Sdk;
 //!
 //! async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //!     // Create the SDK client
 //!     let sdk = Sdk::new("https://api.tensorlake.ai", "your-api-key")?;
 //!
-//!     // Get the applications client
-//!     let apps_client = sdk.applications();
-//!
-//!     // List applications in the default namespace
-//!     let request = ListApplicationsRequest::builder()
-//!         .namespace("default".to_string())
-//!         .build()?;
-//!     apps_client.list(&request).await?;
+//!     // List the sandboxes of the project
+//!     let sandboxes = sdk.sandboxes("default", false);
+//!     sandboxes.list().await?;
 //!     Ok(())
 //! }
 //! ```
@@ -38,57 +31,24 @@
 //!
 //! ## Available Clients
 //!
-//! - [`ApplicationsClient`](applications::ApplicationsClient): Manage applications, functions, and requests
-//! - [`ImagesClient`](images::ImagesClient): Build and manage container images
 //! - [`SandboxesClient`](sandboxes::SandboxesClient): Manage sandbox lifecycle, pools, and snapshots
-//! - [`SecretsClient`](secrets::SecretsClient): Manage secrets for secure configuration
-//!
-//! ## Error Handling
-//!
-//! The SDK provides detailed error types for different scenarios:
-//!
-//! ```rust,no_run
-//! use tensorlake::{Sdk, applications::models::ListApplicationsRequest};
-//!
-//! async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//!     let sdk = Sdk::new("https://api.tensorlake.ai", "your-api-key")?;
-//!     let apps_client = sdk.applications();
-//!
-//!     let request = ListApplicationsRequest::builder()
-//!         .namespace("default".to_string())
-//!         .build()?;
-//!     match apps_client.list(&request).await {
-//!         Ok(apps) => println!("Success: {:?}", apps.applications.len()),
-//!         Err(e) => eprintln!("Error: {}", e),
-//!     }
-//!     Ok(())
-//! }
-//! ```
 
-pub mod applications;
 pub mod artifact_storage;
-pub mod cron;
 pub mod docker_config;
 pub mod error;
 pub mod http_transport;
 pub mod image_builds;
 mod image_service_builds;
-pub mod images;
 pub mod retry;
 pub mod sandbox_image_catalog;
 pub mod sandbox_images;
 pub mod sandbox_templates;
 pub mod sandboxes;
-pub mod secrets;
 pub mod sse;
 pub mod usage;
-use applications::*;
 use artifact_storage::*;
-use cron::*;
-use images::*;
 use sandbox_templates::*;
 use sandboxes::*;
-use secrets::*;
 use usage::UsageClient;
 
 mod client;
@@ -255,8 +215,7 @@ pub fn resolve_artifact_storage_url(api_url: &str) -> String {
 /// let sdk = Sdk::new("https://api.tensorlake.ai", "your-api-key").unwrap();
 ///
 /// // Access different service clients
-/// let apps_client = sdk.applications();
-/// let secrets_client = sdk.secrets();
+/// let sandboxes = sdk.sandboxes("default", false);
 /// ```
 #[derive(Clone)]
 pub struct Sdk {
@@ -336,63 +295,6 @@ impl Sdk {
         Ok(Self { client, api_url })
     }
 
-    /// Get a client for managing applications and requests.
-    ///
-    /// This method returns an [`ApplicationsClient`] that provides methods for:
-    /// - Listing, creating, updating, and deleting applications
-    /// - Invoking applications with data
-    /// - Managing execution requests
-    ///
-    /// # Returns
-    ///
-    /// Returns an [`ApplicationsClient`] instance configured with the SDK's authentication.
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// use tensorlake::{Sdk, applications::models::ListApplicationsRequest};
-    ///
-    /// async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    ///     let sdk = Sdk::new("https://api.tensorlake.ai", "your-api-key")?;
-    ///     let apps_client = sdk.applications();
-    ///
-    ///     // Use the applications client
-    ///     let request = ListApplicationsRequest::builder()
-    ///         .namespace("default".to_string())
-    ///         .build()?;
-    ///     apps_client.list(&request).await?;
-    ///     Ok(())
-    /// }
-    /// ```
-    pub fn applications(&self) -> ApplicationsClient {
-        ApplicationsClient::new(self.client.clone())
-    }
-
-    /// Get a client for building and managing container images.
-    ///
-    /// This method returns an [`ImagesClient`] that provides methods for:
-    /// - Building container images from source code and Dockerfiles
-    /// - Monitoring build progress and status
-    ///
-    /// # Returns
-    ///
-    /// Returns an [`ImagesClient`] instance configured with the SDK's authentication.
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use tensorlake::Sdk;
-    ///
-    /// let sdk = Sdk::new("https://api.tensorlake.ai", "your-api-key").unwrap();
-    /// let images_client = sdk.images();
-    ///
-    /// // Use the images client
-    /// // let result = images_client.build_image(request).await?;
-    /// ```
-    pub fn images(&self) -> ImagesClient {
-        ImagesClient::new(self.client.clone())
-    }
-
     /// Get a client for Artifact Storage repositories and Git credentials.
     pub fn artifact_storage(&self) -> Result<ArtifactStorageClient, error::SdkError> {
         ArtifactStorageClient::new(
@@ -463,39 +365,5 @@ impl Sdk {
             use_namespaced_endpoints,
         )
         .with_log_client(self.client.clone())
-    }
-
-    /// Get a client for managing secrets.
-    ///
-    /// This method returns a [`SecretsClient`] that provides methods for:
-    /// - Creating, updating, and deleting secrets
-    /// - Listing secrets in a project
-    /// - Retrieving individual secret details
-    ///
-    /// # Returns
-    ///
-    /// Returns a [`SecretsClient`] instance configured with the SDK's authentication.
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// use tensorlake::Sdk;
-    ///
-    /// async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    ///     let sdk = Sdk::new("https://api.tensorlake.ai", "your-api-key")?;
-    ///     let secrets_client = sdk.secrets();
-    ///
-    ///     // API keys use the token-scoped route directly.
-    ///     secrets_client.list_api_key_scoped(Some(100)).await?;
-    ///     Ok(())
-    /// }
-    /// ```
-    pub fn secrets(&self) -> SecretsClient {
-        SecretsClient::new(self.client.clone())
-    }
-
-    /// Get a client for managing cron schedules for applications.
-    pub fn cron(&self) -> CronClient {
-        CronClient::new(self.client.clone())
     }
 }

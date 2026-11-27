@@ -22,9 +22,7 @@ const mock = createServer((req, res) => {
   requests.push(req.url);
   req.resume();
   res.setHeader("Content-Type", "application/json");
-  res.end(JSON.stringify(req.method === "POST"
-    ? { request_id: "next-repro-request" }
-    : { sandboxes: [], processes: [] }));
+  res.end(JSON.stringify({ sandboxes: [], processes: [] }));
 });
 
 function run(command, args, cwd) {
@@ -57,18 +55,14 @@ async function checkStandalone() {
     child.stderr.on("data", data => { log += data; });
     let response;
     for (let attempt = 0; attempt < 100; attempt++) {
-      try { response = await fetch(`http://127.0.0.1:${port}/api/application`); break; }
+      try { response = await fetch(`http://127.0.0.1:${port}/api/sandbox`); break; }
       catch { await delay(100); }
     }
     assert.ok(response, log);
     const body = await response.text();
     assert.equal(response.status, 200, `${body}\n${log}`);
-    assert.deepEqual(JSON.parse(body), { requestId: "next-repro-request" });
-    const sandboxResponse = await fetch(`http://127.0.0.1:${port}/api/sandbox`);
-    const sandboxBody = await sandboxResponse.text();
-    assert.equal(sandboxResponse.status, 200, `${sandboxBody}\n${log}`);
-    assert.deepEqual(JSON.parse(sandboxBody), { sandboxes: [], processes: [] });
-    assert.equal(requests.length, 3, "Expected application, lifecycle and proxy calls through the native worker");
+    assert.deepEqual(JSON.parse(body), { sandboxes: [], processes: [] });
+    assert.equal(requests.length, 2, "Expected lifecycle and proxy calls through the native worker");
   } finally {
     if (child?.exitCode === null) { child.kill(); await once(child, "exit"); }
     await rm(isolated, { recursive: true, force: true });
@@ -94,14 +88,10 @@ try {
 
   mock.listen(0, "127.0.0.1");
   await once(mock, "listening");
-  const routes = await Promise.all(["sandbox", "application"].map(async name => {
-    const routePath = path.join(directory, `app/api/${name}/route.ts`);
-    return [routePath, await readFile(routePath, "utf8")];
-  }));
+  const routePath = path.join(directory, "app/api/sandbox/route.ts");
+  const route = await readFile(routePath, "utf8");
   for (const name of ["@tensorlakeai/tensorlake", "tensorlake"]) {
-    for (const [routePath, route] of routes) {
-      await writeFile(routePath, route.replaceAll("@tensorlakeai/tensorlake", name));
-    }
+    await writeFile(routePath, route.replaceAll("@tensorlakeai/tensorlake", name));
     for (const external of [false, true]) {
       requests.length = 0;
       await writeFile(path.join(directory, "next.config.mjs"), `export default ${JSON.stringify({ output: "standalone", ...(external ? { serverExternalPackages: ["tensorlake", "@tensorlakeai/tensorlake"] } : {}) })};\n`);

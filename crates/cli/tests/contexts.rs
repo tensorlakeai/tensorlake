@@ -278,7 +278,7 @@ async fn unknown_context_is_a_clear_error() {
     let run = tl(
         &home,
         &home.dir,
-        &["--context", "nope", "secrets", "ls"],
+        &["--context", "nope", "sbx", "image", "ls"],
         &[],
     )
     .await;
@@ -294,7 +294,7 @@ async fn unknown_context_is_a_clear_error() {
     let run = tl(
         &home,
         &home.dir,
-        &["secrets", "ls"],
+        &["sbx", "image", "ls"],
         &[("TENSORLAKE_CONTEXT", "nope")],
     )
     .await;
@@ -457,7 +457,7 @@ async fn an_api_key_wins_over_the_context_token() {
     let run = tl(
         &home,
         &home.dir,
-        &["secrets", "ls"],
+        &["sbx", "image", "ls"],
         &[("TENSORLAKE_API_KEY", "tl_apiKey_ci")],
     )
     .await;
@@ -467,7 +467,7 @@ async fn an_api_key_wins_over_the_context_token() {
         "{}",
         requests[0]
     );
-    assert!(run.stderr.contains("HTTP 500"), "{}", run.stderr);
+    assert!(run.stderr.contains("500"), "{}", run.stderr);
 }
 
 #[tokio::test]
@@ -519,7 +519,7 @@ async fn a_project_flag_for_another_project_is_an_error() {
     let run = tl(
         &home,
         &home.dir,
-        &["--project", "project_staging", "secrets", "ls"],
+        &["--project", "project_staging", "sbx", "image", "ls"],
         &[],
     )
     .await;
@@ -841,7 +841,15 @@ async fn a_named_context_for_another_api_url_is_an_error() {
     let run = tl(
         &home,
         &home.dir,
-        &["--context", "staging", "--api-url", other, "secrets", "ls"],
+        &[
+            "--context",
+            "staging",
+            "--api-url",
+            other,
+            "sbx",
+            "image",
+            "ls",
+        ],
         &[],
     )
     .await;
@@ -857,7 +865,7 @@ async fn a_named_context_for_another_api_url_is_an_error() {
     let run = tl(
         &home,
         &home.dir,
-        &["secrets", "ls"],
+        &["sbx", "image", "ls"],
         &[
             ("TENSORLAKE_CONTEXT", "staging"),
             ("TENSORLAKE_API_URL", other),
@@ -1046,12 +1054,12 @@ async fn local_commands_run_with_a_stale_context_or_another_project() {
         ("TENSORLAKE_PROJECT_ID", "project_other"),
     ];
 
-    let run = tl(&home, &home.dir, &["new", "demo"], &stale).await;
+    let run = tl(&home, &home.dir, &["version"], &stale).await;
     assert!(run.success, "{}", run.stderr);
-    assert!(home.dir.join("demo").is_dir(), "the app was scaffolded");
+    assert!(run.stdout.starts_with("tl "), "{}", run.stdout);
 
     // A command that runs in the context still needs it.
-    let run = tl(&home, &home.dir, &["secrets", "ls"], &stale).await;
+    let run = tl(&home, &home.dir, &["sbx", "image", "ls"], &stale).await;
     assert!(!run.success);
     assert!(
         run.stderr
@@ -1096,7 +1104,7 @@ async fn credential_helper_fails_softly_when_its_context_is_gone() {
     let run = tl(
         &home,
         &home.dir,
-        &["--context", "gone", "secrets", "ls"],
+        &["--context", "gone", "sbx", "image", "ls"],
         &[],
     )
     .await;
@@ -1238,7 +1246,7 @@ token = "tl_staging"
     let run = tl(
         &home,
         &project,
-        &["--context", "staging", "secrets", "ls"],
+        &["--context", "staging", "sbx", "image", "ls"],
         &[],
     )
     .await;

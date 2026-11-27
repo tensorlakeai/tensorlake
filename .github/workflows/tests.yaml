@@ -40,15 +40,10 @@ jobs:
 
       - name: Run public Python unit tests
         env:
-          PYTHONPATH: src:tests/applications
+          PYTHONPATH: src
         run: |
           set -euo pipefail
           for module in \
-            tests.applications.test_application_manifest \
-            tests.applications.test_code_zip \
-            tests.applications.test_future_validation \
-            tests.applications.test_parse_gitignore \
-            tests.applications.test_request_context_headers \
             tests.utils.test_retries \
             tests.sandbox.test_timestamps
           do
@@ -62,20 +57,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-          cache: npm
-          cache-dependency-path: typescript/package-lock.json
-
-      - name: Build TypeScript SDK and runner capsules for CLI tests
-        working-directory: typescript
-        run: |
-          npm ci --ignore-scripts
-          npm run build:sdk
-          npm run build:runtime
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.98.1
         with:
@@ -86,8 +67,8 @@ jobs:
           prefix-key: v1-rust-public-ci
           cache-bin: false
 
-      # Mount, git-clone, and Function Agent require private sources and are
-      # excluded from public CI. Release builds in CEI still include them.
+      # Mount and git-clone require private sources and are excluded from
+      # public CI. Release builds in CEI still include them.
       - name: Test public Rust SDK and CLI
         run: cargo test --locked -p tensorlake -p tensorlake-cli
 
@@ -117,17 +98,17 @@ jobs:
           CARGO_TARGET_DIR: target
         with:
           target: x86_64-pc-windows-msvc
-          args: --release --no-default-features --out dist
+          args: --release --out dist
           sccache: 'true'
 
       - name: Verify wheel imports Rust Cloud SDK extension
         run: |
-          python .github/scripts/verify_wheel.py "dist/tensorlake-*.whl" tensorlake._cloud_sdk tensorlake.cli.deploy --expect-script function-executor --expect-script tensorlake-python-function-runner --expect-script tensorlake-deploy --reject-script tl --reject-script tensorlake
+          python .github/scripts/verify_wheel.py "dist/tensorlake-*.whl" tensorlake._cloud_sdk --reject-script tl --reject-script tensorlake
 
       - name: Build Node.js native binding
         env:
           CARGO_TARGET_DIR: target
-        run: cargo build --locked --release --no-default-features -p tensorlake-rust-cloud-sdk-node --target x86_64-pc-windows-msvc
+        run: cargo build --locked --release -p tensorlake-rust-cloud-sdk-node --target x86_64-pc-windows-msvc
 
       - name: Build public Windows CLI
         run: cargo build --release -p tensorlake-cli --bin tensorlake --target x86_64-pc-windows-msvc
@@ -165,7 +146,7 @@ jobs:
           virtualenvs-in-project: true
 
       - name: Install, build Rust SDK extension, and lint tensorlake
-        run: poetry install --no-root --with=dev && poetry run maturin develop --no-default-features && make check
+        run: poetry install --no-root --with=dev && poetry run maturin develop && make check
 
       - name: Run sandbox/image SDK unit tests
         env:
@@ -190,7 +171,6 @@ jobs:
             tests.image.test_builds \
             tests.image.test_builds_native \
             tests.image.test_docker_config_native \
-            tests.function_agent.test_runner \
             tests.test_usage
 
   test_sandbox:
@@ -226,7 +206,7 @@ jobs:
           virtualenvs-in-project: true
 
       - name: Install Python dependencies
-        run: poetry install --no-root --with=dev && poetry run maturin develop --no-default-features
+        run: poetry install --no-root --with=dev && poetry run maturin develop
 
       - name: Run Sandbox integration tests
         run: poetry run python tests/sandbox/test_lifecycle.py -v

@@ -42,7 +42,6 @@ from tensorlake.cli._common import Context
 
 from ._dockerfile import image_to_dockerfile
 from .image import Image, _ImageBuildOperation, _ImageBuildOperationType
-from .utils import dockerfile_content
 
 EmitFn = Callable[[dict], None]
 
@@ -157,7 +156,6 @@ def _rust_delete_sandbox_image(
     image_name: str,
     organization_id: str | None,
     project_id: str | None,
-    namespace: str | None,
 ) -> tuple[str, str | None, str] | None:
     """Returns ``(legacy_image_name, legacy_image_id, error)`` when the name's
     CAS image was deleted but its same-named legacy image could not be, else
@@ -173,7 +171,6 @@ def _rust_delete_sandbox_image(
         api_key=token,
         organization_id=organization_id,
         project_id=project_id,
-        namespace=namespace,
         user_agent=USER_AGENT,
     )
     try:
@@ -188,7 +185,6 @@ def _rust_find_sandbox_image_by_name(
     image_name: str,
     organization_id: str | None,
     project_id: str | None,
-    namespace: str | None,
 ) -> str | None:
     try:
         from tensorlake._cloud_sdk import CloudApiClient
@@ -200,7 +196,6 @@ def _rust_find_sandbox_image_by_name(
         api_key=token,
         organization_id=organization_id,
         project_id=project_id,
-        namespace=namespace,
         user_agent=USER_AGENT,
     )
     try:
@@ -216,7 +211,6 @@ def _rust_list_sandbox_images(
     token: str,
     organization_id: str | None,
     project_id: str | None,
-    namespace: str | None,
 ) -> str:
     try:
         from tensorlake._cloud_sdk import CloudApiClient
@@ -228,7 +222,6 @@ def _rust_list_sandbox_images(
         api_key=token,
         organization_id=organization_id,
         project_id=project_id,
-        namespace=namespace,
         user_agent=USER_AGENT,
     )
     try:
@@ -251,12 +244,10 @@ def _run_rust_image_create(
     docker_compat: bool,
     cas: bool,
     build_args: dict[str, str] | None = None,
-    allow_pat: bool = False,
     emit: EmitFn,
     docker_config_json: str | None = None,
 ) -> dict:
-    ctx, token = _resolve_build_credentials(allow_pat=allow_pat)
-    use_explicit_scope = allow_pat and ctx.api_key is None
+    ctx, token = _resolve_build_credentials()
 
     family = "CAS" if cas else "legacy"
     emit(
@@ -274,10 +265,10 @@ def _run_rust_image_create(
             cpus,
             memory_mb,
             is_public,
-            ctx.organization_id if use_explicit_scope else None,
-            ctx.project_id if use_explicit_scope else None,
+            None,  # organization_id: API keys carry their own scope
+            None,  # project_id
             ctx.namespace,
-            use_explicit_scope,
+            False,  # use_scope_headers
             USER_AGENT,
             docker_compat,
             dockerfile_text,
@@ -308,12 +299,10 @@ def _run_rust_image_import(
     is_public: bool,
     docker_compat: bool,
     cas: bool = False,
-    allow_pat: bool = False,
     emit: EmitFn,
     docker_config_json: str | None = None,
 ) -> dict:
-    ctx, token = _resolve_build_credentials(allow_pat=allow_pat)
-    use_explicit_scope = allow_pat and ctx.api_key is None
+    ctx, token = _resolve_build_credentials()
 
     emit(
         {
@@ -336,10 +325,10 @@ def _run_rust_image_import(
             cpus,
             memory_mb,
             is_public,
-            ctx.organization_id if use_explicit_scope else None,
-            ctx.project_id if use_explicit_scope else None,
+            None,  # organization_id: API keys carry their own scope
+            None,  # project_id
             ctx.namespace,
-            use_explicit_scope,
+            False,  # use_scope_headers
             USER_AGENT,
             docker_compat,
             cas=cas,
@@ -363,11 +352,11 @@ def _raise_typed_cas_error(exc: BaseException) -> None:
         raise typed from exc
 
 
-def _resolve_build_credentials(*, allow_pat: bool = False) -> tuple[Context, str]:
+def _resolve_build_credentials() -> tuple[Context, str]:
     ctx = _build_context_from_env()
-    token = ctx.api_key or (ctx.personal_access_token if allow_pat else None)
+    token = ctx.api_key
     if not token:
-        if ctx.personal_access_token and not allow_pat:
+        if ctx.personal_access_token:
             raise SandboxImageBuildError(
                 "Sandbox image SDKs require TENSORLAKE_API_KEY. "
                 "Personal access tokens are CLI-only."
@@ -469,7 +458,6 @@ def delete_sandbox_image(image_name: str) -> None:
             image_name,
             None,
             None,
-            ctx.namespace,
         )
     except SandboxImageError:
         raise
@@ -566,7 +554,6 @@ def find_sandbox_image_by_name(image_name: str) -> dict | None:
             image_name,
             None,
             None,
-            ctx.namespace,
         )
     except SandboxImageError:
         raise
@@ -612,7 +599,6 @@ def list_sandbox_images() -> list[dict]:
             token,
             None,
             None,
-            ctx.namespace,
         )
     except SandboxImageError:
         raise
@@ -696,7 +682,6 @@ def build_sandbox_image(
     build_args: dict[str, str] | None = None,
     verbose: bool = False,
     emit: EmitFn | None = None,
-    _allow_pat: bool = False,
     docker_config_json: str | None = None,
 ) -> dict:
     """Build a CAS or legacy sandbox image from an :class:`Image` or a Dockerfile path.
@@ -829,7 +814,6 @@ def build_sandbox_image(
                 cas=cas,
                 build_args=dict(build_args) if build_args else None,
                 docker_config_json=docker_config_json,
-                allow_pat=_allow_pat,
                 emit=emit,
             )
         except SandboxImageError:
@@ -851,7 +835,6 @@ def import_sandbox_image(
     cas: bool = True,
     verbose: bool = False,
     emit: EmitFn | None = None,
-    _allow_pat: bool = False,
     docker_config_json: str | None = None,
 ) -> dict:
     """Import a registry image directly into a CAS or legacy sandbox image — no Docker.
@@ -934,74 +917,6 @@ def import_sandbox_image(
             docker_compat=docker_compat,
             cas=cas,
             docker_config_json=docker_config_json,
-            allow_pat=_allow_pat,
-            emit=emit,
-        )
-    except SandboxImageError:
-        raise
-    except Exception as e:
-        raise SandboxImageBuildError(f"{type(e).__name__}: {e}") from e
-
-
-def build_sandbox_application_image(
-    image: Image,
-    *,
-    registered_name: str | None = None,
-    build_env_vars: list[tuple[str, str]] | None = None,
-    cpus: float = 2.0,
-    memory_mb: int = 4096,
-    disk_mb: int | None = None,
-    builder_disk_mb: int | None = None,
-    is_public: bool = False,
-    context_dir: str | None = None,
-    verbose: bool = False,
-    emit: EmitFn | None = None,
-    _allow_pat: bool = False,
-    docker_config_json: str | None = None,
-) -> dict:
-    """Build an Applications runtime image as a legacy sandbox image.
-
-    Unlike :func:`build_sandbox_image`, this uses the Applications Dockerfile
-    wrapper so deployed functions get the SDK runtime, default workdir, and
-    deploy-time build environment variables. Applications runtime images stay
-    legacy images while CAS is the default for sandbox images.
-    """
-    if emit is None:
-        emit = _stderr_emit if verbose else _noop_emit
-
-    if not image._base_image:
-        raise SandboxImageLoadError("Image must have a base_image to build")
-
-    effective_registered_name = registered_name or image.name
-    if effective_registered_name == _DEFAULT_IMAGE_NAME:
-        warnings.warn(
-            f"Building sandbox image with the default name {_DEFAULT_IMAGE_NAME!r}. "
-            "Pass `registered_name=...` or `Image(name=...)` to avoid collisions "
-            "with other default-named images in this project.",
-            stacklevel=2,
-        )
-
-    rust_context_dir = str(Path(context_dir or os.getcwd()).resolve())
-    rust_dockerfile_path = str(Path(rust_context_dir) / "Dockerfile")
-    dockerfile_text = dockerfile_content(image, extra_env_vars=build_env_vars)
-    if not dockerfile_text.endswith("\n"):
-        dockerfile_text += "\n"
-
-    try:
-        return _run_rust_image_create(
-            rust_dockerfile_path,
-            effective_registered_name,
-            dockerfile_text=dockerfile_text,
-            context_dir=rust_context_dir,
-            cpus=cpus,
-            memory_mb=memory_mb,
-            disk_mb=disk_mb,
-            builder_disk_mb=builder_disk_mb,
-            is_public=is_public,
-            docker_compat=False,
-            cas=False,
-            docker_config_json=docker_config_json,
-            allow_pat=_allow_pat,
             emit=emit,
         )
     except SandboxImageError:

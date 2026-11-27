@@ -1,7 +1,7 @@
 [project]
 name = "tensorlake"
-version = "0.5.165"
-description = "Tensorlake SDK for agent sandboxes and sandbox-native orchestration"
+version = "0.6.0"
+description = "Tensorlake SDK for agent sandboxes"
 readme = "README.md"
 authors = [{ name = "Tensorlake Inc.", email = "support@tensorlake.ai" }]
 requires-python = ">=3.10"
@@ -15,8 +15,6 @@ dependencies = [
     "websocket-client>=1.8.0,<2.0",
     "websockets>=14.0,<18.0",
     "pydantic>=2.0,<3.0",
-    "grpcio>=1.76.0,<2.0.0",
-    "protobuf>=6.31.1,<7.0.0",
 ]
 
 [project.urls]
@@ -26,11 +24,6 @@ Repository = "https://github.com/tensorlakeai/tensorlake"
 [build-system]
 requires = ["maturin>=1.9,<2.0"]
 build-backend = "maturin"
-
-[project.scripts]
-function-executor = "tensorlake.function_executor.main:main"
-tensorlake-python-function-runner = "tensorlake.function_agent.runner:main"
-tensorlake-deploy = "tensorlake.cli.deploy:deploy_entrypoint"
 
 [tool.maturin]
 bindings = "pyo3"
@@ -45,30 +38,20 @@ include = [
 target-version = ["py310"]
 extend-exclude = '''
 /(
-  vendor
-  | crates
+  crates
 )/
 '''
 
 [tool.isort]
 profile = "black"
-extend_skip = ["vendor", "crates"]
+extend_skip = ["crates"]
+skip_gitignore = true
 
 [tool.poetry.group.dev.dependencies]
 black = "26.10.1"
 parameterized = "^0.9.0"
 respx = "^0.22.0"
-psutil = "^7.2.2"
 isort = "^8.0.0"
 # Patched virtualenv/filelock tooling requires Python 3.11; runtime still supports 3.10.
 pre-commit = { version = "^4.5.1", python = ">=3.11" }
-# grpcio is forward compatible within the major version. The minimum version
-# must match GRPC_GENERATED_VERSION in the committed proto stubs so that
-# `make build_proto` regenerates stubs that are compatible with what users
-# install at runtime (>=1.76.0 per the runtime dependency).
-grpcio = "^1.76.0"
-# Keep code generation reproducible and aligned with the runtime minimum.
-grpcio-tools = "1.76.0"
-protobuf = "^6.31.1"
-setuptools = ">=84.1.0"
 maturin = ">=1.9,<2.0"

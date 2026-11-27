@@ -121,10 +121,10 @@ describe("native worker boundary", () => {
       await worker.terminate();
     }
   });
-  it("preserves custom worker URL callbacks used by runtime capsules", async () => {
+  it("preserves custom worker URL callbacks", async () => {
     const resolve = vi.fn(() => pathToFileURL(workerPath));
     const binding = createWorkerBinding(new NativeWorkerClient(resolve));
-    const proxy = new binding.NativeSandboxProxyClient("http://localhost", "capsule");
+    const proxy = new binding.NativeSandboxProxyClient("http://localhost", "custom");
     expect(resolve).not.toHaveBeenCalled();
     expect((await health(proxy)).threadId).toBeGreaterThan(0);
     expect(resolve).toHaveBeenCalledOnce();

@@ -5,8 +5,8 @@ import { fileURLToPath } from "node:url";
 // Staged native packages are not public until a maintainer approves them, so
 // `npm install --package-lock-only` cannot read their checksums from the
 // registry. Release CI stages the exact tarballs it packed and records their
-// integrity; this writes those checksums into package-lock.json so the
-// function runner capsule's shrinkwrap pins the artifacts being released.
+// integrity; this writes those checksums into package-lock.json so it
+// pins the artifacts being released.
 const [recordsDirectory] = process.argv.slice(2);
 if (!recordsDirectory) {
   throw new Error("usage: lock-native-integrity.mjs <records-directory>");

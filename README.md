@@ -3,7 +3,7 @@
 
 </h1>
 
-<p align="center">Build agents with sandboxes and serverless orchestration runtime</p>
+<p align="center">Build agents with sandboxes</p>
 <div align="center">
 
 
@@ -15,11 +15,9 @@
 
 </div>
 
-Tensorlake is a compute infrastructure platform for building agentic applications with sandboxes.
+Tensorlake is a compute infrastructure platform for building agents with sandboxes.
 
 The Sandbox API creates MicroVM sandboxes which you can use to run agents, or use them as an isolated environment for running tools or LLM generated code.
-
-In addition to stateful VMs, you can also add long running orchestration capabilities to Agents using a serverless function runtime with fan-out capabilities.
 
 ## Sandboxes
 
@@ -238,7 +236,6 @@ tl sbx image create --no-cas -n app ./Dockerfile   # legacy image
   matched exactly as given.
 - **Base images.** A CAS image build can use CAS images and registry images as a
   base, but not legacy images: rebuild a legacy base image as a CAS image first.
-- Application images built by `tensorlake deploy` stay legacy images.
 
 ### Registry credentials for image builds and imports
 
@@ -276,18 +273,12 @@ Credential helpers (`credHelpers` and `credsStore`) run locally using the captur
 configuration; only resolved registry credentials are forwarded to the builder.
 Both CAS and legacy image builds use this behavior.
 
-The CLI captures Docker configuration immediately after parsing a build/import or
-deploy command, before authentication and application loading. It looks for
+The CLI captures Docker configuration immediately after parsing a build/import
+command, before authentication. It looks for
 `$DOCKER_CONFIG/config.json`, then `~/.docker/config.json`, and passes the captured
 contents to every image operation in that invocation. A missing config supplies
 an explicit empty document. Credential changes during a running invocation do not
 cause the CLI to reread the config file.
-
-Python deployers that advertise pipe support receive this snapshot through a
-dedicated anonymous pipe before loading application code. Credentials are never
-written to temporary files, command-line arguments, or environment variables, and
-stdin remains available to the application. Older protocol-v1 deployers continue
-using their existing Docker-config discovery behavior.
 
 Rust callers must now supply the additional `Option<String>` argument:
 `build_sandbox_image(options, docker_config_json, emit)` and
@@ -539,93 +530,6 @@ when the object store cannot honor the signed range.
 Deleting a snapshot releases that retention root, while bytes still reachable from a live head,
 another snapshot, a fork, or a mount remain durable.
 
----
-
-## Orchestrate
-
-Create orchestration APIs on a distributed runtime with automatic scaling, fan-out capabilities and built-in tracking. The orchestration APIs can be invoked using HTTP requests or using the Python SDK.
-
-### Quickstart
-
-Decorate your entrypoint with `@application()` and functions with `@function()`. Each function runs in its own isolated sandbox.
-
-**Example**: City guide using OpenAI Agents with web search and code execution:
-
-```python
-from agents import Agent, Runner
-from agents.tool import WebSearchTool, function_tool
-from tensorlake.applications import application, function, Image
-
-# Define the image with necessary dependencies
-FUNCTION_CONTAINER_IMAGE = Image(base_image="python:3.11-slim", name="city_guide_image").run(
-    "pip install openai openai-agents"
-)
-
-@function_tool
-@function(
-    description="Gets the weather for a city using an OpenAI Agent with web search",
-    secrets=["OPENAI_API_KEY"],
-    image=FUNCTION_CONTAINER_IMAGE,
-)
-def get_weather_tool(city: str) -> str:
-    """Uses an OpenAI Agent with WebSearchTool to find current weather."""
-    agent = Agent(
-        name="Weather Reporter",
-        instructions="Use web search to find current weather in Fahrenheit for the city.",
-        tools=[WebSearchTool()],  # Agent can search the web
-    )
-    result = Runner.run_sync(agent, f"City: {city}")
-    return result.final_output.strip()
-
-@application(tags={"type": "example", "use_case": "city_guide"})
-@function(
-    description="Creates a guide with temperature conversion using function_tool",
-    secrets=["OPENAI_API_KEY"],
-    image=FUNCTION_CONTAINER_IMAGE,
-)
-def city_guide_app(city: str) -> str:
-    """Uses an OpenAI Agent with function_tool to run Python code for conversion."""
-
-    @function_tool
-    def convert_to_celsius_tool(python_code: str) -> float:
-        """Converts Fahrenheit to Celsius - runs as Python code via Agent."""
-        return float(eval(python_code))
-
-    agent = Agent(
-        name="Guide Creator",
-        instructions="Using the appropriate tools, get the weather for the purposes of the guide. If the city uses Celsius, call convert_to_celsius_tool to convert the temperature, passing in the code needed to convert the temperature to Celsius. Create a friendly guide that references the temperature of the city in Celsius if the city typically uses Celsius, otherwise reference the temperature in Fahrenheit. Only reference Celsius or Fahrenheit, not both.",
-        tools=[get_weather_tool, convert_to_celsius_tool],  # Agent can execute this Python function
-    )
-    result = Runner.run_sync(agent, f"City: {city}")
-    return result.final_output.strip()
-```
-
-#### Deploy to Tensorlake
-
-1. Set your API keys:
-```bash
-export TENSORLAKE_API_KEY="your-api-key"
-tl secrets set OPENAI_API_KEY "your-openai-key"
-```
-
-2. Deploy:
-```bash
-tl deploy examples/readme_example/city_guide.py
-```
-
-`tl deploy` builds a version-scoped runtime image for every function and stores
-its registered sandbox-template name in the application manifest. The image
-contains the dependencies declared by `Image`, the language runner, and the native
-function-agent core. Application source remains a separate ZIP that is uploaded
-with the manifest; it is not copied into the runtime image. Reusing an
-application version with different code or configuration is rejected; an
-identical redeploy is idempotent.
-Image and application requests normally route through `TENSORLAKE_API_URL` so
-ingress can authenticate them and attach trusted project identity. Application
-deployment, invocation, output, listing, and inspection all use that same
-origin. Trusted split local installations can set `TENSORLAKE_IMAGE_SERVICE_URL`
-and `TENSORLAKE_FUNCTION_SERVICE_URL` independently.
-
 Sandbox create, list, snapshot and pool requests go to the sandbox API, which
 is derived from `TENSORLAKE_API_URL` (`api.tensorlake.ai` becomes
 `sandbox.tensorlake.ai`). Set `TENSORLAKE_SANDBOX_API_URL` to an absolute
@@ -636,33 +540,12 @@ TypeScript SDK all honor it; `tl whoami --output json` shows the resolved value
 as `sandboxApi`. `TENSORLAKE_SANDBOX_PROXY_URL` is different: it only affects
 per-sandbox connections when the server did not return a sandbox URL.
 
-#### Call via HTTP
-
-```bash
-# Invoke the application
-curl https://api.tensorlake.ai/applications/city_guide_app \
-  -H "Authorization: Bearer $TENSORLAKE_API_KEY" \
-  --json '"San Francisco"'
-# Returns: {"request_id": "beae8736ece31ef9"}
-
-# Get the result
-curl https://api.tensorlake.ai/applications/city_guide_app/requests/{request_id}/output \
-  -H "Authorization: Bearer $TENSORLAKE_API_KEY"
-
-# Stream results with SSE
-curl https://api.tensorlake.ai/applications/city_guide_app \
-  -H "Authorization: Bearer $TENSORLAKE_API_KEY" \
-  -H "Accept: text/event-stream" \
-  --json '"San Francisco"'
-
-```
-
 ---
 
 ## FAQ
 
 **What is Tensorlake?**
-Tensorlake is the sandbox-native cloud for AI agents — a compute platform for securely running untrusted, LLM-generated code in isolated sandboxes and orchestrating agentic applications at scale.
+Tensorlake is the sandbox-native cloud for AI agents — a compute platform for securely running untrusted, LLM-generated code in isolated sandboxes at scale.
 
 **How do I run untrusted or LLM-generated code safely?**
 Each Tensorlake sandbox provides an isolated environment for running untrusted or LLM-generated code. Create a CPU-only CAS or GPU CAS sandbox with the Python or TypeScript SDK, or the CLI, in a few lines.
@@ -680,7 +563,7 @@ Sandboxes are created in under a second via Lattice, a dynamic cluster scheduler
 Spin up a sandbox as an isolated execution environment for an agent's tools or generated code, run commands or processes inside it, read and write files, and terminate it when done — all from the Python or TypeScript SDK, or the CLI.
 
 **What languages and interfaces are supported?**
-Tensorlake provides a Python SDK, a TypeScript SDK, and a standalone CLI (`tl`), plus an HTTP API for invoking orchestration applications.
+Tensorlake provides a Python SDK, a TypeScript SDK, and a standalone CLI (`tl`).
 
 **How do I get started?**
 Sign up at [cloud.tensorlake.ai](https://cloud.tensorlake.ai/), run `pip install tensorlake` for the Python SDK, install the CLI with `curl -fsSL https://tensorlake.ai/install | sh`, set your `TENSORLAKE_API_KEY`, and create your first sandbox. See the [documentation](https://docs.tensorlake.ai) for full guides.
@@ -688,7 +571,6 @@ Sign up at [cloud.tensorlake.ai](https://cloud.tensorlake.ai/), run `pip install
 ## Learn More
 
 * [Sandbox Documentation](https://docs.tensorlake.ai/sandboxes/introduction)
-* [Orchestrate Documentation](https://docs.tensorlake.ai/applications/quickstart)
 * [`tl git mount` repository and subtree workflow](docs/git-mount.md)
 
 ### GPU model names

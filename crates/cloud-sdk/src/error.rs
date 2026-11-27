@@ -6,11 +6,6 @@
 
 use thiserror::Error;
 
-use crate::{
-    applications::error::ApplicationsError, images::error::ImagesError,
-    secrets::error::SecretsError,
-};
-
 /// The main error type for the Tensorlake Cloud SDK.
 ///
 /// This enum encompasses all possible errors that can occur when using the SDK,
@@ -25,9 +20,6 @@ pub enum SdkError {
     /// A resize failed or could not be observed to completion.
     #[error(transparent)]
     SandboxResize(#[from] Box<crate::sandboxes::resize::SandboxResizeError>),
-    /// Errors specific to the Applications client
-    #[error(transparent)]
-    Applications(#[from] ApplicationsError),
 
     /// Authentication error (HTTP 401)
     #[error("Authentication failed: {0}")]
@@ -44,10 +36,6 @@ pub enum SdkError {
     /// Reqwest middleware errors
     #[error(transparent)]
     Middleware(#[from] reqwest_middleware::Error),
-
-    /// Errors specific to the Images client
-    #[error(transparent)]
-    Images(#[from] ImagesError),
 
     /// Invalid header value during client initialization
     #[error("Invalid header value: {0}")]
@@ -68,10 +56,6 @@ pub enum SdkError {
     /// JSON serialization/deserialization errors
     #[error(transparent)]
     JsonWithError(#[from] serde_path_to_error::Error<serde_json::Error>),
-
-    /// Errors specific to the Secrets client
-    #[error(transparent)]
-    Secrets(#[from] SecretsError),
 
     /// Server returned an error status
     #[error("Server error: {status} - {message}")]

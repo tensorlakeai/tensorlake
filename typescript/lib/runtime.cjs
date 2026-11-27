@@ -3,7 +3,6 @@
 const { detectLinuxLibc } = require("./libc.cjs");
 const fs = require("node:fs");
 const path = require("node:path");
-const { spawnSync } = require("node:child_process");
 
 const NATIVE_PACKAGES = {
   "darwin-arm64": "@tensorlakeai/native-darwin-arm64",
@@ -95,61 +94,9 @@ function loadNative() {
   return require(packageEntry);
 }
 
-function exitWithSpawnResult(result) {
-  if (result.error) {
-    console.error(result.error.message);
-    process.exit(1);
-  }
-  process.exit(result.status ?? 1);
-}
-
-function findPython() {
-  const candidates =
-    process.platform === "win32"
-      ? [
-          { command: "py", prefix: ["-3"] },
-          { command: "python", prefix: [] },
-        ]
-      : [
-          { command: "python3", prefix: [] },
-          { command: "python", prefix: [] },
-        ];
-
-  for (const candidate of candidates) {
-    const probe = spawnSync(candidate.command, [...candidate.prefix, "--version"], {
-      stdio: "ignore",
-      env: process.env,
-    });
-    if (!probe.error && probe.status === 0) {
-      return candidate;
-    }
-  }
-
-  return null;
-}
-
-function runPythonModule(moduleName, helpText) {
-  const python = findPython();
-  if (!python) {
-    console.error(helpText);
-    process.exit(1);
-  }
-
-  const result = spawnSync(
-    python.command,
-    [...python.prefix, "-m", moduleName, ...process.argv.slice(2)],
-    {
-      stdio: "inherit",
-      env: process.env,
-    },
-  );
-  exitWithSpawnResult(result);
-}
-
 module.exports = {
   loadNative,
   nativeTargetId,
   nativeBindingPath,
   nativePackageName,
-  runPythonModule,
 };

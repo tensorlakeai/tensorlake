@@ -1,35 +1,22 @@
-WITH_FUNCTION_AGENT_CORE=./scripts/with_function_agent_core.sh
-
 all: build
-
-# Validate the exact CI source pin and locked graph without compiling the SDK.
-.PHONY: check_function_agent_source_parity
-check_function_agent_source_parity:
-	@$(WITH_FUNCTION_AGENT_CORE) sh -c 'test "$$(cat .function-agent-core-staged)" = "$$(cat crates/function-agent-core/CEI_REVISION)" && $(CARGO) metadata --locked --format-version 1 >/dev/null'
 
 build:
 	@rm -rf dist
-	@$(WITH_FUNCTION_AGENT_CORE) poetry install --with=dev
+	@poetry install --with=dev
 	@$(MAKE) build_cloud_sdk
-	@$(WITH_FUNCTION_AGENT_CORE) poetry build --format wheel
-	@cp tensorlake.data/scripts/* $$(poetry env info --path)/bin/ 2>/dev/null || true
+	@poetry build --format wheel
 
 # Local development install: builds the Rust Cloud SDK extension and installs the
-# Python SDK into the active Poetry virtualenv so helper scripts such as
-# `tensorlake-deploy`, `function-executor`, and the Function Service runner are on PATH.
-# Note: proto stubs are pre-generated and committed; run `make build_proto`
-# separately only when you change .proto files.
+# Python SDK into the active Poetry virtualenv.
 install-dev:
-	@$(WITH_FUNCTION_AGENT_CORE) poetry install --with=dev
-	@$(WITH_FUNCTION_AGENT_CORE) poetry run maturin develop
-	@cp tensorlake.data/scripts/* $$(poetry env info --path)/bin/
+	@poetry install --with=dev
+	@poetry run maturin develop
 	@echo "Done. Activate the venv with 'poetry shell' or prefix commands with 'poetry run'."
 
 # Same as install-dev but compiles the Rust Cloud SDK extension with optimisations.
 install-dev-release:
-	@$(WITH_FUNCTION_AGENT_CORE) poetry install --with=dev
-	@$(WITH_FUNCTION_AGENT_CORE) poetry run maturin develop --release
-	@cp tensorlake.data/scripts/* $$(poetry env info --path)/bin/
+	@poetry install --with=dev
+	@poetry run maturin develop --release
 	@echo "Done. Activate the venv with 'poetry shell' or prefix commands with 'poetry run'."
 
 # Global install: builds the Python SDK wheel with the Rust Cloud SDK extension
@@ -37,35 +24,15 @@ install-dev-release:
 # After running, ensure ~/.local/bin is on your PATH.
 install-global:
 	@rm -rf dist
-	@$(WITH_FUNCTION_AGENT_CORE) poetry run maturin build --release --out dist
+	@poetry run maturin build --release --out dist
 	@pip3 install --user --break-system-packages --force-reinstall dist/tensorlake-*.whl
 	@echo "Done. Make sure ~/.local/bin is on your PATH."
 	@echo "  fish: fish_add_path ~/.local/bin"
 	@echo "  bash/zsh: export PATH=\"\$$HOME/.local/bin:\$$PATH\""
 
-# Function Executor protocol sources are shared by the Python and TypeScript
-# runtimes. Python bindings remain generated inside the Python package.
-PROTO_SOURCE_ROOT=proto
-PROTO_PACKAGE_PATH=tensorlake/function_executor/proto
-PROTO_SOURCE_DIR=${PROTO_SOURCE_ROOT}/${PROTO_PACKAGE_PATH}
-PROTO_GENERATED_DIR=src/${PROTO_PACKAGE_PATH}
-
-build_proto:
-	@poetry install --no-root
-	@poetry run python -m grpc_tools.protoc \
-		--proto_path=${PROTO_SOURCE_ROOT} \
-		--python_out=src \
-		--pyi_out=src \
-		--grpc_python_out=src \
-		${PROTO_SOURCE_DIR}/status.proto \
-		${PROTO_SOURCE_DIR}/function_executor.proto
-	@#The generated proto files don't pass linter checks and need to get reformatted.
-	@poetry run black ${PROTO_GENERATED_DIR}
-	@poetry run isort ${PROTO_GENERATED_DIR} --profile black
-
 # Build the Rust Cloud SDK PyO3 extension and install it as tensorlake._cloud_sdk
 build_cloud_sdk:
-	@$(WITH_FUNCTION_AGENT_CORE) poetry run maturin develop
+	@poetry run maturin develop
 
 # Legacy alias
 build_rust_py_client: build_cloud_sdk
@@ -85,29 +52,22 @@ test_sandbox:
 	@$(MAKE) build_cloud_sdk
 	cd tests/sandbox && poetry run python test_lifecycle.py -v
 
-# Launches both real function executors and drives the shared gRPC allocation
-# parity matrix through bindings generated from the shared protocol source.
-test_function_executor_compatibility:
-	@npm --prefix typescript run check:proto
-	@npm --prefix typescript run build:sdk
-	@PYTHONPATH=src poetry run python tests/function_executor_compatibility/run.py
-
 # Replicates the PyPI publish workflow locally: builds the tensorlake wheel with
 # the _cloud_sdk Rust extension, then installs into a temporary venv and verifies
 # imports and package scripts — all without touching PyPI.
 build_release:
 	@rm -rf dist
 	@echo "--- Building tensorlake wheel ---"
-	@$(WITH_FUNCTION_AGENT_CORE) poetry run maturin build --release --out dist
+	@poetry run maturin build --release --out dist
 	@echo "--- Verifying wheel in a clean venv ---"
-	@poetry run python .github/scripts/verify_wheel.py "dist/tensorlake-*.whl" tensorlake._cloud_sdk tensorlake.cli.deploy --expect-script function-executor --expect-script tensorlake-python-function-runner --expect-script tensorlake-deploy --reject-script tl --reject-script tensorlake
+	@poetry run python .github/scripts/verify_wheel.py "dist/tensorlake-*.whl" tensorlake._cloud_sdk --reject-script tl --reject-script tensorlake
 	@echo "--- Done. Wheel is in dist/ ---"
 
 bump_version:
 	@test -n "$(VERSION)" || (echo "Usage: make bump_version VERSION=x.y.z" && exit 1)
 	@python3 .github/scripts/bump_version.py "$(VERSION)"
 
-.PHONY: all build build_proto build_cloud_sdk build_rust_py_client fmt check test test_sandbox test_function_executor_compatibility install-dev install-dev-release install-global build_release bump_version fs-posix-conformance
+.PHONY: all build build_cloud_sdk build_rust_py_client fmt check test test_sandbox install-dev install-dev-release install-global build_release bump_version fs-posix-conformance
 
 # POSIX conformance for `tl fs mount` (Linux + FUSE + working credentials). Runs the ported
 # issue-#24 battery against a real mounted workspace, in fresh and snapshot-reattached phases.
@@ -121,8 +81,8 @@ PYTHON ?= poetry run python
 .PHONY: test_filesystem_placement test_filesystem_placement_wrappers
 
 test_filesystem_placement:
-	@$(WITH_FUNCTION_AGENT_CORE) $(CARGO) test -p tensorlake --lib filesystem_region_
-	@$(WITH_FUNCTION_AGENT_CORE) $(CARGO) clippy -p tensorlake -p tensorlake-rust-cloud-sdk-py -p tensorlake-rust-cloud-sdk-node --all-targets --no-deps -- -D warnings
+	@$(CARGO) test -p tensorlake --lib filesystem_region_
+	@$(CARGO) clippy -p tensorlake -p tensorlake-rust-cloud-sdk-py -p tensorlake-rust-cloud-sdk-node --all-targets --no-deps -- -D warnings
 
 test_filesystem_placement_wrappers:
 	PYTHONPATH=src $(PYTHON) -m unittest discover -s tests/filesystem -p 'test_filesystem_unit.py'
@@ -133,8 +93,8 @@ test_filesystem_placement_wrappers:
 # Socket-free wire checks complement the full placement retry/transport gate above.
 .PHONY: test_filesystem_placement_unit
 test_filesystem_placement_unit:
-	@$(WITH_FUNCTION_AGENT_CORE) $(CARGO) test -p tensorlake --lib artifact_storage::models::placement_tests
-	@$(WITH_FUNCTION_AGENT_CORE) $(CARGO) clippy -p tensorlake -p tensorlake-rust-cloud-sdk-py -p tensorlake-rust-cloud-sdk-node --all-targets --no-deps -- -D warnings
+	@$(CARGO) test -p tensorlake --lib artifact_storage::models::placement_tests
+	@$(CARGO) clippy -p tensorlake -p tensorlake-rust-cloud-sdk-py -p tensorlake-rust-cloud-sdk-node --all-targets --no-deps -- -D warnings
 
 # In-process wrapper checks; the full wrapper target retains the socket integration suite.
 .PHONY: test_filesystem_placement_wrapper_unit

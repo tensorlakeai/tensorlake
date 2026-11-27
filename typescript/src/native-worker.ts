@@ -60,7 +60,7 @@ port.on("message", (message: WorkerRequest) => {
     return;
   }
   if (message.type === "release") {
-    // Cloud clients own cancellation for buffered requests as well as streams.
+    // Native clients own cancellation for buffered requests as well as streams.
     handles.get(message.handleId)?.value?.close?.();
     handles.delete(message.handleId);
     for (const stream of streams.values()) {

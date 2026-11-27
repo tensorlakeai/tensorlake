@@ -59,41 +59,21 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
    cd tensorlake
    ```
 
-2. **Choose your development scope**
-
-   **Public-source changes:** install development dependencies without building the private native
-   Function Agent core:
+2. **Install development dependencies**
 
    ```bash
-   poetry install --no-root --with=dev
+   make install-dev     # or: make install-global
    make check
    npm --prefix typescript ci
    npm --prefix typescript test
    ```
 
-   **Native SDK and Function Agent changes:** check out
-   `tensorlakeai/compute-engine-internal` as a sibling (internal access required), then choose a
-   global or Poetry-managed install:
-
-   ```bash
-   cd ..
-   git clone git@github.com:tensorlakeai/compute-engine-internal.git
-   cd tensorlake
-   make install-global  # or: make install-dev
-   ```
-
-   These commands stage the canonical CEI core and function-specific native bindings only for the
-   build, then restore Tensorlake's fail-closed placeholders. Set
-   `COMPUTE_ENGINE_INTERNAL_DIR` if the repositories are not siblings. End users should install a
-   published wheel with `pip install tensorlake`; official releases do not publish a Python source
-   distribution.
-
-   > **Note:** The shared function-executor protocol sources live under `proto/`. Python gRPC stubs are pre-generated and committed to the repository; run `make build_proto` after modifying the shared `.proto` files. The TypeScript SDK packages the same sources into its function-executor capsule during `npm run build:sdk`.
+   End users should install a published wheel with `pip install tensorlake`; official releases do
+   not publish a Python source distribution.
 
 3. **Verify a native installation**
    ```bash
    python -c "import tensorlake; import tensorlake._cloud_sdk"
-   function-executor --help
    ```
 
    To work on the standalone Rust CLI locally, run `just build-cli` or
@@ -104,14 +84,16 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 tensorlake/
 ├── src/tensorlake/              # Python SDK source
-│   ├── applications/            # Serverless applications SDK
-│   ├── cli/                     # Python CLI entry points (NDJSON producers)
-│   └── function_executor/       # gRPC function executor server
+│   ├── cli/                     # Shared auth Context helper
+│   ├── filesystem/              # Filesystem SDK
+│   ├── image/                   # Sandbox image SDK
+│   └── sandbox/                 # Sandbox SDK
 ├── crates/
 │   ├── cli/                     # Rust CLI binary (tl / tensorlake)
 │   ├── cloud-sdk/               # Rust cloud SDK
-│   └── function-agent-core/     # Private CEI source placeholder and immutable revision
-├── tensorlake.data/scripts/     # Python wrapper scripts installed alongside the CLI
+│   ├── rust-cloud-sdk-node/     # Node.js native binding
+│   └── rust-cloud-sdk-py/       # Python native binding
+├── typescript/                  # TypeScript SDK
 ├── tests/                       # Test suite
 ├── Makefile                     # Build and development commands
 ├── pyproject.toml               # Python SDK configuration (maturin Cloud SDK backend)
@@ -120,16 +102,7 @@ tensorlake/
 
 ### How the CLI Works
 
-The CLI is a **Rust binary** (`tl` / `tensorlake`) that delegates work to **Python wrapper scripts** for commands that need to import user application code. This split allows the Rust binary to handle argument parsing, authentication, and output rendering, while Python handles SDK logic.
-
-For example, `tl deploy app.py` spawns `tensorlake-deploy app.py`, reads its NDJSON output on stdout, and renders it as human-readable text.
-
-Wrapper scripts live in `tensorlake.data/scripts/` for local development and are also exposed as Python package entry points. They must be on `PATH` (alongside the standalone Rust binary) for the affected CLI commands to work.
-
-| Rust command | Spawns wrapper script |
-|---|---|
-| `tl deploy` | `tensorlake-deploy` |
-| `tl generate-dockerfiles` | `tensorlake-generate-dockerfiles` |
+The CLI is a standalone **Rust binary** (`tl` / `tensorlake`). It handles argument parsing, authentication, API calls, and output rendering itself; it does not spawn Python wrapper scripts.
 
 `tl sbx image create` is handled directly by the Rust CLI. Programmatic SDK image builds should go through the language-native `Image` DSL APIs rather than passing raw Dockerfile paths into the Python or TypeScript packages.
 
@@ -145,11 +118,9 @@ make install-dev
 # Same as install-dev but with release optimisations
 make install-dev-release
 
-# Build a distributable wheel with the sibling CEI Function Agent core
+# Build a distributable wheel
 make build
 
-# Regenerate gRPC stubs from .proto files
-make build_proto
 
 # Format Python code (Black + isort)
 make fmt

@@ -1,6 +1,6 @@
 {
   "name": "tensorlake",
-  "version": "0.5.165",
+  "version": "0.6.0",
   "description": "Compatibility package that re-exports @tensorlakeai/tensorlake. New projects should depend on @tensorlakeai/tensorlake directly.",
   "type": "module",
   "main": "./index.cjs",
@@ -16,27 +16,13 @@
         "types": "./index.d.cts",
         "default": "./index.cjs"
       }
-    },
-    "./applications": {
-      "import": {
-        "types": "./applications.d.ts",
-        "default": "./applications.js"
-      },
-      "require": {
-        "types": "./applications.d.cts",
-        "default": "./applications.cjs"
-      }
     }
   },
   "files": [
     "index.js",
     "index.cjs",
     "index.d.ts",
-    "index.d.cts",
-    "applications.js",
-    "applications.cjs",
-    "applications.d.ts",
-    "applications.d.cts"
+    "index.d.cts"
   ],
   "engines": {
     "node": ">=22.0.0"
@@ -45,8 +31,7 @@
     "tensorlake",
     "sandbox",
     "cloud",
-    "sdk",
-    "applications"
+    "sdk"
   ],
   "repository": {
     "type": "git",
@@ -55,7 +40,7 @@
   },
   "license": "Apache-2.0",
   "dependencies": {
-    "@tensorlakeai/tensorlake": "0.5.165"
+    "@tensorlakeai/tensorlake": "0.6.0"
   },
   "publishConfig": {
     "access": "public"

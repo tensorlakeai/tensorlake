@@ -8,7 +8,6 @@ from unittest.mock import ANY, patch
 
 from tensorlake.image import Image
 from tensorlake.image import sandbox_builder as sbm
-from tensorlake.image.utils import dockerfile_content
 
 BUILD_CPUS = 2.0
 BUILD_MEMORY_MB = 4096
@@ -69,8 +68,6 @@ class TestDockerConfigContents(unittest.TestCase):
                     name="test-image", base_image="registry.example.com/app:latest"
                 )
                 image.build(docker_config_json=config)
-                self.assertEqual(build.call_args.kwargs["docker_config_json"], config)
-                sbm.build_sandbox_application_image(image, docker_config_json=config)
                 self.assertEqual(build.call_args.kwargs["docker_config_json"], config)
                 sbm.import_sandbox_image(
                     "registry.example.com/app:latest", docker_config_json=config
@@ -135,28 +132,18 @@ class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
             docker_config_json=None,
         )
 
-    def test_private_cli_path_allows_pat_and_forwards_explicit_scope(self):
-        ctx = _make_ctx(
-            api_key=None,
-            personal_access_token="tl_pat_test",
-            organization_id="org_cli",
-            project_id="proj_cli",
-        )
+    def test_pat_is_cli_only(self):
+        ctx = _make_ctx(api_key=None, personal_access_token="tl_pat_test")
 
         with tempfile.TemporaryDirectory() as tmpdir:
             dockerfile_path = Path(tmpdir) / "Dockerfile"
             dockerfile_path.write_text("FROM python:3.12-slim\n", encoding="utf-8")
             build_ctx, rust_builder = _make_build_patches(ctx)
             with build_ctx, rust_builder as rust_builder_mock:
-                sbm.build_sandbox_image(
-                    str(dockerfile_path),
-                    _allow_pat=True,
-                )
+                with self.assertRaisesRegex(sbm.SandboxImageBuildError, "CLI-only"):
+                    sbm.build_sandbox_image(str(dockerfile_path))
 
-        args = rust_builder_mock.call_args.args
-        self.assertEqual(args[1], "tl_pat_test")
-        self.assertEqual(args[9:11], ("org_cli", "proj_cli"))
-        self.assertIs(args[12], True)
+        rust_builder_mock.assert_not_called()
 
 
 class TestBuildSandboxImageFromDockerfileOptions(unittest.TestCase):
@@ -463,7 +450,6 @@ class TestDeleteSandboxImage(unittest.TestCase):
             "tensorlake/test:1",
             None,
             None,
-            "default",
         )
         self.assertEqual(caught, [])
 
@@ -580,7 +566,6 @@ class TestFindSandboxImageByName(unittest.TestCase):
             "tensorlake/test:1",
             None,
             None,
-            "default",
         )
 
     def test_returns_none_when_not_found(self):
@@ -616,7 +601,6 @@ class TestFindSandboxImageByName(unittest.TestCase):
             "image",
             None,
             None,
-            "default",
         )
 
     def test_pat_requires_org_and_project_context(self):
@@ -679,7 +663,6 @@ class TestListSandboxImages(unittest.TestCase):
             "tl_apiKey_abc",
             None,
             None,
-            "default",
         )
 
     def test_returns_empty_list_when_no_images(self):
@@ -714,7 +697,6 @@ class TestListSandboxImages(unittest.TestCase):
             "tl_apiKey_abc",
             None,
             None,
-            "default",
         )
 
     def test_pat_requires_org_and_project_context(self):
@@ -1020,80 +1002,6 @@ class TestBuildSandboxImageFromImage(unittest.TestCase):
     def test_rejects_unknown_source_type(self):
         with self.assertRaises(TypeError):
             sbm.build_sandbox_image(12345)  # type: ignore[arg-type]
-
-
-class TestBuildSandboxApplicationImage(unittest.TestCase):
-    def test_function_image_build_checks_function_executor_on_path(self):
-        ctx = _make_ctx()
-        image = Image(name="function-image", base_image="python:3.12-slim").run(
-            "python3 -m pip uninstall -y tensorlake || true"
-        )
-        build_ctx, rust_builder = _make_build_patches(ctx)
-        captured: dict[str, object] = {}
-
-        with build_ctx, rust_builder as rust_builder_mock:
-
-            def fake_rust_builder(*args, **_kwargs):
-                captured["dockerfile_text"] = args[15]
-                return '{"id":"tpl-1","snapshot_id":"snap-1"}'
-
-            rust_builder_mock.side_effect = fake_rust_builder
-            sbm.build_sandbox_application_image(
-                image,
-                cpus=BUILD_CPUS,
-                memory_mb=BUILD_MEMORY_MB,
-            )
-
-        self.assertIs(rust_builder_mock.call_args.kwargs["cas"], False)
-
-        dockerfile_text = captured["dockerfile_text"]
-        self.assertIsInstance(dockerfile_text, str)
-        dockerfile_lines = dockerfile_text.rstrip().splitlines()
-        self.assertEqual(dockerfile_lines[-2], "USER root")
-        install_line = dockerfile_lines[-1]
-        self.assertIn(
-            "--force-reinstall --no-cache-dir tensorlake==",
-            install_line,
-        )
-        self.assertNotIn("--prefix=/usr/local", install_line)
-        self.assertNotIn("sudo", install_line)
-        self.assertNotIn("id -u", install_line)
-        self.assertIn("RUN PIP_USER=false python3 -m pip install", install_line)
-        self.assertTrue(
-            install_line.endswith(
-                "&& test -x /usr/local/bin/tensorlake-python-function-runner "
-                "&& python3 -c 'from tensorlake._cloud_sdk import FunctionAgentCore'"
-            ),
-            install_line,
-        )
-
-
-class TestApplicationDockerfileContent(unittest.TestCase):
-    def test_default_image_uses_python_314_trixie_base(self):
-        dockerfile = dockerfile_content(Image(name="default-base"))
-        self.assertTrue(dockerfile.startswith("FROM python:3.14-trixie\n"))
-
-    def test_sdk_install_uses_python3_module_pip(self):
-        dockerfile = dockerfile_content(Image(name="install-command"))
-        self.assertIn(
-            "python3 -m pip install --break-system-packages "
-            "--force-reinstall --no-cache-dir tensorlake==",
-            dockerfile,
-        )
-        self.assertNotIn("--prefix=/usr/local", dockerfile)
-        self.assertIn(
-            "\nUSER root\nRUN PIP_USER=false python3 -m pip install", dockerfile
-        )
-        self.assertNotIn("sudo", dockerfile)
-        self.assertNotIn("id -u", dockerfile)
-        self.assertIn(
-            "&& test -x /usr/local/bin/tensorlake-python-function-runner",
-            dockerfile,
-        )
-        self.assertIn(
-            "python3 -c 'from tensorlake._cloud_sdk import FunctionAgentCore'",
-            dockerfile,
-        )
 
 
 if __name__ == "__main__":

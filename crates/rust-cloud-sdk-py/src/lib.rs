@@ -4,8 +4,6 @@
 #![allow(clippy::useless_conversion)]
 #![allow(clippy::too_many_arguments)]
 
-#[cfg(feature = "function-agent")]
-mod function_agent;
 mod tunnel;
 
 use std::future::Future;
@@ -34,8 +32,6 @@ use tensorlake::image_builds::{
     CancelBuildSelector, ImageBuildClient, ImageBuildClientOptions, ImageBuildError,
     ImageBuildWaitOptions, InterruptSignal,
 };
-use tensorlake::images::ImagesClient;
-use tensorlake::images::models::{ApplicationBuildContext, CreateApplicationBuildRequest};
 use tensorlake::sandbox_image_catalog::SandboxImageCatalog;
 use tensorlake::sandbox_images::{SandboxImageBuildError, SandboxImageBuildEvent};
 use tensorlake::sandboxes::models::{
@@ -57,8 +53,6 @@ use tokio::runtime::Runtime;
 
 create_exception!(_cloud_sdk, CloudApiClientError, PyException);
 create_exception!(_cloud_sdk, CloudSandboxClientError, PyException);
-
-const DEFAULT_HTTP_REQUEST_TIMEOUT_SEC: f64 = 300.0;
 
 // Single tokio runtime for the whole process: pyo3-async-runtimes' runtime,
 // which `future_into_py` already drives. Routing sync `block_on` through here
@@ -88,19 +82,17 @@ pub struct CloudApiClient {
     client: Client,
     artifact_storage: ArtifactStorageClient,
     api_url: String,
-    namespace: String,
 }
 
 #[pymethods]
 impl CloudApiClient {
     #[new]
-    #[pyo3(signature = (api_url, api_key=None, organization_id=None, project_id=None, namespace=None, user_agent=None))]
+    #[pyo3(signature = (api_url, api_key=None, organization_id=None, project_id=None, user_agent=None))]
     fn new(
         api_url: String,
         api_key: Option<String>,
         organization_id: Option<String>,
         project_id: Option<String>,
-        namespace: Option<String>,
         user_agent: Option<String>,
     ) -> PyResult<Self> {
         let mut builder = ClientBuilder::new(&api_url);
@@ -129,7 +121,6 @@ impl CloudApiClient {
             client,
             artifact_storage,
             api_url,
-            namespace: namespace.unwrap_or_else(|| "default".to_string()),
         })
     }
 
@@ -186,51 +177,6 @@ impl CloudApiClient {
         shared_runtime()
             .block_on(async move { client.resolve_authorized_project_id().await })
             .map_err(into_py_error)
-    }
-
-    fn upsert_application(
-        &self,
-        manifest_json: String,
-        code_zip: Vec<u8>,
-        upgrade_running_requests: bool,
-    ) -> PyResult<()> {
-        let namespace = self.namespace.clone();
-        self.run_with_retry(5, move |client| {
-            let namespace = namespace.clone();
-            let manifest_json = manifest_json.clone();
-            let code_zip = code_zip.clone();
-            async move {
-                let form = Form::new()
-                    .part("code", Part::bytes(code_zip).file_name("code.zip"))
-                    .text("code_content_type", "application/zip")
-                    .text("application", manifest_json)
-                    .text(
-                        "upgrade_requests_to_latest_code",
-                        upgrade_running_requests.to_string(),
-                    );
-
-                let request = client.build_multipart_request(
-                    Method::POST,
-                    &format!("/v1/namespaces/{namespace}/applications"),
-                    form,
-                )?;
-
-                let _response = client.execute(request).await?;
-                Ok(())
-            }
-        })
-    }
-
-    fn delete_application(&self, application_name: String) -> PyResult<()> {
-        let namespace = self.namespace.clone();
-        self.run_with_retry(5, move |client| {
-            let path = format!("/v1/namespaces/{namespace}/applications/{application_name}");
-            async move {
-                let request = client.request(Method::DELETE, &path).build()?;
-                let _response = client.execute(request).await?;
-                Ok(())
-            }
-        })
     }
 
     /// Delete a registered sandbox image by name or id through the merged
@@ -1076,212 +1022,6 @@ impl CloudApiClient {
         })
     }
 
-    fn applications_json(&self) -> PyResult<String> {
-        let namespace = self.namespace.clone();
-        self.run_with_retry(5, move |client| {
-            let path = format!("/v1/namespaces/{namespace}/applications");
-            async move {
-                let request = client.request(Method::GET, &path).build()?;
-                let response = client.execute(request).await?;
-                let text = response.text().await?;
-                Ok(text)
-            }
-        })
-    }
-
-    fn application_manifest_json(&self, application_name: String) -> PyResult<String> {
-        let namespace = self.namespace.clone();
-        self.run_with_retry(5, move |client| {
-            let path = format!("/v1/namespaces/{namespace}/applications/{application_name}");
-            async move {
-                let request = client.request(Method::GET, &path).build()?;
-                let response = client.execute(request).await?;
-                let text = response.text().await?;
-                Ok(text)
-            }
-        })
-    }
-
-    fn run_request(
-        &self,
-        application_name: String,
-        inputs: Vec<(String, Vec<u8>, String)>,
-    ) -> PyResult<String> {
-        let namespace = self.namespace.clone();
-        self.run_with_retry(5, move |client| {
-            let namespace = namespace.clone();
-            let application_name = application_name.clone();
-            let inputs = inputs.clone();
-            async move {
-                let path = format!("/v1/namespaces/{namespace}/applications/{application_name}");
-                let request = if inputs.is_empty() {
-                    client
-                        .request(Method::POST, &path)
-                        .header("Accept", "application/json")
-                        .body(Vec::<u8>::new())
-                        .build()?
-                } else if inputs.len() == 1 && inputs[0].0 == "0" {
-                    let (_, data, content_type) = inputs[0].clone();
-                    client
-                        .request(Method::POST, &path)
-                        .header("Accept", "application/json")
-                        .header("Content-Type", content_type)
-                        .body(data)
-                        .build()?
-                } else {
-                    let mut form = Form::new();
-                    for (name, data, content_type) in inputs {
-                        let part = Part::bytes(data)
-                            .file_name(name.clone())
-                            .mime_str(&content_type)
-                            .map_err(|e| SdkError::ClientError(e.to_string()))?;
-                        form = form.part(name, part);
-                    }
-                    client
-                        .request(Method::POST, &path)
-                        .header("Accept", "application/json")
-                        .multipart(form)
-                        .build()?
-                };
-
-                let response = client.execute(request).await?;
-                let text = response.text().await?;
-                let body: Value = serde_json::from_str(&text)?;
-                let request_id = body["request_id"].as_str().ok_or_else(|| {
-                    SdkError::ClientError(format!(
-                        "missing request_id in run request response body: {text}"
-                    ))
-                })?;
-                Ok(request_id.to_string())
-            }
-        })
-    }
-
-    fn wait_on_request_completion(
-        &self,
-        application_name: String,
-        request_id: String,
-    ) -> PyResult<()> {
-        let namespace = self.namespace.clone();
-        self.run_with_retry(10, move |client| {
-            let path =
-                format!("/v1/namespaces/{namespace}/applications/{application_name}/requests/{request_id}/progress");
-            async move {
-                let mut stream = client.build_event_source_request::<Value>(&path).await?;
-                while let Some(event) = stream.next().await {
-                    let event = event?;
-                    if event.get("RequestFinished").is_some() {
-                        return Ok(());
-                    }
-                }
-
-                Err(SdkError::EventSourceError(
-                    "progress stream ended before request completion".to_string(),
-                ))
-            }
-        })
-    }
-
-    fn request_metadata_json(
-        &self,
-        application_name: String,
-        request_id: String,
-    ) -> PyResult<String> {
-        let namespace = self.namespace.clone();
-        self.run_with_retry(5, move |client| {
-            let path = format!(
-                "/v1/namespaces/{namespace}/applications/{application_name}/requests/{request_id}"
-            );
-            async move {
-                let request = client.request(Method::GET, &path).build()?;
-                let response = client.execute(request).await?;
-                let text = response.text().await?;
-                Ok(text)
-            }
-        })
-    }
-
-    fn request_output_bytes(
-        &self,
-        application_name: String,
-        request_id: String,
-    ) -> PyResult<(Vec<u8>, String)> {
-        let namespace = self.namespace.clone();
-        self.run_with_retry(5, move |client| {
-            let path = format!(
-                "/v1/namespaces/{namespace}/applications/{application_name}/requests/{request_id}/output"
-            );
-            async move {
-                let request = client
-                    .request(Method::GET, &path)
-                    .timeout(Duration::from_secs_f64(DEFAULT_HTTP_REQUEST_TIMEOUT_SEC))
-                    .build()?;
-                let response = client.execute(request).await?;
-                let content_type = response
-                    .headers()
-                    .get("Content-Type")
-                    .and_then(|value| value.to_str().ok())
-                    .unwrap_or("")
-                    .to_string();
-                let bytes = response.bytes().await?;
-                Ok((bytes.to_vec(), content_type))
-            }
-        })
-    }
-
-    #[pyo3(signature = (organization_id=None, project_id=None, page_size=100))]
-    fn list_secrets_json(
-        &self,
-        organization_id: Option<String>,
-        project_id: Option<String>,
-        page_size: i32,
-    ) -> PyResult<String> {
-        match (organization_id, project_id) {
-            (Some(_), Some(_)) | (None, None) => {}
-            _ => {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "organization_id and project_id must be provided together",
-                ));
-            }
-        }
-        let path = format!(
-            "/v1/namespaces/{}/secrets",
-            urlencoding::encode(&self.namespace)
-        );
-        self.run_with_retry(5, move |client| {
-            let path = path.clone();
-            async move {
-                let request = client.request(Method::GET, &path).build()?;
-                let response = client.execute(request).await?;
-                let metadata: Vec<serde_json::Value> = response.json().await?;
-                let limit = page_size.max(0) as usize;
-                let total = metadata.len();
-                let items = metadata
-                    .into_iter()
-                    .take(limit)
-                    .map(|item| {
-                        let created_at_ms = item
-                            .get("created_at_ms")
-                            .and_then(serde_json::Value::as_i64)
-                            .unwrap_or_default();
-                        serde_json::json!({
-                            "id": item.get("id").cloned().unwrap_or_default(),
-                            "name": item.get("name").cloned().unwrap_or_default(),
-                            "createdAt": chrono::DateTime::from_timestamp_millis(created_at_ms)
-                                .map(|value| value.to_rfc3339())
-                                .unwrap_or_else(|| created_at_ms.to_string()),
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                Ok(serde_json::json!({
-                    "items": items,
-                    "pagination": {"next": null, "prev": null, "total": total}
-                })
-                .to_string())
-            }
-        })
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn start_image_build(
         &self,
@@ -1316,72 +1056,6 @@ impl CloudApiClient {
                 let request = client.build_multipart_request(Method::PUT, &endpoint, form)?;
                 let response = client.execute(request).await?;
                 Ok(response.text().await?)
-            }
-        })
-    }
-
-    fn create_application_build(
-        &self,
-        build_service_path: String,
-        request_json: String,
-        image_contexts: Vec<(String, Vec<u8>)>,
-    ) -> PyResult<String> {
-        self.run_with_retry(5, move |client| {
-            let build_service_path = build_service_path.clone();
-            let request_json = request_json.clone();
-            let image_contexts = image_contexts.clone();
-            async move {
-                let request: CreateApplicationBuildRequest = serde_json::from_str(&request_json)?;
-                let image_contexts: Vec<ApplicationBuildContext> = image_contexts
-                    .into_iter()
-                    .map(
-                        |(context_tar_part_name, context_tar_gz)| ApplicationBuildContext {
-                            context_tar_part_name,
-                            context_tar_gz,
-                        },
-                    )
-                    .collect();
-                let images_client = ImagesClient::new(client.clone());
-                let response = images_client
-                    .create_application_build(&build_service_path, &request, &image_contexts)
-                    .await?;
-                serde_json::to_string(&*response).map_err(SdkError::from)
-            }
-        })
-    }
-
-    fn application_build_info_json(
-        &self,
-        build_service_path: String,
-        application_build_id: String,
-    ) -> PyResult<String> {
-        self.run_with_retry(5, move |client| {
-            let build_service_path = build_service_path.clone();
-            let application_build_id = application_build_id.clone();
-            async move {
-                let images_client = ImagesClient::new(client.clone());
-                let response = images_client
-                    .application_build_info(&build_service_path, &application_build_id)
-                    .await?;
-                serde_json::to_string(&*response).map_err(SdkError::from)
-            }
-        })
-    }
-
-    fn cancel_application_build(
-        &self,
-        build_service_path: String,
-        application_build_id: String,
-    ) -> PyResult<String> {
-        self.run_with_retry(5, move |client| {
-            let build_service_path = build_service_path.clone();
-            let application_build_id = application_build_id.clone();
-            async move {
-                let images_client = ImagesClient::new(client.clone());
-                let response = images_client
-                    .cancel_application_build(&build_service_path, &application_build_id)
-                    .await?;
-                serde_json::to_string(&*response).map_err(SdkError::from)
             }
         })
     }
@@ -4325,50 +3999,6 @@ fn resolve_sandbox_lifecycle_url(api_url: &str) -> String {
     tensorlake::resolve_sandbox_lifecycle_url(api_url)
 }
 
-/// Create a Docker build context tar.gz for a Tensorlake image definition.
-///
-/// Args:
-///     base_image: The base Docker image (e.g. "python:3.11-slim-bookworm").
-///     sdk_version: The tensorlake SDK version to install in the image.
-///     operations_json: JSON array of build operations, each with keys
-///         "op" ("RUN"|"COPY"|"ADD"|"ENV"), "args" (list of str), "options" (dict of str).
-///     file_path: Destination path for the resulting tar.gz file.
-#[pyfunction]
-fn create_image_context_file(
-    base_image: String,
-    sdk_version: String,
-    operations_json: String,
-    file_path: String,
-) -> PyResult<()> {
-    use tensorlake::images::models::{Image, ImageBuildOperation};
-
-    let operations: Vec<ImageBuildOperation> =
-        serde_json::from_str(&operations_json).map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!("Failed to parse operations JSON: {e}"))
-        })?;
-
-    let image = Image::builder()
-        .name(String::new())
-        .base_image(base_image)
-        .build_operations(operations)
-        .build()
-        .map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!("Failed to build image: {e}"))
-        })?;
-
-    let mut file = std::fs::File::create(&file_path).map_err(|e| {
-        pyo3::exceptions::PyIOError::new_err(format!("Failed to create file '{}': {e}", file_path))
-    })?;
-
-    image
-        .create_context_archive(&mut file, &sdk_version, None)
-        .map_err(|e| {
-            pyo3::exceptions::PyIOError::new_err(format!("Failed to write context archive: {e}"))
-        })?;
-
-    Ok(())
-}
-
 /// Capture Docker config contents at CLI startup, before asynchronous work.
 #[pyfunction]
 fn load_docker_config_json() -> PyResult<String> {
@@ -5367,9 +4997,6 @@ fn _cloud_sdk(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<CloudSandboxProxyClient>()?;
     module.add_class::<CloudSandboxDesktopClient>()?;
     module.add_class::<tunnel::CloudTcpTunnel>()?;
-    #[cfg(feature = "function-agent")]
-    module.add_class::<function_agent::FunctionAgentCore>()?;
-    module.add_function(wrap_pyfunction!(create_image_context_file, module)?)?;
     module.add_function(wrap_pyfunction!(load_docker_config_json, module)?)?;
     module.add_function(wrap_pyfunction!(build_sandbox_image, module)?)?;
     module.add_function(wrap_pyfunction!(import_sandbox_image, module)?)?;

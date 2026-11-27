@@ -15,8 +15,6 @@ export default tseslint.config(
   {
     files: ["src/**/*.ts", "tests/**/*.ts"],
     rules: {
-      // The executor boundary intentionally handles dynamically decoded gRPC
-      // messages, and the test drivers intentionally expose untyped RPC stubs.
       "@typescript-eslint/no-explicit-any": "off",
       "@typescript-eslint/no-unused-vars": [
         "error",

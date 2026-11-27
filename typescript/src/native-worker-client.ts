@@ -136,7 +136,7 @@ export class NativeWorkerClient {
     };
     // Worker paths are Node runtime inputs. Let the package resolver trace the
     // default file without treating it as a browser worker module or globbing
-    // dist for custom capsule/test paths.
+    // dist for custom test paths.
     const worker: Worker = Reflect.construct(Worker, [this.workerPath(), options]);
     this.worker = worker;
     worker.on("message", (message: WorkerResponse) => {
@@ -221,11 +221,6 @@ export function createWorkerBinding(
   runtime: NativeWorkerClient,
 ): NativeSandboxBinding {
   return {
-    NativeCloudClient: class {
-      constructor(...args: unknown[]) {
-        return runtime.handle("NativeCloudClient", args);
-      }
-    },
     NativeSandboxClient: class {
       constructor(...args: unknown[]) {
         return runtime.handle("NativeSandboxClient", args);
@@ -271,7 +266,7 @@ export function workerBinding(): NativeSandboxBinding {
   );
 }
 
-/** Runtime capsules supply the worker alongside their bundled application SDK. */
+/** Overrides the worker entrypoint before the first native call. */
 export function configureNativeWorker(workerPath: () => string | URL): void {
   runtimes[runtimeKey] ??= new NativeWorkerClient(workerPath);
 }

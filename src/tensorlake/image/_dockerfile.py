@@ -1,4 +1,4 @@
-"""Dockerfile rendering helpers shared across the Applications and Sandbox builders.
+"""Dockerfile rendering helpers for the sandbox image builder.
 
 These functions produce Dockerfile text from an :class:`Image`. Without
 build arguments, the output matches the TypeScript SDK's ``dockerfileContent``
@@ -46,10 +46,3 @@ def image_to_dockerfile(image: Image, build_args: dict[str, str] | None = None) 
     for op in image._build_operations:
         lines.append(render_op_line(op))
     return "\n".join(lines)
-
-
-def image_has_workdir(image: Image) -> bool:
-    """True when the image defines its own WORKDIR op."""
-    return any(
-        op.type == _ImageBuildOperationType.WORKDIR for op in image._build_operations
-    )
