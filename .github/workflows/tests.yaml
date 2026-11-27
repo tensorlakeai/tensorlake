@@ -45,6 +45,7 @@ jobs:
           set -euo pipefail
           for module in \
             tests.utils.test_retries \
+            tests.sandbox.test_pty_cleanup \
             tests.sandbox.test_timestamps
           do
             poetry run python -m unittest "$module"

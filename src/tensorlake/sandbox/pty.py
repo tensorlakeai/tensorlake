@@ -310,29 +310,36 @@ class Pty:
                 if intentional_disconnect:
                     self._disconnecting_sockets.discard(ws)
 
-            if not self._wait_event.is_set():
-                close_reason = getattr(ws, "close_reason", "") or ""
-                close_code = getattr(ws, "close_status_code", None)
+            try:
+                if not self._wait_event.is_set():
+                    close_reason = getattr(ws, "close_reason", "") or ""
+                    close_code = getattr(ws, "close_status_code", None)
 
-                exit_code = _parse_exit_from_close_reason(close_reason)
-                if exit_code is not None:
-                    self._finish(exit_code)
-                elif intentional_disconnect:
+                    exit_code = _parse_exit_from_close_reason(close_reason)
+                    if exit_code is not None:
+                        self._finish(exit_code)
+                    elif intentional_disconnect:
+                        pass
+                    elif close_reason == "session terminated":
+                        self._fail(SandboxError("PTY session terminated"))
+                    elif close_error is not None:
+                        self._fail(
+                            SandboxConnectionError(
+                                f"PTY websocket closed unexpectedly: {close_error}"
+                            )
+                        )
+                    else:
+                        self._fail(
+                            SandboxError(
+                                f"PTY websocket closed unexpectedly: {close_code} {close_reason}".strip()
+                            )
+                        )
+            finally:
+                # An exit frame ends the reader before the peer necessarily closes.
+                try:
+                    ws.close()
+                except Exception:
                     pass
-                elif close_reason == "session terminated":
-                    self._fail(SandboxError("PTY session terminated"))
-                elif close_error is not None:
-                    self._fail(
-                        SandboxConnectionError(
-                            f"PTY websocket closed unexpectedly: {close_error}"
-                        )
-                    )
-                else:
-                    self._fail(
-                        SandboxError(
-                            f"PTY websocket closed unexpectedly: {close_code} {close_reason}".strip()
-                        )
-                    )
 
     def _finish(self, exit_code: int) -> None:
         with self._lock:
@@ -531,35 +538,42 @@ class AsyncPty:
             intentional_disconnect = id(ws) in self._disconnecting_sockets
             self._disconnecting_sockets.discard(id(ws))
 
-            if not self._wait_event.is_set():
-                close_reason = ""
-                close_code = None
-                close_obj = getattr(ws, "close_code", None)
-                if close_obj is not None:
-                    close_code = close_obj
-                reason_obj = getattr(ws, "close_reason", None)
-                if reason_obj:
-                    close_reason = reason_obj
+            try:
+                if not self._wait_event.is_set():
+                    close_reason = ""
+                    close_code = None
+                    close_obj = getattr(ws, "close_code", None)
+                    if close_obj is not None:
+                        close_code = close_obj
+                    reason_obj = getattr(ws, "close_reason", None)
+                    if reason_obj:
+                        close_reason = reason_obj
 
-                exit_code = _parse_exit_from_close_reason(close_reason)
-                if exit_code is not None:
-                    self._finish(exit_code)
-                elif intentional_disconnect:
+                    exit_code = _parse_exit_from_close_reason(close_reason)
+                    if exit_code is not None:
+                        self._finish(exit_code)
+                    elif intentional_disconnect:
+                        pass
+                    elif close_reason == "session terminated":
+                        self._fail(SandboxError("PTY session terminated"))
+                    elif close_error is not None:
+                        self._fail(
+                            SandboxConnectionError(
+                                f"PTY websocket closed unexpectedly: {close_error}"
+                            )
+                        )
+                    else:
+                        self._fail(
+                            SandboxError(
+                                f"PTY websocket closed unexpectedly: {close_code} {close_reason}".strip()
+                            )
+                        )
+            finally:
+                # Release the transport on exit frames and reader cancellation too.
+                try:
+                    await ws.close()
+                except Exception:
                     pass
-                elif close_reason == "session terminated":
-                    self._fail(SandboxError("PTY session terminated"))
-                elif close_error is not None:
-                    self._fail(
-                        SandboxConnectionError(
-                            f"PTY websocket closed unexpectedly: {close_error}"
-                        )
-                    )
-                else:
-                    self._fail(
-                        SandboxError(
-                            f"PTY websocket closed unexpectedly: {close_code} {close_reason}".strip()
-                        )
-                    )
 
     def _finish(self, exit_code: int) -> None:
         if self._wait_event.is_set():
