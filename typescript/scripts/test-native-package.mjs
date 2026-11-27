@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
-import { build } from "esbuild";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { copyFile, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 // Exercise the actual npm tarball, including optional-package resolution,
 // without inheriting the checkout's dist/native layout or module resolution.
@@ -48,12 +47,12 @@ try {
     const applicationDispatcher = {};
     globalThis[dispatcherKey] = applicationDispatcher;
     process.dlopen = () => { throw new Error('Main-thread addon load'); };
-    const { SandboxClient, CloudClient } = await import('@tensorlakeai/tensorlake');
-    const { Sandbox, CloudClient: CommonJSCloudClient } = createRequire(import.meta.url)('@tensorlakeai/tensorlake');
+    const { SandboxClient } = await import('@tensorlakeai/tensorlake');
+    const { Sandbox } = createRequire(import.meta.url)('@tensorlakeai/tensorlake');
     assert.equal(globalThis[dispatcherKey], applicationDispatcher, 'SDK replaced application dispatcher');
     const server = createServer((_req, res) => {
       res.setHeader('Content-Type', 'application/json');
-      res.end(JSON.stringify({ sandboxes: [], processes: [], applications: [] }));
+      res.end(JSON.stringify({ sandboxes: [], processes: [] }));
     });
     server.listen(0, '127.0.0.1');
     await once(server, 'listening');
@@ -63,11 +62,6 @@ try {
       const sandbox = new Sandbox({ sandboxId: 'packaged', proxyUrl: url });
       assert.deepEqual(Array.from(await client.list()), []);
       assert.deepEqual(Array.from(await sandbox.listProcesses()), []);
-      for (const Client of [CloudClient, CommonJSCloudClient]) {
-        const cloud = new Client({ apiUrl: url });
-        assert.deepEqual(await cloud.applications(), []);
-        cloud.close();
-      }
       sandbox.close(); client.close();
     } finally { server.closeAllConnections(); server.close(); }
   `);
@@ -86,65 +80,6 @@ try {
       assert.equal(code, 0, `Packed worker test failed (${flag}, ${source}, ${signal ?? code})`);
       assert.equal(await readFile(log, "utf8"), "0\n", "Customer preload ran inside the SDK worker");
     }
-  }
-  // Each invocation runs in a fresh process. Importing the root SDK first would
-  // seed the shared worker and hide a broken applications-subpath resolver.
-  const invocationDriver = path.join(directory, "invoke.mjs");
-  await writeFile(invocationDriver, `
-    import assert from 'node:assert/strict';
-    import { createServer } from 'node:http';
-    import { once } from 'node:events';
-    import { createRequire } from 'node:module';
-    process.dlopen = () => { throw new Error('Main-thread addon load'); };
-    const sdk = process.argv[3] === 'cjs'
-      ? createRequire(import.meta.url)(process.argv[2])
-      : await import(process.argv[2]);
-    let requests = 0;
-    const server = createServer((req, res) => {
-      assert.equal(req.method, 'POST');
-      assert.ok(req.url.endsWith('/applications/packaged'));
-      requests++;
-      req.resume();
-      res.setHeader('Content-Type', 'application/json');
-      res.end(JSON.stringify({ request_id: 'packaged-request' }));
-    });
-    server.listen(0, '127.0.0.1');
-    await once(server, 'listening');
-    try {
-      const request = await sdk.runRemote('packaged', sdk.remoteOptions({
-        apiUrl: 'http://127.0.0.1:' + server.address().port, maxRetries: 0,
-      }));
-      assert.equal(request.id, 'packaged-request');
-      assert.equal(requests, 1);
-    } finally { server.closeAllConnections(); server.close(); }
-  `);
-  const invocations = [
-    ["applications ESM entrypoint", "@tensorlakeai/tensorlake/applications", "esm"],
-    ["applications CommonJS entrypoint", "@tensorlakeai/tensorlake/applications", "cjs"],
-  ];
-  const bundles = path.join(directory, "bundles");
-  await mkdir(bundles);
-  for (const entry of ["index", "applications/index"]) {
-    for (const format of ["esm", "cjs"]) {
-      const bundle = path.join(bundles, `${entry.replaceAll("/", "-")}.${format === "esm" ? "mjs" : "cjs"}`);
-      await build({
-        entryPoints: [path.join(sdk, "dist", `${entry}.${format === "esm" ? "js" : "cjs"}`)],
-        outfile: bundle, bundle: true, platform: "node", format, packages: "external",
-      });
-      invocations.push([`esbuild ${entry} ${format}`, format === "esm" ? pathToFileURL(bundle).href : bundle, format]);
-    }
-  }
-  for (const [label, entry, format] of invocations) {
-    const child = spawnSync(process.execPath, [invocationDriver, entry, format], {
-      cwd: directory, encoding: "utf8", timeout: 20_000,
-    });
-    assert.equal(child.status, 0, `${label} failed\n${child.stdout}\n${child.stderr}`);
-    console.log(`${label}: native application invocation passed`);
-  }
-  // Capsules must carry exactly the worker tested in the SDK package.
-  const worker = await readFile(path.join(sdk, "dist/native-worker.cjs"));
-  for (const capsule of ["function-executor", "typescript-function-runner"]) {
-    assert.deepEqual(await readFile(path.join(sdk, "runtime", capsule, "package/dist/native-worker.cjs")), worker);
   }
   console.log("Packed ESM/CommonJS SDK passed using optional native package; worker exits cleanly when idle.");
 } finally {

@@ -59,16 +59,16 @@ jobs:
           CARGO_TARGET_DIR: target
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --no-default-features --out dist
+          args: --release --out dist
           manylinux: ${{ matrix.platform.manylinux || 'auto' }}
           container: ${{ matrix.platform.manylinux_container || '' }}
           sccache: 'true'
 
       - name: Verify wheel imports Rust Cloud SDK extension
         run: |
-          python .github/scripts/verify_wheel.py "dist/tensorlake-*.whl" tensorlake._cloud_sdk tensorlake.cli.deploy --tls-check https://api.tensorlake.ai --expect-script function-executor --expect-script tensorlake-python-function-runner --expect-script tensorlake-deploy --reject-script tl --reject-script tensorlake
+          python .github/scripts/verify_wheel.py "dist/tensorlake-*.whl" tensorlake._cloud_sdk --tls-check https://api.tensorlake.ai --reject-script tl --reject-script tensorlake
 
-      # These wheels omit Function Agent and must never be published.
+      # CI wheels are for verification only and must never be published.
       - name: Upload CI wheels
         uses: actions/upload-artifact@v4
         with:

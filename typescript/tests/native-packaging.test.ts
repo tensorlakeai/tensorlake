@@ -110,7 +110,7 @@ describe("native package metadata", () => {
       version: rootPackage.version,
       dependencies: { [rootPackage.name]: rootPackage.version },
     });
-    expect(Object.keys(wrapper.exports)).toEqual([".", "./applications"]);
+    expect(Object.keys(wrapper.exports)).toEqual(["."]);
     expect(wrapper.bin).toBeUndefined();
   });
 

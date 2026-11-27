@@ -1,27 +1,12 @@
 #!/bin/bash
 
-if [[ -z "$TENSORLAKE_API_URL" ]]; then
-    echo "Please set TENSORLAKE_API_URL environment variable to specify"\
-    "TensorLake API server you are testing." \
-    "Example: 'export TENSORLAKE_API_URL=http://localhost:8900'" 1>&2
-    exit 1
-fi
-
-enable_fe_test_suite=false
-enable_applications_test_suite=false
 enable_cli_test_suite=false
 enable_utils_test_suite=false
 enable_filesystem_test_suite=false
-if [[ "$1" == "--function-executor" ]]; then
-  enable_fe_test_suite=true
-elif [ "$1" == "--applications" ]; then
-  enable_applications_test_suite=true
-elif [ "$1" == "--filesystem" ]; then
+if [ "$1" == "--filesystem" ]; then
   enable_filesystem_test_suite=true
 else
   # All by default
-  enable_fe_test_suite=true
-  enable_applications_test_suite=true
   enable_cli_test_suite=true
   enable_utils_test_suite=true
   enable_filesystem_test_suite=true
@@ -61,19 +46,9 @@ fi
 summary_file=".run_tests_summary.txt"
 rm -f $summary_file
 
-function_executor_test_files=$(find ./function_executor -name 'test_*.py')
-applications_test_files=$(find ./applications -name 'test_*.py')
 cli_test_files=$(find ./cli -name 'test_*.py')
 utils_test_files=$(find ./utils -name 'test_*.py')
 filesystem_test_files=$(find ./filesystem -name 'test_*.py')
-
-if [ "$enable_fe_test_suite" = true ]; then
-  run_test_suite "$function_executor_test_files" "Function Executor"
-fi
-
-if [ "$enable_applications_test_suite" = true ]; then
-  run_test_suite "$applications_test_files" "Applications"
-fi
 
 if [ "$enable_cli_test_suite" = true ]; then
   run_test_suite "$cli_test_files" "CLI"

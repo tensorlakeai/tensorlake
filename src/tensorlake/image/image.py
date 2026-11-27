@@ -2,8 +2,6 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, List
 
-from tensorlake.vendor.nanoid.nanoid import generate as nanoid_generate
-
 _DEFAULT_BASE_IMAGE_NAME = "python:3.14-trixie"
 
 
@@ -29,9 +27,6 @@ class Image:
         tag: str = "latest",
         base_image: str = _DEFAULT_BASE_IMAGE_NAME,
     ):
-        # Used by ImageBuilder service to identify when different application
-        # functions are using the same Image object.
-        self._id: str = nanoid_generate()
         self._name: str = name
         self._tag: str = tag
         self._base_image: str = base_image

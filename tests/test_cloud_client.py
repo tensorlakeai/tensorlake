@@ -2,10 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from tensorlake import cloud_client
-from tensorlake.applications.interface.exceptions import (
-    InternalError,
-    RemoteAPIError,
-)
+from tensorlake.cloud_client import InternalError, RemoteAPIError, SDKUsageError
 
 
 class FakeRustClientError(Exception):
@@ -17,7 +14,7 @@ class TestCloudClientErrors(unittest.TestCase):
         error = FakeRustClientError(
             "connection",
             None,
-            "error sending request for url (http://localhost:8840/images/v3/applications): client error (Connect): tcp connect error: Connection refused (os error 61)",
+            "error sending request for url (http://localhost:8840/platform/v1/organizations): client error (Connect): tcp connect error: Connection refused (os error 61)",
         )
 
         with patch.object(cloud_client, "_RustClientError", FakeRustClientError):
@@ -25,7 +22,7 @@ class TestCloudClientErrors(unittest.TestCase):
                 InternalError,
                 "Connection error while communicating with Tensorlake API: "
                 "error sending request for url "
-                r"\(http://localhost:8840/images/v3/applications\): "
+                r"\(http://localhost:8840/platform/v1/organizations\): "
                 "client error \\(Connect\\): tcp connect error: Connection refused \\(os error 61\\)",
             ):
                 cloud_client._raise_as_tensorlake_error(error)
@@ -46,3 +43,14 @@ class TestCloudClientErrors(unittest.TestCase):
         with patch.object(cloud_client, "_RustClientError", FakeRustClientError):
             with self.assertRaisesRegex(InternalError, "something unexpected happened"):
                 cloud_client._raise_as_tensorlake_error(error)
+
+    def test_raise_as_tensorlake_error_maps_auth_error_to_sdk_usage_error(self):
+        error = FakeRustClientError("sdk_usage", 401, "invalid credentials")
+
+        with patch.object(cloud_client, "_RustClientError", FakeRustClientError):
+            with self.assertRaises(SDKUsageError):
+                cloud_client._raise_as_tensorlake_error(error)
+
+
+if __name__ == "__main__":
+    unittest.main()

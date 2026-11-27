@@ -1,5 +1,4 @@
 import importlib.metadata
-import json
 import os
 import sys
 from dataclasses import dataclass
@@ -53,7 +52,6 @@ class Context:
                     self.organization_id_value if use_scope_headers else None
                 ),
                 project_id=(self.project_id_value if use_scope_headers else None),
-                namespace=self.namespace,
             )
         return self._cloud_client
 
@@ -73,24 +71,6 @@ class Context:
     @property
     def organization_id(self):
         return self.organization_id_value
-
-    def list_secret_names(self, page_size: int = 100) -> list[str]:
-        api_key_scoped = self.api_key is not None
-        org_id = None if api_key_scoped else self.organization_id
-        project_id = None if api_key_scoped else self.project_id
-        if not api_key_scoped and (org_id is None or project_id is None):
-            return []
-
-        try:
-            response_json = self.cloud_client.list_secrets_json(
-                organization_id=org_id,
-                project_id=project_id,
-                page_size=page_size,
-            )
-            payload = json.loads(response_json)
-            return [item["name"] for item in payload.get("items", []) if "name" in item]
-        except Exception:
-            return []
 
     def has_authentication(self) -> bool:
         return self.api_key is not None or self.personal_access_token is not None

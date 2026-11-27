@@ -5,10 +5,8 @@ should use CloudClient. The Rust SDK handles HTTP, auth, and serialization.
 """
 
 import importlib
-import json
 
 from tensorlake._tracing import USER_AGENT
-from tensorlake.public_endpoint import generate_public_endpoint_id
 
 _IMPORT_ERROR: Exception | None = None
 _RustClient = None
@@ -29,16 +27,40 @@ for _module_name in ("tensorlake._cloud_sdk", "_cloud_sdk"):
 _API_KEY_ENV_VAR = "TENSORLAKE_API_KEY"
 
 
+class TensorlakeError(Exception):
+    """Base class for errors raised by CloudClient."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+
+
+class RemoteAPIError(TensorlakeError):
+    """The Tensorlake API returned an error status."""
+
+    def __init__(self, status_code: int, message: str) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+    def __str__(self) -> str:
+        return f"{super().__str__()} (Status Code: {self.status_code})"
+
+
+class SDKUsageError(TensorlakeError):
+    """The SDK was used incorrectly, e.g. with invalid credentials."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+
+
+class InternalError(TensorlakeError):
+    """An unexpected error inside the SDK or while talking to the API."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+
+
 def _raise_as_tensorlake_error(e: Exception) -> None:
     """Convert Rust SDK exceptions into the TensorlakeError hierarchy."""
-    # Lazy import to avoid circular dependency with applications package.
-    from tensorlake.applications.interface.exceptions import (
-        InternalError,
-        RemoteAPIError,
-        SDKUsageError,
-        TensorlakeError,
-    )
-
     if isinstance(e, TensorlakeError):
         raise
 
@@ -92,11 +114,8 @@ class CloudClient:
         api_key: str | None = None,
         organization_id: str | None = None,
         project_id: str | None = None,
-        namespace: str | None = None,
     ):
         if not _AVAILABLE:
-            from tensorlake.applications.interface.exceptions import InternalError
-
             details = (
                 f" Import error: {type(_IMPORT_ERROR).__name__}: {_IMPORT_ERROR}"
                 if _IMPORT_ERROR is not None
@@ -107,13 +126,11 @@ class CloudClient:
                 f"Build/install it with `make build_rust_py_client`.{details}"
             )
         try:
-            self.namespace = namespace or "default"
             self._client = _RustClient(
                 api_url=api_url,
                 api_key=api_key,
                 organization_id=organization_id,
                 project_id=project_id,
-                namespace=namespace,
                 user_agent=USER_AGENT,
             )
         except Exception as e:
@@ -128,137 +145,12 @@ class CloudClient:
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.close()
 
-    # -- Application operations --
-
-    def upsert_application(
-        self,
-        manifest_json: str,
-        code_zip: bytes,
-        upgrade_running_requests: bool,
-    ) -> None:
-        manifest = json.loads(manifest_json)
-        if "unauthenticated_requests" in manifest.get("allow", []) and not manifest.get(
-            "public_endpoint_id"
-        ):
-            from tensorlake.applications.interface.exceptions import RemoteAPIError
-
-            try:
-                existing = json.loads(self.application_manifest_json(manifest["name"]))
-            except RemoteAPIError as error:
-                if error.status_code != 404:
-                    raise
-                existing = {}
-            manifest["public_endpoint_id"] = (
-                existing.get("public_endpoint_id") or generate_public_endpoint_id()
-            )
-            manifest_json = json.dumps(manifest)
-
-        try:
-            self._client.upsert_application(
-                manifest_json=manifest_json,
-                code_zip=code_zip,
-                upgrade_running_requests=upgrade_running_requests,
-            )
-        except Exception as e:
-            _raise_as_tensorlake_error(e)
-
-    def delete_application(self, application_name: str) -> None:
-        try:
-            self._client.delete_application(application_name=application_name)
-        except Exception as e:
-            _raise_as_tensorlake_error(e)
-
-    def applications_json(self) -> str:
-        try:
-            return self._client.applications_json()
-        except Exception as e:
-            _raise_as_tensorlake_error(e)
-
-    def application_manifest_json(self, application_name: str) -> str:
-        try:
-            return self._client.application_manifest_json(
-                application_name=application_name
-            )
-        except Exception as e:
-            _raise_as_tensorlake_error(e)
-
-    # -- Request operations --
-
-    def run_request(
-        self,
-        application_name: str,
-        inputs: list[tuple[str, bytes, str]],
-    ) -> str:
-        try:
-            return self._client.run_request(
-                application_name=application_name,
-                inputs=inputs,
-            )
-        except Exception as e:
-            _raise_as_tensorlake_error(e)
-
-    def wait_on_request_completion(
-        self,
-        application_name: str,
-        request_id: str,
-    ) -> None:
-        try:
-            self._client.wait_on_request_completion(
-                application_name=application_name,
-                request_id=request_id,
-            )
-        except Exception as e:
-            _raise_as_tensorlake_error(e)
-
-    def request_metadata_json(
-        self,
-        application_name: str,
-        request_id: str,
-    ) -> str:
-        try:
-            return self._client.request_metadata_json(
-                application_name=application_name,
-                request_id=request_id,
-            )
-        except Exception as e:
-            _raise_as_tensorlake_error(e)
-
-    def request_output_bytes(
-        self,
-        application_name: str,
-        request_id: str,
-    ) -> tuple:
-        try:
-            return self._client.request_output_bytes(
-                application_name=application_name,
-                request_id=request_id,
-            )
-        except Exception as e:
-            _raise_as_tensorlake_error(e)
-
     # -- Artifact Storage operations --
 
     def _artifact_storage_project_id(self) -> str:
         """Project selected by ingress during the normal Artifact Storage credential mint."""
         try:
             return self._client.artifact_storage_project_id()
-        except Exception as e:
-            _raise_as_tensorlake_error(e)
-
-    # -- Secrets operations --
-
-    def list_secrets_json(
-        self,
-        organization_id: str | None = None,
-        project_id: str | None = None,
-        page_size: int = 100,
-    ) -> str:
-        try:
-            return self._client.list_secrets_json(
-                organization_id=organization_id,
-                project_id=project_id,
-                page_size=page_size,
-            )
         except Exception as e:
             _raise_as_tensorlake_error(e)
 

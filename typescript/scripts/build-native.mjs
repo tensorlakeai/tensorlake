@@ -14,7 +14,7 @@ const targetId =
 const targetTriple = process.env.TENSORLAKE_NODE_TARGET_TRIPLE || undefined;
 const buildTool = process.env.TENSORLAKE_NODE_BUILD_TOOL ?? "cargo";
 const scriptArgs = process.argv.slice(2);
-if (scriptArgs.some((arg) => arg !== "--no-default-features")) {
+if (scriptArgs.length > 0) {
   console.error(`Unsupported argument(s): ${scriptArgs.join(", ")}`);
   process.exit(1);
 }
@@ -79,7 +79,6 @@ const cargoArgs = [
   "--release",
   "-p",
   nativePackageName,
-  ...scriptArgs,
   ...(targetTriple ? ["--target", targetTriple] : []),
 ];
 

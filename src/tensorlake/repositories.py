@@ -235,7 +235,6 @@ class RepositoryClient:
             api_key=token,
             organization_id=None,
             project_id=None,
-            namespace=ctx.namespace,
         )
         # Explicit/env scope is intentionally ignored for SDK API-key traffic. Ingress chooses
         # the authorized project, which the ordinary Artifact Storage credential carries to the

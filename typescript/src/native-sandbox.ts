@@ -9,7 +9,6 @@ import {
   SandboxNotFoundError,
 } from "./errors.js";
 import { workerBinding } from "./native-worker-client.js";
-import type { NativeCloudClient } from "./native-cloud.js";
 import { cancelNativeCall, type NativeCall } from "./native-worker-protocol.js";
 
 /**
@@ -305,7 +304,6 @@ interface NativeSandboxProxyClientCtor {
 
 export interface NativeSandboxBinding {
   NativeTcpTunnel: new () => NativeTcpTunnel;
-  NativeCloudClient?: new (optionsJson: string) => NativeCloudClient;
   NativeSandboxClient: NativeSandboxClientCtor;
   NativeSandboxProxyClient: NativeSandboxProxyClientCtor;
   NativeRepositoryClient?: NativeRepositoryClientCtor;

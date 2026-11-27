@@ -38,7 +38,7 @@ jobs:
           virtualenvs-in-project: true
 
       - name: Install Python dependencies
-        run: poetry install --no-root --with=dev && poetry run maturin develop --no-default-features
+        run: poetry install --no-root --with=dev && poetry run maturin develop
 
       - name: Set up Docker
         uses: docker/setup-docker-action@v4

@@ -1,31 +1,16 @@
-import { CloudClient } from "./cloud-client.js";
 import { FilesystemClient } from "./filesystem.js";
 import { deleteSandboxImageWithCredentials } from "./sandbox-image.js";
-import {
-  RequestExecutionError,
-  RequestFailedError,
-  RequestNotFinishedError,
-} from "./errors.js";
-import type {
-  ApplicationManifest,
-  ApplicationSummary,
+import type { CloudClientOptions, FileSystem } from "./cloud-models.js";
+
+type APIClientOptions = Pick<
   CloudClientOptions,
-  RequestInput,
-  RequestOutput,
-  FileSystem,
-} from "./cloud-models.js";
+  "apiUrl" | "apiKey" | "organizationId" | "projectId"
+>;
 
 export class APIClient {
-  private readonly cloudClient: CloudClient;
-  private readonly filesystemOptions: {
-    apiKey?: string;
-    apiUrl?: string;
-    organizationId?: string;
-    projectId?: string;
-  };
+  private readonly filesystemOptions: APIClientOptions;
 
-  constructor(options?: CloudClientOptions) {
-    this.cloudClient = new CloudClient(options);
+  constructor(options?: APIClientOptions) {
     this.filesystemOptions = {
       apiKey: options?.apiKey,
       apiUrl: options?.apiUrl,
@@ -34,25 +19,8 @@ export class APIClient {
     };
   }
 
-  close(): void {
-    this.cloudClient.close();
-  }
-
-  async upsertApplication(
-    manifest: ApplicationManifest,
-    codeZip: Uint8Array | ArrayBuffer | Blob | string,
-    upgradeRunningRequests = false,
-  ): Promise<void> {
-    await this.cloudClient.upsertApplication(
-      manifest,
-      codeZip,
-      upgradeRunningRequests,
-    );
-  }
-
-  async deleteApplication(applicationName: string): Promise<void> {
-    await this.cloudClient.deleteApplication(applicationName);
-  }
+  /** No-op; the client holds no connections. */
+  close(): void {}
 
   async deleteSandboxImage(imageName: string): Promise<void> {
     await deleteSandboxImageWithCredentials(this.filesystemOptions, imageName);
@@ -91,57 +59,5 @@ export class APIClient {
     _options?: { organizationId?: string; projectId?: string },
   ): Promise<void> {
     await new FilesystemClient(this.filesystemOptions).delete(fileSystemId);
-  }
-
-  async applications(): Promise<ApplicationSummary[]> {
-    return this.cloudClient.applications();
-  }
-
-  async application(applicationName: string): Promise<ApplicationManifest> {
-    return this.cloudClient.applicationManifest(applicationName);
-  }
-
-  async runRequest(
-    applicationName: string,
-    inputs: RequestInput[],
-  ): Promise<string> {
-    return this.cloudClient.runRequest(applicationName, inputs);
-  }
-
-  async waitOnRequestCompletion(
-    applicationName: string,
-    requestId: string,
-  ): Promise<void> {
-    await this.cloudClient.waitOnRequestCompletion(applicationName, requestId);
-  }
-
-  async requestOutput(
-    applicationName: string,
-    requestId: string,
-  ): Promise<RequestOutput> {
-    const metadata = await this.cloudClient.requestMetadata(
-      applicationName,
-      requestId,
-    );
-
-    if (metadata.outcome == null) {
-      throw new RequestNotFinishedError();
-    }
-
-    if (typeof metadata.outcome === "object") {
-      if (metadata.requestError?.message) {
-        throw new RequestExecutionError(
-          metadata.requestError.message,
-          metadata.requestError.functionName,
-        );
-      }
-      const failure =
-        typeof metadata.outcome.failure === "string"
-          ? metadata.outcome.failure
-          : JSON.stringify(metadata.outcome);
-      throw new RequestFailedError(failure);
-    }
-
-    return this.cloudClient.requestOutput(applicationName, requestId);
   }
 }

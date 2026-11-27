@@ -1,17 +1,14 @@
 {
   "name": "@tensorlakeai/tensorlake",
-  "version": "0.5.165",
-  "description": "TensorLake SDK for applications, sandboxes, and cloud services",
+  "version": "0.6.0",
+  "description": "TensorLake SDK for sandboxes and cloud services",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "tensorlake-deploy": "./bin/tensorlake-deploy.cjs",
     "tensorlake-create-sandbox-image": "./bin/tensorlake-create-sandbox-image.js",
-    "tensorlake-import-sandbox-image": "./bin/tensorlake-import-sandbox-image.js",
-    "function-executor": "./bin/function-executor.js",
-    "tensorlake-typescript-function-runner": "./bin/tensorlake-typescript-function-runner.js"
+    "tensorlake-import-sandbox-image": "./bin/tensorlake-import-sandbox-image.js"
   },
   "exports": {
     "./internal/native-worker": "./dist/native-worker.cjs",
@@ -24,36 +21,22 @@
         "types": "./dist/index.d.cts",
         "default": "./dist/index.cjs"
       }
-    },
-    "./applications": {
-      "import": {
-        "types": "./dist/applications/index.d.ts",
-        "default": "./dist/applications/index.js"
-      },
-      "require": {
-        "types": "./dist/applications/index.d.cts",
-        "default": "./dist/applications/index.cjs"
-      }
     }
   },
   "files": [
     "dist",
     "!dist/native",
     "bin",
-    "lib",
-    "runtime"
+    "lib"
   ],
   "scripts": {
     "build:sdk": "tsup",
-    "build:runtime": "node ./scripts/build-function-executor-capsule.mjs && node ./scripts/build-typescript-function-runner-capsule.mjs && node ./scripts/check-package-compatibility.mjs",
     "build:native": "node ./scripts/build-native.mjs",
-    "build": "npm run build:sdk && npm run build:native && npm run build:runtime",
-    "check:proto": "node ./scripts/check-function-executor-proto.mjs",
+    "build": "npm run build:sdk && npm run build:native && npm run check:package",
+    "check:package": "node ./scripts/check-package-compatibility.mjs",
     "check:install-scripts": "node ./scripts/check-no-install-scripts.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --exclude tests/integration.test.ts",
-    "test:function-executor": "vitest run tests/function-executor.test.ts tests/function-executor-protocol.test.ts",
-    "test:function-agent": "vitest run tests/function-agent.test.ts",
     "test:integration": "vitest run tests/integration.test.ts",
     "test:native-sandbox": "node ./scripts/test-native-sandbox.mjs",
     "test:native-command-output-limit": "node ./scripts/test-native-command-output-limit.mjs",
@@ -71,8 +54,7 @@
     "tensorlake",
     "sandbox",
     "cloud",
-    "sdk",
-    "applications"
+    "sdk"
   ],
   "repository": {
     "type": "git",
@@ -92,21 +74,15 @@
     "vitest": "^4.1.12"
   },
   "dependencies": {
-    "@grpc/grpc-js": "^1.14.5",
-    "@grpc/proto-loader": "^0.8.0",
-    "ajv": "^8.17.1",
-    "fflate": "^0.8.2",
-    "google-proto-files": "^5.0.2",
-    "nanoid": "^3.3.18",
     "ws": "^8.20.0"
   },
   "optionalDependencies": {
-    "@tensorlakeai/native-darwin-arm64": "0.5.165",
-    "@tensorlakeai/native-linux-arm64-gnu": "0.5.165",
-    "@tensorlakeai/native-linux-arm64-musl": "0.5.165",
-    "@tensorlakeai/native-linux-x64-gnu": "0.5.165",
-    "@tensorlakeai/native-linux-x64-musl": "0.5.165",
-    "@tensorlakeai/native-win32-x64": "0.5.165"
+    "@tensorlakeai/native-darwin-arm64": "0.6.0",
+    "@tensorlakeai/native-linux-arm64-gnu": "0.6.0",
+    "@tensorlakeai/native-linux-arm64-musl": "0.6.0",
+    "@tensorlakeai/native-linux-x64-gnu": "0.6.0",
+    "@tensorlakeai/native-linux-x64-musl": "0.6.0",
+    "@tensorlakeai/native-win32-x64": "0.6.0"
   },
   "overrides": {
     "minimatch@>=7 <11.0.1": "^11.0.1",

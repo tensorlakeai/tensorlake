@@ -259,35 +259,3 @@ export class RemoteAPIError extends SandboxError {
     this.code = code;
   }
 }
-
-/** Raised when request output is fetched before the request has completed. */
-export class RequestNotFinishedError extends Error {
-  constructor() {
-    super("Request has not finished yet");
-    this.name = "RequestNotFinishedError";
-  }
-}
-
-/** Raised when a request completed unsuccessfully. */
-export class RequestFailedError extends Error {
-  readonly failure: string;
-
-  constructor(failure: string) {
-    super(`Request failed: ${failure}`);
-    this.name = "RequestFailedError";
-    this.failure = failure;
-  }
-}
-
-/** Raised when a request surfaced an application-level error. */
-export class RequestExecutionError extends Error {
-  readonly functionName?: string;
-
-  constructor(message: string, functionName?: string) {
-    super(
-      functionName ? `Request error in ${functionName}: ${message}` : message,
-    );
-    this.name = "RequestExecutionError";
-    this.functionName = functionName;
-  }
-}

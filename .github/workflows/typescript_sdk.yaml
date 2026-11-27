@@ -9,17 +9,7 @@ on:
       - "crates/rust-cloud-sdk-node/**"
       - "crates/cloud-sdk/**"
       - "Cargo.toml"
-      - "crates/function-agent-core/**"
-      - ".github/actions/vendor-function-agent-core/**"
-      - ".github/scripts/stage_function_agent_core.sh"
       - "Cargo.lock"
-      - "proto/**"
-      - "src/tensorlake/applications/**"
-      - "src/tensorlake/function_executor/**"
-      - "src/tensorlake/function_agent/**"
-      - "tests/function_agent/**"
-      - "tests/function_executor_compatibility/**"
-      - "Makefile"
       - ".github/workflows/typescript_sdk.yaml"
 
   push:
@@ -30,17 +20,7 @@ on:
       - "crates/rust-cloud-sdk-node/**"
       - "crates/cloud-sdk/**"
       - "Cargo.toml"
-      - "crates/function-agent-core/**"
-      - ".github/actions/vendor-function-agent-core/**"
-      - ".github/scripts/stage_function_agent_core.sh"
       - "Cargo.lock"
-      - "proto/**"
-      - "src/tensorlake/applications/**"
-      - "src/tensorlake/function_executor/**"
-      - "src/tensorlake/function_agent/**"
-      - "tests/function_agent/**"
-      - "tests/function_executor_compatibility/**"
-      - "Makefile"
       - ".github/workflows/typescript_sdk.yaml"
 
 permissions:
@@ -52,51 +32,6 @@ defaults:
     working-directory: typescript
 
 jobs:
-  function-executor-compatibility:
-    name: Python/TypeScript function executor compatibility
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "24"
-          cache: npm
-          cache-dependency-path: typescript/package-lock.json
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
-          cache: pip
-
-      - name: Install Poetry
-        uses: snok/install-poetry@v1
-        with:
-          version: 2.0.0
-          virtualenvs-create: true
-          virtualenvs-in-project: true
-
-      - name: Install TypeScript dependencies
-        run: npm ci --ignore-scripts
-
-      - name: Install Python dependencies
-        working-directory: ${{ github.workspace }}
-        run: poetry install --no-root --with=dev
-
-      - name: Verify the shared protocol and generated Python bindings
-        working-directory: ${{ github.workspace }}
-        run: |
-          npm --prefix typescript run check:proto
-          make build_proto
-          git diff --exit-code -- src/tensorlake/function_executor/proto
-
-      - name: Run shared function executor compatibility harness
-        working-directory: ${{ github.workspace }}
-        run: make test_function_executor_compatibility
-
   unit-tests:
     name: Unit tests
     runs-on: ubuntu-latest
@@ -114,9 +49,6 @@ jobs:
 
       - name: Install dependencies
         run: npm ci --ignore-scripts
-
-      - name: Check shared function-executor protocol source
-        run: npm run check:proto
 
       - name: Type check
         run: npm run typecheck
@@ -170,7 +102,7 @@ jobs:
         run: npm run build:sdk
 
       - name: Build native binding (glibc compatibility smoke)
-        run: npm run build:native -- --no-default-features
+        run: npm run build:native
         env:
           TENSORLAKE_NODE_TARGET_ID: linux-x64
           TENSORLAKE_NODE_TARGET_TRIPLE: x86_64-unknown-linux-gnu.2.28
@@ -189,7 +121,7 @@ jobs:
           fi
 
       - name: Build native binding (musl smoke)
-        run: npm run build:native -- --no-default-features
+        run: npm run build:native
         env:
           TENSORLAKE_NODE_TARGET_ID: linux-x64-musl
           TENSORLAKE_NODE_TARGET_TRIPLE: x86_64-unknown-linux-musl
@@ -206,8 +138,8 @@ jobs:
             exit 1
           fi
 
-      - name: Build and verify Function Service runner capsule
-        run: npm run build:runtime
+      - name: Check package compatibility
+        run: npm run check:package
 
       - name: Verify Next.js production builds and standalone runtime
         run: npm run test:nextjs
@@ -217,10 +149,6 @@ jobs:
 
       - name: Verify shared Rust TCP tunnel through the TypeScript SDK
         run: npm run test:native-tunnel
-
-      - name: Verify cloud decoding leaves raw HTTP clients unchanged
-        run: |
-          cargo test --locked -p tensorlake-rust-cloud-sdk-node --no-default-features --lib cloud::tests::
 
       - name: Verify the SDK package excludes local native builds
         run: |
@@ -260,7 +188,7 @@ jobs:
           cache-bin: false
 
       - name: Build native binding
-        run: npm run build:native -- --no-default-features
+        run: npm run build:native
 
       - name: Wait for Python sandbox integration
         if: github.event_name != 'workflow_dispatch'

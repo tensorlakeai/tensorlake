@@ -98,33 +98,6 @@ export type {
 } from "./filesystem-models.js";
 export { Image, dockerfileContent, ImageBuildOperationType } from "./image.js";
 export { sandboxUrlFromIngressEndpoint } from "./url.js";
-export {
-  registerApplication,
-  registerFunction,
-  retries,
-  schema,
-  File,
-  HttpBody,
-  Headers,
-  RequestContext,
-  Future,
-  runLocal,
-  runRemote,
-  remoteOptions,
-} from "./applications/index.js";
-export type {
-  ApplicationCapability,
-  ApplicationOptions,
-  FunctionOptions,
-  SimpleApplicationOptions,
-  SimpleFunctionOptions,
-  RegisteredFunction,
-  Schema,
-  Parameter,
-  HeadersInit,
-  RemoteOptions,
-  TailCall,
-} from "./applications/index.js";
 
 export type {
   PtyDataHandler,
@@ -154,9 +127,6 @@ export {
   PoolNotFoundError,
   PoolInUseError,
   RemoteAPIError,
-  RequestNotFinishedError,
-  RequestFailedError,
-  RequestExecutionError,
 } from "./errors.js";
 
 // Models & enums
@@ -184,27 +154,7 @@ export type {
 } from "./models.js";
 
 export type {
-  BinaryPayload,
   CloudClientOptions,
-  RequestInput,
-  ApplicationSummary,
-  ApplicationManifest,
-  RequestErrorInfo,
-  RequestMetadata,
-  RequestOutput,
-  NewSecret,
-  Secret,
-  SecretsPagination,
-  SecretsList,
-  UpsertSecretResponse,
-  BuildInfo,
-  BuildLogEntry,
-  StartImageBuildRequest,
-  CreateApplicationBuildImageRequest,
-  CreateApplicationBuildRequest,
-  ApplicationBuildContext,
-  ApplicationBuildImageResult,
-  ApplicationBuildResponse,
   SandboxTemplate,
   FileSystem,
 } from "./cloud-models.js";
