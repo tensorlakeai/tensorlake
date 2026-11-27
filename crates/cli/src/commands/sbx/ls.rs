@@ -445,6 +445,15 @@ mod tests {
     }
 
     #[test]
+    fn resume_failed_is_visible_and_is_not_a_suspended_or_terminated_filter_match() {
+        let failed = serde_json::json!({ "status": "resume_failed" });
+        assert!(is_non_terminated_sandbox(&failed));
+        assert!(!is_terminated_sandbox(&failed));
+        assert!(!is_suspended_sandbox(&failed));
+        assert!(!is_running_sandbox(&failed));
+    }
+
+    #[test]
     fn default_filter_hides_terminated_sandboxes() {
         let running = serde_json::json!({ "status": "running" });
         let terminated = serde_json::json!({ "status": "terminated" });

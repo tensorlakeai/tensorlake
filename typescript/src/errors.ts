@@ -31,6 +31,22 @@ export class SandboxError extends SandboxException {
   }
 }
 
+/** A resume failed safely; the sandbox and checkpoint remain available for explicit retry. */
+export class SandboxResumeError extends SandboxError {
+  readonly status = "resume_failed" as const;
+  readonly snapshotId?: string;
+  readonly errorDetails?: unknown;
+
+  constructor(payload: { sandboxId: string; snapshotId?: string | null; errorDetails?: unknown }) {
+    const detail = formatErrorDetails(payload.errorDetails);
+    super(`Sandbox ${payload.sandboxId} resume_failed${detail ? `: ${detail}` : ""}; sandbox and checkpoint retained. Call resume() explicitly to retry.`,
+      { sandboxId: payload.sandboxId, reason: "resume_failed" });
+    this.name = "SandboxResumeError";
+    this.snapshotId = payload.snapshotId ?? undefined;
+    this.errorDetails = payload.errorDetails;
+  }
+}
+
 /** A failed, timed-out, interrupted, or superseded resize, with confirmed allocation. */
 export class SandboxResizeError extends SandboxError {
   declare readonly reason: ResizeErrorReason;

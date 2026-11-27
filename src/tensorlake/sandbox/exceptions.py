@@ -52,6 +52,43 @@ class SandboxError(SandboxException):
         return self._error_sandbox_id
 
 
+class SandboxResumeError(SandboxError):
+    """A resume failed safely; the sandbox and checkpoint remain available.
+
+    Only an explicit ``resume()`` retries this state. Diagnosis is preserved
+    unchanged; it is not a timeout or evidence that the sandbox was deleted.
+    """
+
+    def __init__(
+        self,
+        sandbox_id: str,
+        *,
+        snapshot_id: str | None = None,
+        error_details: object | None = None,
+    ):
+        from .models import SandboxStatus
+
+        self.status = SandboxStatus.RESUME_FAILED
+        self.snapshot_id = snapshot_id
+        self.error_details = error_details
+        detail = _format_error_details(error_details)
+        message = f"Sandbox {sandbox_id} resume_failed"
+        if detail:
+            message += f": {detail}"
+        message += (
+            "; sandbox and checkpoint retained. Call resume() explicitly to retry."
+        )
+        super().__init__(message, reason="resume_failed", sandbox_id=sandbox_id)
+
+    @classmethod
+    def from_info(cls, info: SandboxInfo) -> SandboxResumeError:
+        return cls(
+            info.sandbox_id,
+            snapshot_id=info.snapshot_id,
+            error_details=info.error_details,
+        )
+
+
 class SandboxResizeError(SandboxError):
     """A resize failed or its completion could not be observed.
 

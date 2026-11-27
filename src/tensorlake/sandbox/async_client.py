@@ -47,6 +47,7 @@ from .exceptions import (
     SandboxNotFoundError,
     SandboxNotRoutableError,
     SandboxPending,
+    SandboxResumeError,
 )
 from .models import (
     CLEAR_NETWORK_POLICY,
@@ -509,6 +510,8 @@ class AsyncSandboxClient:
         trace_id: str | None = None,
     ) -> "AsyncSandbox":
         """Turn the last observed sandbox state into a handle or an error."""
+        if observed.status == SandboxStatus.RESUME_FAILED:
+            raise SandboxResumeError.from_info(observed.value)
         status = observed.status
         sandbox_id = observed.sandbox_id
         if status == SandboxStatus.PENDING:
@@ -1059,6 +1062,11 @@ class AsyncSandboxClient:
         timeout: float = 300,
         poll_interval: float = 1.0,
     ) -> Traced[None]:
+        """Resume or explicitly retry ``resume_failed``; see ``SandboxClient.resume``.
+
+        A failed attempt raises ``SandboxResumeError`` with the retained
+        sandbox identity, checkpoint and optional diagnosis.
+        """
         return await self._change_lifecycle(
             sandbox_id,
             "resume",
@@ -1097,7 +1105,12 @@ class AsyncSandboxClient:
                 _raise_as_sandbox_error(e)
             # The request failed or another one superseded it. A concurrent
             # request may still have reached the target.
-            info = await self.get(sandbox_id)
+            try:
+                info = await self.get(sandbox_id)
+            except Exception:
+                _raise_as_sandbox_error(e)
+            if info.value.status == SandboxStatus.RESUME_FAILED:
+                raise SandboxResumeError.from_info(info.value) from None
             if info.value.status == target:
                 return Traced(info.trace_id, None)
             _raise_as_sandbox_error(e)
@@ -1105,6 +1118,8 @@ class AsyncSandboxClient:
             return Traced(trace_id, None)
         while asyncio.get_running_loop().time() < deadline:
             info = (await self.get(sandbox_id)).value
+            if info.status == SandboxStatus.RESUME_FAILED:
+                raise SandboxResumeError.from_info(info)
             if info.status == target:
                 return Traced(trace_id, None)
             if info.status == SandboxStatus.TERMINATED:
@@ -1392,6 +1407,8 @@ class AsyncSandboxClient:
             info = await self.get(sandbox_identifier)
             routing_info = info.value
             cached_info = info.value
+            if info.status == SandboxStatus.RESUME_FAILED:
+                raise SandboxResumeError.from_info(info)
             if info.status == SandboxStatus.PENDING:
                 # The sandbox is queued for capacity. Wait for it here rather
                 # than failing: readiness is a property of the sandbox, not
@@ -1410,6 +1427,8 @@ class AsyncSandboxClient:
                         pending_reason=observed.pending_reason,
                         timeout=budget,
                     )
+                if observed.status == SandboxStatus.RESUME_FAILED:
+                    raise SandboxResumeError.from_info(observed.value)
                 if observed.status in (SandboxStatus.TERMINATED, SandboxStatus.FAILED):
                     raise _startup_failure(
                         observed.sandbox_id,

@@ -48,6 +48,8 @@ struct SandboxFailureDetails {
 struct SandboxStatusResponse {
     status: String,
     #[serde(default)]
+    snapshot_id: Option<String>,
+    #[serde(default)]
     pending_reason: Option<String>,
     #[serde(flatten)]
     failure: SandboxFailureDetails,
@@ -258,6 +260,22 @@ pub async fn wait_for_sandbox_status_every(
                     s.finish_and_clear();
                 }
                 return Ok(current_status);
+            }
+
+            if current_status == "resume_failed" {
+                if let Some(ref s) = spinner {
+                    s.finish_and_clear();
+                }
+                let detail = info
+                    .failure
+                    .error_details
+                    .as_ref()
+                    .and_then(error_details_message)
+                    .unwrap_or_default();
+                return Err(CliError::Other(anyhow::anyhow!(
+                    "Sandbox {sandbox_id} resume_failed: {detail}; checkpoint {} retained. Retry explicitly with tl sbx resume {sandbox_id}",
+                    info.snapshot_id.as_deref().unwrap_or("(not reported)")
+                )));
             }
 
             if current_status == "terminated" && target_status != "terminated" {

@@ -25,6 +25,7 @@ from .exceptions import (
     SandboxNotFoundError,
     SandboxNotRoutableError,
     SandboxPending,
+    SandboxResumeError,
 )
 from .models import (
     AsyncPendingSandbox,
@@ -242,6 +243,8 @@ class AsyncSandbox:
                 info.sandbox_url is not None or self._explicit_proxy_url is not None
             ):
                 return info
+            if info.status == SandboxStatus.RESUME_FAILED:
+                raise SandboxResumeError.from_info(info)
             if info.status == SandboxStatus.TERMINATED:
                 raise SandboxError(
                     f"Sandbox {identifier!r} terminated while refreshing proxy routing",
@@ -576,7 +579,10 @@ class AsyncSandbox:
                 # the existence check that routes a free name to the create
                 # step below. Otherwise connect already cached the info, so
                 # this adds no request.
-                status = (await sandbox.info()).status
+                info = await sandbox.info()
+                if info.status == SandboxStatus.RESUME_FAILED:
+                    raise SandboxResumeError.from_info(info)
+                status = info.status
             except SandboxNotFoundError:
                 try:
                     created = await cls.create(

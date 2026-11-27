@@ -15,6 +15,7 @@ from .exceptions import (
     SandboxNotRoutableError,
     SandboxPending,
     SandboxResizeError,
+    SandboxResumeError,
 )
 from .file_system import (
     create_file_system,
@@ -186,6 +187,7 @@ __all__ = [
     # Exceptions
     "SandboxException",
     "SandboxError",
+    "SandboxResumeError",
     "SandboxConnectionError",
     "SandboxNotFoundError",
     "SandboxNotRoutableError",

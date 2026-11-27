@@ -608,3 +608,67 @@ async fn wait_resize_zero_timeout_observes_an_already_completed_resize() {
     assert_eq!(run.requests.len(), 1);
     assert!(request_line(&run.requests[0]).starts_with("GET "));
 }
+
+#[tokio::test]
+async fn wait_resume_failed_reports_checkpoint_without_resuming_or_deleting() {
+    let run = run_cli(
+        &["wait", "sbx-1", "--timeout", "120"],
+        vec![(
+            200,
+            info(
+                "resume_failed",
+                json!({
+                    "snapshot_id": "snap-retained", "error_details": {"message": "restore failed"}
+                }),
+            ),
+        )],
+    )
+    .await;
+    assert!(!run.output.status.success());
+    let stderr = String::from_utf8_lossy(&run.output.stderr);
+    for expected in [
+        "resume_failed",
+        "restore failed",
+        "snap-retained",
+        "tl sbx resume sbx-1",
+    ] {
+        assert!(stderr.contains(expected), "{stderr}");
+    }
+    assert_eq!(run.requests.len(), 1);
+    assert!(request_line(&run.requests[0]).starts_with("GET"));
+}
+
+#[tokio::test]
+async fn explicit_resume_wait_reports_recoverable_failure_and_retry_can_run() {
+    for status in ["resume_failed", "running"] {
+        let run = run_cli(
+            &["resume", "sbx-1"],
+            vec![
+                (202, Value::Null),
+                (200, info(status, json!({"snapshot_id":"snap-retained"}))),
+            ],
+        )
+        .await;
+        assert_eq!(
+            run.output.status.success(),
+            status == "running",
+            "{}",
+            String::from_utf8_lossy(&run.output.stderr)
+        );
+        assert_eq!(run.requests.len(), 2);
+        assert!(request_line(&run.requests[0]).contains("/sbx-1/resume"));
+        assert!(request_line(&run.requests[1]).starts_with("GET"));
+    }
+}
+
+#[tokio::test]
+async fn explicit_resume_no_wait_only_submits_one_request() {
+    let run = run_cli(&["resume", "sbx-1", "--no-wait"], vec![(202, Value::Null)]).await;
+    assert!(
+        run.output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.output.stderr)
+    );
+    assert_eq!(run.requests.len(), 1);
+    assert!(request_line(&run.requests[0]).contains("/sbx-1/resume"));
+}
